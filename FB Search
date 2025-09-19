@@ -1,0 +1,321 @@
+import os
+import logging
+import time
+from fastapi import FastAPI, Query, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from meta_client import fetch_ads
+from models import AdSearchQuery, AdsResponse
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("adlib")
+
+app = FastAPI(title="Meta Ad Library Search")
+
+# CORS for VS Code REST Client
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/ads", response_model=AdsResponse)
+async def search_ads(
+    industry: str = Query(..., min_length=2, description="Industry keyword"),
+    country: str = Query("GB", min_length=2, max_length=2, regex="^[A-Z]{2}$", description="2-letter country code"),
+    limit: int = Query(50, ge=1, le=100, description="Max ads to return"),
+    request: Request = None
+):
+    if not os.environ.get("META_ADLIB_TOKEN"):
+        return JSONResponse(status_code=500, content={"error": "META_ADLIB_TOKEN not set"})
+
+    query = AdSearchQuery(industry=industry, country=country, limit=limit)
+    try:
+        t0 = time.time()
+        ads, page_count = await fetch_ads(query, logger=logger)
+        t1 = time.time()
+        logger.info(
+            f"Search industry='{industry}' country='{country}' pages={page_count} duration={int((t1-t0)*1000)}ms"
+        )
+        ads = ads[:limit]
+        return AdsResponse(query=query.dict(), count=len(ads), results=ads)
+    except HTTPException as exc:
+        raise exc
+    except Exception as exc:
+        logger.exception("Unexpected error")
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail} if isinstance(exc.detail, str) else exc.detail,
+    )
+
+import os
+import asyncio
+import httpx
+import logging
+from typing import List, Tuple
+from fastapi import HTTPException, status
+from models import AdSearchQuery, AdOut
+from collections import deque
+import random
+import time
+
+META_URL = "https://graph.facebook.com/v23.0/ads_archive"
+TOKEN_ENV = "META_ADLIB_TOKEN"
+FIELDS = [
+    "ad_creation_time",
+    "ad_delivery_start_time",
+    "ad_delivery_stop_time",
+    "ad_snapshot_url",
+    "page_id",
+    "page_name",
+    "ad_creative_bodies",
+    "ad_creative_link_titles",
+    "ad_creative_link_descriptions",
+    "publisher_platforms",
+]
+
+# In-memory rate limiter (max 5 req/s)
+class RateLimiter:
+    def __init__(self, rate: int, per: float):
+        self.rate = rate
+        self.per = per
+        self.calls = deque()
+
+    async def acquire(self):
+        now = time.monotonic()
+        while len(self.calls) >= self.rate:
+            oldest = self.calls[0]
+            wait = oldest + self.per - now
+            if wait > 0:
+                jitter = random.uniform(0.05, 0.15)
+                await asyncio.sleep(wait + jitter)
+            else:
+                self.calls.popleft()
+        self.calls.append(time.monotonic())
+
+
+limiter = RateLimiter(5, 1.0)
+
+
+def mask_token(token: str) -> str:
+    if not token or len(token) < 8:
+        return "***"
+    return f"{token[:2]}***{token[-2:]}"
+
+
+async def fetch_ads(query: AdSearchQuery, logger: logging.Logger) -> Tuple[List[AdOut], int]:
+    token = os.environ.get(TOKEN_ENV)
+    if not token:
+        raise HTTPException(status_code=500, detail="META_ADLIB_TOKEN not set")
+
+    params = {
+        "search_terms": query.industry,
+        "ad_active_status": "ALL",
+        "ad_reached_countries": query.country,
+        "fields": ",".join(FIELDS),
+        "limit": min(100, query.limit),
+        "access_token": token,
+    }
+
+    ads: List[AdOut] = []
+    next_url = META_URL
+    page_count = 0
+    timeout = httpx.Timeout(30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        while next_url and len(ads) < query.limit:
+            await limiter.acquire()
+            t0 = time.time()
+            try:
+                resp = await client.get(next_url, params=params if next_url == META_URL else None)
+            except httpx.RequestError as e:
+                if isinstance(e, httpx.TimeoutException):
+                    raise HTTPException(status_code=504, detail="Upstream Meta timeout")
+                raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
+            duration = int((time.time() - t0) * 1000)
+            logger.info(
+                f"[meta] industry='{query.industry}' country='{query.country}' page={page_count+1} duration={duration}ms token={mask_token(token)}"
+            )
+            if resp.status_code != 200:
+                try:
+                    err = resp.json()
+                except Exception:
+                    err = {"code": resp.status_code, "message": resp.text}
+                raise HTTPException(status_code=502, detail=err)
+
+            data = resp.json()
+            records = data.get("data", [])
+            for rec in records:
+                ads.append(normalise_ad(rec))
+                if len(ads) >= query.limit:
+                    break
+            page_count += 1
+            next_url = data.get("paging", {}).get("next")
+            params = None  # params only for first request
+            if next_url and len(ads) < query.limit:
+                await asyncio.sleep(0.15)
+
+    # Truncate to limit in case Meta over-returns
+    ads = ads[: query.limit]
+    # Sort by last_seen desc, then first_seen desc
+    ads.sort(key=lambda ad: (ad.last_seen or "", ad.first_seen or ""), reverse=True)
+    return ads, page_count
+
+
+def normalise_ad(rec: dict) -> AdOut:
+    def first(lst):
+        return lst[0] if isinstance(lst, list) and lst else None
+
+    ad_delivery_stop_time = rec.get("ad_delivery_stop_time")
+    ad_creation_time = rec.get("ad_creation_time")
+    last_seen = ad_delivery_stop_time or ad_creation_time
+
+    status = None
+    if ad_delivery_stop_time is None:
+        status = "active"
+    elif ad_delivery_stop_time:
+        status = "inactive"
+
+    return AdOut(
+        source="meta",
+        advertiser=rec.get("page_name"),
+        title=first(rec.get("ad_creative_link_titles")),
+        body=first(rec.get("ad_creative_bodies")),
+        creative_url=rec.get("ad_snapshot_url"),
+        first_seen=rec.get("ad_delivery_start_time"),
+        last_seen=last_seen,
+        status=status,
+        platforms=rec.get("publisher_platforms"),
+        snapshot_url=rec.get("ad_snapshot_url"),
+    )
+
+from typing import Optional, List, Literal, Dict, Any
+from pydantic import BaseModel, Field, validator
+
+
+class AdSearchQuery(BaseModel):
+    industry: str = Field(..., min_length=2)
+    country: str = Field("GB", min_length=2, max_length=2, regex="^[A-Z]{2}$")
+    limit: int = Field(50, ge=1, le=100)
+
+    @validator("country")
+    def country_upper(cls, v):
+        return v.upper()
+
+
+class AdOut(BaseModel):
+    source: Literal["meta"]
+    advertiser: Optional[str]
+    title: Optional[str]
+    body: Optional[str]
+    creative_url: Optional[str]
+    first_seen: Optional[str]
+    last_seen: Optional[str]
+    status: Optional[Literal["active", "inactive"]]
+    platforms: Optional[List[str]]
+    snapshot_url: Optional[str]
+
+
+class AdsResponse(BaseModel):
+    query: Dict[str, Any]
+    count: int
+    results: List[AdOut]
+
+import os
+import pytest
+from fastapi.testclient import TestClient
+from app import app
+
+client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def set_token(monkeypatch):
+    monkeypatch.setenv("META_ADLIB_TOKEN", "testtoken")
+
+
+def test_missing_token(monkeypatch):
+    monkeypatch.delenv("META_ADLIB_TOKEN", raising=False)
+    resp = client.get("/ads?industry=food")
+    assert resp.status_code == 500
+    assert resp.json()["error"] == "META_ADLIB_TOKEN not set"
+
+
+def test_short_industry():
+    resp = client.get("/ads?industry=A")
+    assert resp.status_code == 422
+
+
+def test_invalid_country():
+    resp = client.get("/ads?industry=food&country=GBR")
+    assert resp.status_code == 422
+    resp = client.get("/ads?industry=food&country=1")
+    assert resp.status_code == 422
+    resp = client.get("/ads?industry=food&country=us")
+    # country is uppercased, so "us" becomes "US" and is valid
+    assert resp.status_code == 200
+
+
+def test_limit_bounds():
+    resp = client.get("/ads?industry=food&limit=150")
+    assert resp.status_code == 422
+    resp = client.get("/ads?industry=food&limit=0")
+    assert resp.status_code == 422
+
+
+def test_empty_data(monkeypatch):
+    async def fake_fetch_ads(query, logger):
+        return [], 1
+
+    monkeypatch.setattr("meta_client.fetch_ads", fake_fetch_ads)
+    resp = client.get("/ads?industry=food")
+    assert resp.status_code == 200
+    j = resp.json()
+    assert j["count"] == 0
+    assert j["results"] == []
+    assert "query" in j
+
+
+def test_upstream_error(monkeypatch):
+    from fastapi import HTTPException
+
+    async def fake_fetch_ads(query, logger):
+        raise HTTPException(status_code=502, detail={"code": 400, "message": "Bad request"})
+
+    monkeypatch.setattr("meta_client.fetch_ads", fake_fetch_ads)
+    resp = client.get("/ads?industry=food")
+    assert resp.status_code == 502
+    assert resp.json()["error"] == {"code": 400, "message": "Bad request"}
+
+
+def test_timeout(monkeypatch):
+    from fastapi import HTTPException
+
+    async def fake_fetch_ads(query, logger):
+        raise HTTPException(status_code=504, detail="Upstream Meta timeout")
+
+    monkeypatch.setattr("meta_client.fetch_ads", fake_fetch_ads)
+    resp = client.get("/ads?industry=food")
+    assert resp.status_code == 504
+    assert resp.json()["error"] == "Upstream Meta timeout"
+
+### Example: Search for "food" in GB
+GET http://localhost:8000/ads?industry=food
+Accept: application/json
+
+### Example: Search for "sports" in US, limit 10
+GET http://localhost:8000/ads?industry=sports&country=US&limit=10
+Accept: application/json
+
+fastapi==0.110.0
+uvicorn==0.29.0
+httpx==0.27.0
+pydantic==1.10.13
+pytest==8.2.1
