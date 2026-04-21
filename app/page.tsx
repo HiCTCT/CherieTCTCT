@@ -3,24 +3,16 @@ import { db } from '@/lib/db';
 
 type PageProps = {
   searchParams?: {
-    minScore?: string;
     competitor?: string;
   };
 };
 
 export default async function Page({ searchParams }: PageProps) {
-  const rawMinScore = searchParams?.minScore ?? '';
   const rawCompetitor = searchParams?.competitor ?? '';
-
-  const parsedMinScore = Number(rawMinScore);
-  const minScore =
-    rawMinScore !== '' && !Number.isNaN(parsedMinScore) ? parsedMinScore : undefined;
-
   const competitorFilter = rawCompetitor.trim();
 
   const adWhere = {
     qualified: true,
-    ...(minScore !== undefined ? { score: { gte: minScore } } : {}),
     ...(competitorFilter
       ? {
           competitor: {
@@ -53,45 +45,23 @@ export default async function Page({ searchParams }: PageProps) {
       </p>
 
       <form method="GET" className="card">
-        <div style={{ marginBottom: '12px' }}>
-          <label htmlFor="minScore">
-            <strong>Minimum score</strong>
-          </label>
-          <div style={{ marginTop: '8px' }}>
-            <input
-              id="minScore"
-              name="minScore"
-              type="number"
-              min="0"
-              max="10"
-              step="0.1"
-              defaultValue={rawMinScore}
-              placeholder="e.g. 8"
-              style={{ padding: '8px', marginRight: '8px' }}
-            />
-          </div>
+        <label htmlFor="competitor">
+          <strong>Competitor name</strong>
+        </label>
+        <div style={{ marginTop: '12px' }}>
+          <input
+            id="competitor"
+            name="competitor"
+            type="text"
+            defaultValue={rawCompetitor}
+            placeholder="e.g. Seed Competitor"
+            style={{ padding: '8px', marginRight: '8px', minWidth: '260px' }}
+          />
+          <button type="submit" style={{ padding: '8px 12px', marginRight: '8px' }}>
+            Apply
+          </button>
+          <Link href="/">Clear</Link>
         </div>
-
-        <div style={{ marginBottom: '12px' }}>
-          <label htmlFor="competitor">
-            <strong>Competitor name</strong>
-          </label>
-          <div style={{ marginTop: '8px' }}>
-            <input
-              id="competitor"
-              name="competitor"
-              type="text"
-              defaultValue={rawCompetitor}
-              placeholder="e.g. Seed Competitor"
-              style={{ padding: '8px', marginRight: '8px', minWidth: '260px' }}
-            />
-          </div>
-        </div>
-
-        <button type="submit" style={{ padding: '8px 12px', marginRight: '8px' }}>
-          Apply
-        </button>
-        <Link href="/">Clear</Link>
       </form>
 
       <div className="card">Industries: {industryCount}</div>
