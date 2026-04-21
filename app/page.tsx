@@ -4,18 +4,32 @@ import { db } from '@/lib/db';
 type PageProps = {
   searchParams?: {
     minScore?: string;
+    competitor?: string;
   };
 };
 
 export default async function Page({ searchParams }: PageProps) {
   const rawMinScore = searchParams?.minScore ?? '';
+  const rawCompetitor = searchParams?.competitor ?? '';
+
   const parsedMinScore = Number(rawMinScore);
   const minScore =
     rawMinScore !== '' && !Number.isNaN(parsedMinScore) ? parsedMinScore : undefined;
 
+  const competitorFilter = rawCompetitor.trim();
+
   const adWhere = {
     qualified: true,
     ...(minScore !== undefined ? { score: { gte: minScore } } : {}),
+    ...(competitorFilter
+      ? {
+          competitor: {
+            name: {
+              contains: competitorFilter,
+            },
+          },
+        }
+      : {}),
   };
 
   const [industryCount, clientCount, adCount, latestAds] = await Promise.all([
@@ -39,26 +53,45 @@ export default async function Page({ searchParams }: PageProps) {
       </p>
 
       <form method="GET" className="card">
-        <label htmlFor="minScore">
-          <strong>Minimum score</strong>
-        </label>
-        <div style={{ marginTop: '12px' }}>
-          <input
-            id="minScore"
-            name="minScore"
-            type="number"
-            min="0"
-            max="10"
-            step="0.1"
-            defaultValue={rawMinScore}
-            placeholder="e.g. 8"
-            style={{ padding: '8px', marginRight: '8px' }}
-          />
-          <button type="submit" style={{ padding: '8px 12px', marginRight: '8px' }}>
-            Apply
-          </button>
-          <Link href="/">Clear</Link>
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="minScore">
+            <strong>Minimum score</strong>
+          </label>
+          <div style={{ marginTop: '8px' }}>
+            <input
+              id="minScore"
+              name="minScore"
+              type="number"
+              min="0"
+              max="10"
+              step="0.1"
+              defaultValue={rawMinScore}
+              placeholder="e.g. 8"
+              style={{ padding: '8px', marginRight: '8px' }}
+            />
+          </div>
         </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="competitor">
+            <strong>Competitor name</strong>
+          </label>
+          <div style={{ marginTop: '8px' }}>
+            <input
+              id="competitor"
+              name="competitor"
+              type="text"
+              defaultValue={rawCompetitor}
+              placeholder="e.g. Seed Competitor"
+              style={{ padding: '8px', marginRight: '8px', minWidth: '260px' }}
+            />
+          </div>
+        </div>
+
+        <button type="submit" style={{ padding: '8px 12px', marginRight: '8px' }}>
+          Apply
+        </button>
+        <Link href="/">Clear</Link>
       </form>
 
       <div className="card">Industries: {industryCount}</div>
@@ -68,7 +101,7 @@ export default async function Page({ searchParams }: PageProps) {
       <h2>Latest qualified ads</h2>
       {latestAds.length === 0 ? (
         <div className="card">
-          <p>No qualified ads found for this minimum score.</p>
+          <p>No qualified ads found for this filter.</p>
         </div>
       ) : (
         latestAds.map((ad) => (
