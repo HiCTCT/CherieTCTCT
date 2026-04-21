@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Industry {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  slug        String       @unique
+  clients     Client[]
+  competitors Competitor[]
+  ads         Ad[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Client {
+  id           String       @id @default(cuid())
+  name         String       @unique
+  industryId   String
+  industry     Industry     @relation(fields: [industryId], references: [id])
+  whatTheySell String?
+  competitors  Competitor[]
+  ads          Ad[]
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
+
+model Competitor {
+  id              String       @id @default(cuid())
+  name            String
+  clientId        String
+  client          Client       @relation(fields: [clientId], references: [id])
+  industryId      String
+  industry        Industry     @relation(fields: [industryId], references: [id])
+  status          String       @default("APPROVED")
+  discoverySource String       @default("seed")
+  ads             Ad[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@unique([name, clientId])
+}
+
+model Ad {
+  id               String      @id @default(cuid())
+  clientId         String
+  client           Client      @relation(fields: [clientId], references: [id])
+  industryId       String
+  industry         Industry    @relation(fields: [industryId], references: [id])
+  competitorId     String
+  competitor       Competitor  @relation(fields: [competitorId], references: [id])
+  productOrService String?
+  adFormat         String
+  adLink           String
+  activeSince      DateTime?
+  primaryCopy      String?
+  headline         String?
+  description      String?
+  score            Float
+  qualified        Boolean     @default(false)
+  analysis         AdAnalysis?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@index([qualified, score])
+}
+
+model AdAnalysis {
+  id                  String   @id @default(cuid())
+  adId                String   @unique
+  ad                  Ad       @relation(fields: [adId], references: [id])
+  creativeAnalysis    String
+  copyAnalysis        String
+  headlineAnalysis    String
+  descriptionAnalysis String
+  strengthsJson       String
+  weaknessesJson      String
+  improvementsJson    String
+  rubricScoresJson    String
+  overallScore        Float
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
