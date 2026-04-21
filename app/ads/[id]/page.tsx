@@ -2,6 +2,16 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { db } from '@/lib/db';
 
+function parseJsonArray(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export default async function AdDetailPage({
   params,
 }: {
@@ -20,6 +30,10 @@ export default async function AdDetailPage({
   if (!ad || !ad.qualified) {
     notFound();
   }
+
+  const improvements = parseJsonArray(ad.analysis?.improvementsJson);
+  const strengths = parseJsonArray(ad.analysis?.strengthsJson);
+  const weaknesses = parseJsonArray(ad.analysis?.weaknessesJson);
 
   return (
     <section>
@@ -83,6 +97,45 @@ export default async function AdDetailPage({
       <div className="card">
         <h2>Description Analysis</h2>
         <p>{ad.analysis?.descriptionAnalysis ?? 'No description analysis available.'}</p>
+      </div>
+
+      <div className="card">
+        <h2>Strengths</h2>
+        {strengths.length === 0 ? (
+          <p>No strengths available.</p>
+        ) : (
+          <ul>
+            {strengths.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="card">
+        <h2>Weaknesses</h2>
+        {weaknesses.length === 0 ? (
+          <p>No weaknesses available.</p>
+        ) : (
+          <ul>
+            {weaknesses.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="card">
+        <h2>Improvements</h2>
+        {improvements.length === 0 ? (
+          <p>No improvements available.</p>
+        ) : (
+          <ul>
+            {improvements.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        )}
       </div>
     </section>
   );
