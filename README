@@ -19,3 +19,4 @@ npm run db:migrate
 npm run db:seed
 npm run verify:runtime
 npm run dev
+```
