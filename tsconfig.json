@@ -11,10 +11,9 @@
     "jsx": "preserve",
     "types": ["node"],
     "plugins": [{ "name": "next" }],
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
-    },
+  "@/*": ["./*"]
+},
     "allowJs": true,
     "skipLibCheck": true,
     "incremental": true,
