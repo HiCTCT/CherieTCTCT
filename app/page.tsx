@@ -17,6 +17,11 @@ export default async function Page() {
   return (
     <section>
       <h1>Meta Competitor Ad Library</h1>
+
+      <p>
+        <Link href="/industries">View industries</Link>
+      </p>
+
       <div className="card">Industries: {industryCount}</div>
       <div className="card">Clients: {clientCount}</div>
       <div className="card">Qualified ads: {adCount}</div>
