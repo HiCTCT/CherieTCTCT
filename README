@@ -1,0 +1,34 @@
+# Meta Competitor Ad Library
+
+## Beginner local mode (SQLite)
+
+You can run this app without Docker or PostgreSQL.
+
+## Minimum install
+
+1. Node.js 20+
+2. npm
+
+## Copy/paste commands in order
+
+```bash
+cp .env.example .env
+npm install
+npm run db:generate
+npm run db:migrate
+npm run db:seed
+npm run verify:runtime
+npm run dev
+
+Then open:
+
+http://localhost:3000
+
+What works
+Dashboard page with real seeded data
+Ad detail page with a real saved analysed ad
+Runtime verification script
+Production note
+
+SQLite is for local verification.
+PostgreSQL template remains at prisma/schema.postgres.prisma.
