@@ -20,3 +20,17 @@ npm run db:seed
 npm run verify:runtime
 npm run dev
 ```
+Then open:
+
+`http://localhost:3000`
+
+## What works
+
+- Dashboard page with real seeded data
+- Ad detail page with a real saved analysed ad
+- Runtime verification script
+
+## Production note
+
+SQLite is for local verification.  
+PostgreSQL template remains at `prisma/schema.postgres.prisma`.
