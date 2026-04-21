@@ -5,6 +5,8 @@ type PageProps = {
   searchParams?: {
     competitor?: string;
     industry?: string;
+    product?: string;
+    keyword?: string;
   };
 };
 
@@ -17,9 +19,13 @@ function truncateText(value: string | null | undefined, maxLength = 140): string
 export default async function Page({ searchParams }: PageProps) {
   const rawCompetitor = searchParams?.competitor ?? '';
   const rawIndustry = searchParams?.industry ?? '';
+  const rawProduct = searchParams?.product ?? '';
+  const rawKeyword = searchParams?.keyword ?? '';
 
   const competitorFilter = rawCompetitor.trim();
   const industryFilter = rawIndustry.trim();
+  const productFilter = rawProduct.trim();
+  const keywordFilter = rawKeyword.trim();
 
   const adWhere = {
     qualified: true,
@@ -37,6 +43,34 @@ export default async function Page({ searchParams }: PageProps) {
           industry: {
             slug: industryFilter,
           },
+        }
+      : {}),
+    ...(productFilter
+      ? {
+          productOrService: {
+            contains: productFilter,
+          },
+        }
+      : {}),
+    ...(keywordFilter
+      ? {
+          OR: [
+            {
+              primaryCopy: {
+                contains: keywordFilter,
+              },
+            },
+            {
+              headline: {
+                contains: keywordFilter,
+              },
+            },
+            {
+              description: {
+                contains: keywordFilter,
+              },
+            },
+          ],
         }
       : {}),
   };
@@ -103,6 +137,38 @@ export default async function Page({ searchParams }: PageProps) {
                 </option>
               ))}
             </select>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="product">
+            <strong>Product or service</strong>
+          </label>
+          <div style={{ marginTop: '8px' }}>
+            <input
+              id="product"
+              name="product"
+              type="text"
+              defaultValue={rawProduct}
+              placeholder="e.g. Hydrafacial"
+              style={{ padding: '8px', marginRight: '8px', minWidth: '260px' }}
+            />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="keyword">
+            <strong>Copy keyword</strong>
+          </label>
+          <div style={{ marginTop: '8px' }}>
+            <input
+              id="keyword"
+              name="keyword"
+              type="text"
+              defaultValue={rawKeyword}
+              placeholder="e.g. free trial"
+              style={{ padding: '8px', marginRight: '8px', minWidth: '260px' }}
+            />
           </div>
         </div>
 
