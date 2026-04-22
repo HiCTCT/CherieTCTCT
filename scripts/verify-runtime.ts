@@ -2,54 +2,44 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
-function pass(label: string, details?: unknown): void {
+function ok(label: string, details?: unknown) {
   console.log(`✅ PASS: ${label}`);
-  if (details !== undefined) {
-    console.log(JSON.stringify(details, null, 2));
-  }
+  if (details) console.log(JSON.stringify(details, null, 2));
 }
 
-function fail(label: string, details?: unknown): void {
+function no(label: string, details?: unknown) {
   console.log(`❌ FAIL: ${label}`);
-  if (details !== undefined) {
-    console.log(JSON.stringify(details, null, 2));
-  }
+  if (details) console.log(JSON.stringify(details, null, 2));
 }
 
-async function run(): Promise<void> {
-  let failures = 0;
+async function run() {
+  let fails = 0;
 
   const counts = {
     industries: await prisma.industry.count(),
     clients: await prisma.client.count(),
     competitors: await prisma.competitor.count(),
     ads: await prisma.ad.count(),
-    ad_analysis: await prisma.adAnalysis.count()
+    ad_analysis: await prisma.adAnalysis.count(),
   };
 
-  for (const [name, value] of Object.entries(counts)) {
-    if (value > 0) {
-      pass(`${name} inserted (${value})`);
-    } else {
-      fail(`${name} missing`);
-      failures += 1;
+  for (const [k, v] of Object.entries(counts)) {
+    if (v > 0) ok(`${k} inserted (${v})`);
+    else {
+      no(`${k} missing`);
+      fails += 1;
     }
   }
 
   const chain = await prisma.ad.findFirst({
     where: { qualified: true },
-    include: {
-      industry: true,
-      client: true,
-      competitor: true,
-      analysis: true
-    },
-    orderBy: { createdAt: 'asc' }
+    include: { industry: true, client: true, competitor: true, analysis: true },
+    orderBy: { createdAt: 'asc' },
   });
 
   if (!chain || !chain.analysis) {
-    fail('No qualified ad with analysis found');
-    failures += 1;
+    no('No qualified ad with analysis found');
+    fails += 1;
   } else {
     const relationOk =
       chain.client.industryId === chain.industry.id &&
@@ -58,7 +48,7 @@ async function run(): Promise<void> {
       chain.analysis.adId === chain.id;
 
     if (relationOk) {
-      pass('Relations are correct');
+      ok('Relations are correct');
       console.log('\nExample record chain:');
       console.log(
         JSON.stringify(
@@ -66,88 +56,90 @@ async function run(): Promise<void> {
             industry: { id: chain.industry.id, name: chain.industry.name },
             client: { id: chain.client.id, name: chain.client.name },
             competitor: { id: chain.competitor.id, name: chain.competitor.name },
-            ad: {
-              id: chain.id,
-              adLink: chain.adLink,
-              score: chain.score,
-              qualified: chain.qualified
-            },
+            ad: { id: chain.id, adLink: chain.adLink, score: chain.score, qualified: chain.qualified },
             ad_analysis: {
               id: chain.analysis.id,
-              overallScore: chain.analysis.overallScore
-            }
+              overallScore: chain.analysis.overallScore,
+              funnelStage: chain.analysis.funnelStage ?? "N/A",
+              raceStage: chain.analysis.raceStage ?? "N/A",
+            },
           },
           null,
-          2
-        )
+          2,
+        ),
       );
     } else {
-      fail('Relation chain incorrect');
-      failures += 1;
+      no('Relation chain incorrect');
+      fails += 1;
     }
   }
 
-  const belowThresholdQualified = await prisma.ad.count({
+  const below = await prisma.ad.count({ where: { qualified: true, score: { lt: 7 } } });
+  if (below === 0) ok('No qualified ads below 7.0 were saved');
+  else {
+    no('Found qualified ads below 7.0', { count: below });
+    fails += 1;
+  }
+
+  const missingStructuredAnalysis = await prisma.adAnalysis.count({
     where: {
-      qualified: true,
-      score: { lt: 7 }
-    }
+      OR: [{ funnelStage: '' }, { raceStage: '' }, { aidaJson: '' }, { rubricScoresJson: '' }],
+    },
   });
 
-  if (belowThresholdQualified === 0) {
-    pass('No qualified ads below 7.0 were saved');
+  if (missingStructuredAnalysis === 0) {
+    ok('Structured analysis fields are populated');
   } else {
-    fail('Found qualified ads below 7.0', { count: belowThresholdQualified });
-    failures += 1;
+    no('Structured analysis fields missing for one or more rows', { count: missingStructuredAnalysis });
+    fails += 1;
   }
 
   const dashboardLatest = await prisma.ad.findMany({
     where: { qualified: true },
-    orderBy: { activeSince: 'desc' },
+    orderBy: { score: 'desc' },
     take: 5,
-    include: { competitor: true, industry: true }
+    include: { competitor: true, industry: true, analysis: true },
   });
-
   if (dashboardLatest.length > 0) {
-    pass(
+    ok(
       'Dashboard proof (latest seeded qualified ads)',
       dashboardLatest.map((ad) => ({
         id: ad.id,
         competitor: ad.competitor.name,
         industry: ad.industry.name,
-        score: ad.score
-      }))
+        score: ad.score,
+        funnelStage: ad.analysis?.funnelStage ?? "N/A",
+      })),
     );
   } else {
-    fail('Dashboard proof failed (no qualified ads)');
-    failures += 1;
+    no('Dashboard proof failed (no qualified ads)');
+    fails += 1;
   }
 
   if (dashboardLatest.length > 0) {
     const detail = await prisma.ad.findUnique({
       where: { id: dashboardLatest[0].id },
-      include: { analysis: true, competitor: true }
+      include: { analysis: true, competitor: true },
     });
-
     if (detail?.analysis) {
-      pass('Ad detail proof (real analysed saved ad)', {
+      ok('Ad detail proof (real analysed saved ad)', {
         adId: detail.id,
         competitor: detail.competitor.name,
         score: detail.score,
         analysisId: detail.analysis.id,
-        creativeAnalysis: detail.analysis.creativeAnalysis
+        creativeAnalysis: detail.analysis.creativeAnalysis,
       });
     } else {
-      fail('Ad detail proof failed (analysis missing)');
-      failures += 1;
+      no('Ad detail proof failed (analysis missing)');
+      fails += 1;
     }
   }
 
   console.log('\nFinal inserted counts:');
   console.log(JSON.stringify(counts, null, 2));
 
-  if (failures > 0) {
-    console.log(`\n❌ Runtime verification failed with ${failures} failing checks.`);
+  if (fails > 0) {
+    console.log(`\n❌ Runtime verification failed with ${fails} failing checks.`);
     process.exit(1);
   }
 
