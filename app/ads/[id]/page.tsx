@@ -2,38 +2,38 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { db } from '@/lib/db';
 
-function parseJsonArray(value: string | null | undefined): string[] {
-  if (!value) return [];
+function parseJsonArray(raw: string): string[] {
   try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-export default async function AdDetailPage({
-  params,
-}: {
-  params: { id: string };
-}) {
+function parseJsonObject(raw: string): Record<string, number> {
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export default async function AdDetailPage({ params }: { params: { id: string } }) {
   const ad = await db.ad.findUnique({
     where: { id: params.id },
-    include: {
-      industry: true,
-      client: true,
-      competitor: true,
-      analysis: true,
-    },
+    include: { industry: true, client: true, competitor: true, analysis: true },
   });
 
-  if (!ad || !ad.qualified) {
+  if (!ad || !ad.qualified || !ad.analysis) {
     notFound();
   }
 
-  const improvements = parseJsonArray(ad.analysis?.improvementsJson);
-  const strengths = parseJsonArray(ad.analysis?.strengthsJson);
-  const weaknesses = parseJsonArray(ad.analysis?.weaknessesJson);
+  const strengths = parseJsonArray(ad.analysis.strengthsJson);
+  const weaknesses = parseJsonArray(ad.analysis.weaknessesJson);
+  const improvements = parseJsonArray(ad.analysis.improvementsJson);
+  const rubric = parseJsonObject(ad.analysis.rubricScoresJson);
 
   return (
     <section>
@@ -57,10 +57,19 @@ export default async function AdDetailPage({
           <strong>Competitor:</strong> {ad.competitor.name}
         </p>
         <p>
+          <strong>Format:</strong> {ad.adFormat}
+        </p>
+        <p>
           <strong>Product:</strong> {ad.productOrService ?? 'No product name available'}
         </p>
         <p>
-          <strong>Score:</strong> {ad.score.toFixed(1)} / 10
+          <strong>Score:</strong> {ad.score.toFixed(2)} / 10
+        </p>
+        <p>
+          <strong>Funnel stage:</strong> {ad.analysis.funnelStage ?? 'N/A'}
+        </p>
+        <p>
+          <strong>RACE stage:</strong> {ad.analysis.raceStage ?? 'N/A'}
         </p>
         <p>
           <strong>Headline:</strong> {ad.headline ?? 'No headline available'}
@@ -80,23 +89,22 @@ export default async function AdDetailPage({
       </div>
 
       <div className="card">
-        <h2>Creative Analysis</h2>
-        <p>{ad.analysis?.creativeAnalysis ?? 'No creative analysis available.'}</p>
+        <h2>Analysis</h2>
+        <p>{ad.analysis.creativeAnalysis}</p>
+        <p>{ad.analysis.copyAnalysis}</p>
+        <p>{ad.analysis.headlineAnalysis}</p>
+        <p>{ad.analysis.descriptionAnalysis}</p>
       </div>
 
       <div className="card">
-        <h2>Copy Analysis</h2>
-        <p>{ad.analysis?.copyAnalysis ?? 'No copy analysis available.'}</p>
-      </div>
-
-      <div className="card">
-        <h2>Headline Analysis</h2>
-        <p>{ad.analysis?.headlineAnalysis ?? 'No headline analysis available.'}</p>
-      </div>
-
-      <div className="card">
-        <h2>Description Analysis</h2>
-        <p>{ad.analysis?.descriptionAnalysis ?? 'No description analysis available.'}</p>
+        <h2>Sub-scores</h2>
+        <ul>
+          {Object.entries(rubric).map(([name, value]) => (
+            <li key={name}>
+              {name}: {Number(value).toFixed(2)}
+            </li>
+          ))}
+        </ul>
       </div>
 
       <div className="card">
@@ -105,8 +113,8 @@ export default async function AdDetailPage({
           <p>No strengths available.</p>
         ) : (
           <ul>
-            {strengths.map((item, index) => (
-              <li key={index}>{item}</li>
+            {strengths.map((item) => (
+              <li key={item}>{item}</li>
             ))}
           </ul>
         )}
@@ -118,8 +126,8 @@ export default async function AdDetailPage({
           <p>No weaknesses available.</p>
         ) : (
           <ul>
-            {weaknesses.map((item, index) => (
-              <li key={index}>{item}</li>
+            {weaknesses.map((item) => (
+              <li key={item}>{item}</li>
             ))}
           </ul>
         )}
@@ -131,8 +139,8 @@ export default async function AdDetailPage({
           <p>No improvements available.</p>
         ) : (
           <ul>
-            {improvements.map((item, index) => (
-              <li key={index}>{item}</li>
+            {improvements.map((item) => (
+              <li key={item}>{item}</li>
             ))}
           </ul>
         )}
