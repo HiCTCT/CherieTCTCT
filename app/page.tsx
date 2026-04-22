@@ -1,38 +1,41 @@
 import Link from 'next/link';
-import { db } from '@/lib/db';
+import { getDashboardCounts, getQualifiedAds } from '@/lib/queries/ads';
 
-export default async function IndustriesPage() {
-  const industries = await db.industry.findMany({
-    orderBy: { name: 'asc' },
-    include: {
-      _count: {
-        select: {
-          clients: true,
-          ads: true,
-        },
-      },
-    },
-  });
+export default async function DashboardPage() {
+  const [industryCount, clientCount, qualifiedAdCount] = await getDashboardCounts();
+  const latestAds = await getQualifiedAds(12);
 
   return (
     <section>
-      <h1>Industries</h1>
-      <p>Browse industries in the Meta Competitor Ad Library.</p>
+      <h1>Meta Competitor Ad Library</h1>
 
-      {industries.length === 0 ? (
+      <div className="card">
+        <p><strong>Industries:</strong> {industryCount}</p>
+        <p><strong>Clients:</strong> {clientCount}</p>
+        <p><strong>Qualified ads:</strong> {qualifiedAdCount}</p>
+      </div>
+
+      <p>
+        <Link href="/industries">Browse industries</Link>
+      </p>
+
+      <h2>Latest qualified ads</h2>
+      {latestAds.length === 0 ? (
         <div className="card">
-          <p>No industries found.</p>
+          <p>No qualified ads found.</p>
         </div>
       ) : (
-        industries.map((industry) => (
-          <div className="card" key={industry.id}>
+        latestAds.map((ad) => (
+          <div className="card" key={ad.id}>
             <p>
-              <strong>{industry.name}</strong>
+              <strong>{ad.competitor.name}</strong> &middot; {ad.industry.name}
             </p>
-            <p>Clients: {industry._count.clients}</p>
-            <p>Ads: {industry._count.ads}</p>
             <p>
-              <Link href={`/industries/${industry.slug}`}>Open industry</Link>
+              Format: <strong>{ad.adFormat}</strong> &middot; Score{' '}
+              <strong>{ad.score.toFixed(1)}</strong> / 10
+            </p>
+            <p>
+              <Link href={`/ads/${ad.id}`}>Open ad detail</Link>
             </p>
           </div>
         ))

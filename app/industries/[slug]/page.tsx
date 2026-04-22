@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { db } from '@/lib/db';
+import { getIndustryBySlug } from '@/lib/queries/industries';
 
 function truncateText(value: string | null | undefined, maxLength = 140): string {
   if (!value) return 'No analysis available.';
@@ -13,23 +13,7 @@ export default async function IndustryDetailPage({
 }: {
   params: { slug: string };
 }) {
-  const industry = await db.industry.findUnique({
-    where: { slug: params.slug },
-    include: {
-      clients: {
-        orderBy: { name: 'asc' },
-      },
-      ads: {
-        where: { qualified: true },
-        include: {
-          competitor: true,
-          analysis: true,
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 20,
-      },
-    },
-  });
+  const industry = await getIndustryBySlug(params.slug);
 
   if (!industry) {
     notFound();
