@@ -1,0 +1,23 @@
+-- AlterTable
+ALTER TABLE "AdAnalysis" ADD COLUMN "aidaJson" TEXT;
+ALTER TABLE "AdAnalysis" ADD COLUMN "audienceRelevanceScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "authenticityScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "ctaClarityScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "ctaVisibilityScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "descriptionUsefulnessScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "firstThreeSecondsScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "funnelStage" TEXT;
+ALTER TABLE "AdAnalysis" ADD COLUMN "headlineStrengthScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "hookStopScrollScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "offerClarityScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "onScreenTextScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "platformNativeFeelScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "productClarityScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "raceStage" TEXT;
+ALTER TABLE "AdAnalysis" ADD COLUMN "soundOffDesignScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "soundOnEnhancementScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "storyFlowScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "trustProofStrengthScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "trustSignalsScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "valueClarityScore" REAL;
+ALTER TABLE "AdAnalysis" ADD COLUMN "visualHierarchyScore" REAL;
