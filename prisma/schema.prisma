@@ -71,18 +71,40 @@ model Ad {
 }
 
 model AdAnalysis {
-  id                  String   @id @default(cuid())
-  adId                String   @unique
-  ad                  Ad       @relation(fields: [adId], references: [id])
-  creativeAnalysis    String
-  copyAnalysis        String
-  headlineAnalysis    String
-  descriptionAnalysis String
-  strengthsJson       String
-  weaknessesJson      String
-  improvementsJson    String
-  rubricScoresJson    String
-  overallScore        Float
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                         String   @id @default(cuid())
+  adId                       String   @unique
+  ad                         Ad       @relation(fields: [adId], references: [id])
+  overallScore               Float
+  hookStopScrollScore        Float?
+  audienceRelevanceScore     Float?
+  valueClarityScore          Float?
+  trustProofStrengthScore    Float?
+  ctaClarityScore            Float?
+  visualHierarchyScore       Float?
+  productClarityScore        Float?
+  offerClarityScore          Float?
+  headlineStrengthScore      Float?
+  descriptionUsefulnessScore Float?
+  ctaVisibilityScore         Float?
+  trustSignalsScore          Float?
+  firstThreeSecondsScore     Float?
+  soundOffDesignScore        Float?
+  soundOnEnhancementScore    Float?
+  onScreenTextScore          Float?
+  storyFlowScore             Float?
+  authenticityScore          Float?
+  platformNativeFeelScore    Float?
+  creativeAnalysis           String
+  copyAnalysis               String
+  headlineAnalysis           String
+  descriptionAnalysis        String
+  aidaJson                   String?
+  funnelStage                String?
+  raceStage                  String?
+  strengthsJson              String
+  weaknessesJson             String
+  improvementsJson           String
+  rubricScoresJson           String
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
 }
