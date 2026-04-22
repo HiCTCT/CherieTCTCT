@@ -1,0 +1,7 @@
+### Search Meta ads for financial services in the UK
+GET http://localhost:8000/ads?industry=finance&country=GB&limit=10
+Accept: application/json
+
+### Search Meta ads for technology in the default country
+GET http://localhost:8000/ads?industry=technology
+Accept: application/json
