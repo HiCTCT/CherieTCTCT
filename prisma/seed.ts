@@ -66,6 +66,15 @@ async function main() {
     },
   });
 
+  // Clean up existing scan records, analyses, and ads for this competitor
+  await prisma.adScanRecord.deleteMany({
+    where: { ad: { competitorId: competitor.id } },
+  });
+
+  await prisma.scanRun.deleteMany({
+    where: { competitorId: competitor.id },
+  });
+
   await prisma.adAnalysis.deleteMany({
     where: {
       ad: { competitorId: competitor.id },
@@ -76,6 +85,15 @@ async function main() {
     where: { competitorId: competitor.id },
   });
 
+  // Create a ScanRun to record this seed ingestion
+  const scanRun = await prisma.scanRun.create({
+    data: {
+      competitorId: competitor.id,
+      source: 'SEED',
+      status: 'RUNNING',
+    },
+  });
+
   const staticResult = await ingestExampleRows({
     prisma,
     rows: staticRows,
@@ -83,6 +101,7 @@ async function main() {
     clientId: firstClient.id,
     industryId: firstClient.industryId,
     competitorId: competitor.id,
+    scanRunId: scanRun.id,
   });
 
   const videoResult = await ingestExampleRows({
@@ -92,10 +111,31 @@ async function main() {
     clientId: firstClient.id,
     industryId: firstClient.industryId,
     competitorId: competitor.id,
+    scanRunId: scanRun.id,
+  });
+
+  const totalInserted = staticResult.inserted + videoResult.inserted;
+
+  // Update ScanRun with final counts and status
+  await prisma.scanRun.update({
+    where: { id: scanRun.id },
+    data: {
+      status: 'COMPLETED',
+      completedAt: new Date(),
+      newAdsFound: totalInserted,
+      adsRemoved: 0,
+      adsUnchanged: 0,
+    },
+  });
+
+  // Update Competitor lastScannedAt
+  await prisma.competitor.update({
+    where: { id: competitor.id },
+    data: { lastScannedAt: new Date() },
   });
 
   console.log('Seed complete');
-  console.log(JSON.stringify({ staticResult, videoResult }, null, 2));
+  console.log(JSON.stringify({ staticResult, videoResult, scanRunId: scanRun.id }, null, 2));
 }
 
 main()

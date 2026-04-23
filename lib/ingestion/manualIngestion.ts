@@ -10,8 +10,9 @@ export async function ingestExampleRows(params: {
   clientId: string;
   industryId: string;
   competitorId: string;
+  scanRunId?: string;
 }) {
-  const { prisma, rows, format, clientId, industryId, competitorId } = params;
+  const { prisma, rows, format, clientId, industryId, competitorId, scanRunId } = params;
 
   let processed = 0;
   let inserted = 0;
@@ -25,6 +26,8 @@ export async function ingestExampleRows(params: {
       rejectedBelow7 += 1;
       continue;
     }
+
+    const now = new Date();
 
     const ad = await prisma.ad.create({
       data: {
@@ -42,6 +45,9 @@ export async function ingestExampleRows(params: {
         description: row.Description,
         score: analysed.overallScore,
         qualified: analysed.qualified,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        adStatus: 'ACTIVE',
       },
     });
 
@@ -90,6 +96,16 @@ export async function ingestExampleRows(params: {
         rubricScoresJson: JSON.stringify(analysed.subScores),
       },
     });
+
+    if (scanRunId) {
+      await prisma.adScanRecord.create({
+        data: {
+          adId: ad.id,
+          scanRunId,
+          action: 'DISCOVERED',
+        },
+      });
+    }
 
     inserted += 1;
   }
