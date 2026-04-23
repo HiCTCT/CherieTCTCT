@@ -44,16 +44,38 @@ export function getAdById(id: string) {
   });
 }
 
-export function getQualifiedAds(limit = 12) {
+export type QualifiedAdsFilter = {
+  limit?: number;
+  industrySlug?: string;
+  search?: string;
+};
+
+export function getQualifiedAds(filter: QualifiedAdsFilter = {}) {
+  const where: Prisma.AdWhereInput = { qualified: true };
+
+  if (filter.industrySlug) {
+    where.industry = { slug: filter.industrySlug };
+  }
+
+  if (filter.search) {
+    const term = filter.search;
+    where.OR = [
+      { competitor: { name: { contains: term } } },
+      { productOrService: { contains: term } },
+      { headline: { contains: term } },
+      { primaryCopy: { contains: term } },
+    ];
+  }
+
   return db.ad.findMany({
-    where: { qualified: true },
+    where,
     include: {
       competitor: true,
       industry: true,
       analysis: true,
     },
     orderBy: { score: 'desc' },
-    take: limit,
+    take: filter.limit ?? 12,
   });
 }
 

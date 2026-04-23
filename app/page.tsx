@@ -1,9 +1,32 @@
 import Link from 'next/link';
+import { Suspense } from 'react';
 import { getDashboardCounts, getQualifiedAds } from '@/lib/queries/ads';
+import { db } from '@/lib/db';
+import DashboardFilter from '@/app/components/DashboardFilter';
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: { industry?: string; q?: string };
+}) {
+  const industrySlug = searchParams.industry || '';
+  const searchTerm = searchParams.q || '';
+
   const [industryCount, clientCount, qualifiedAdCount] = await getDashboardCounts();
-  const latestAds = await getQualifiedAds(12);
+
+  const industries = await db.industry.findMany({
+    where: {
+      ads: { some: { qualified: true } },
+    },
+    select: { slug: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+
+  const latestAds = await getQualifiedAds({
+    limit: 12,
+    industrySlug: industrySlug || undefined,
+    search: searchTerm || undefined,
+  });
 
   return (
     <section>
@@ -20,6 +43,15 @@ export default async function DashboardPage() {
       </p>
 
       <h2>Latest qualified ads</h2>
+
+      <Suspense fallback={<p>Loading filters…</p>}>
+        <DashboardFilter
+          industries={industries}
+          currentIndustry={industrySlug}
+          currentSearch={searchTerm}
+        />
+      </Suspense>
+
       {latestAds.length === 0 ? (
         <div className="card">
           <p>No qualified ads found.</p>
