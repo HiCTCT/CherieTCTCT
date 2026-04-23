@@ -24,6 +24,13 @@ export function getIndustriesWithQualifiedAds() {
   });
 }
 
+export function getAllIndustriesForFilter() {
+  return db.industry.findMany({
+    select: { slug: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+}
+
 export function getIndustryBySlug(slug: string) {
   return db.industry.findUnique({
     where: { slug },
