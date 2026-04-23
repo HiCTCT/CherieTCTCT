@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { db } from '@/lib/db';
+import { getAdById } from '@/lib/queries/ads';
 
 function parseJsonArray(value: string | null | undefined): string[] {
   if (!value) return [];
@@ -58,15 +58,7 @@ export default async function AdDetailPage({
 }: {
   params: { id: string };
 }) {
-  const ad = await db.ad.findUnique({
-    where: { id: params.id },
-    include: {
-      industry: true,
-      client: true,
-      competitor: true,
-      analysis: true,
-    },
-  });
+  const ad = await getAdById(params.id);
 
   if (!ad || !ad.qualified) {
     notFound();
