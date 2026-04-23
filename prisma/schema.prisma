@@ -39,7 +39,10 @@ model Competitor {
   industry        Industry     @relation(fields: [industryId], references: [id])
   status          String       @default("APPROVED")
   discoverySource String       @default("seed")
+  facebookPageUrl String?
+  lastScannedAt   DateTime?
   ads             Ad[]
+  scanRuns        ScanRun[]
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
@@ -63,7 +66,11 @@ model Ad {
   description      String?
   score            Float
   qualified        Boolean     @default(false)
+  firstSeenAt      DateTime?
+  lastSeenAt       DateTime?
+  adStatus         String      @default("ACTIVE")
   analysis         AdAnalysis?
+  adScanRecords    AdScanRecord[]
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 
@@ -116,4 +123,33 @@ model AdAnalysis {
 
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt
+}
+
+model ScanRun {
+  id            String         @id @default(cuid())
+  competitorId  String
+  competitor    Competitor     @relation(fields: [competitorId], references: [id])
+  source        String         @default("MANUAL")
+  status        String         @default("PENDING")
+  startedAt     DateTime       @default(now())
+  completedAt   DateTime?
+  newAdsFound   Int            @default(0)
+  adsRemoved    Int            @default(0)
+  adsUnchanged  Int            @default(0)
+  notes         String?
+  adScanRecords AdScanRecord[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model AdScanRecord {
+  id        String   @id @default(cuid())
+  adId      String
+  ad        Ad       @relation(fields: [adId], references: [id])
+  scanRunId String
+  scanRun   ScanRun  @relation(fields: [scanRunId], references: [id])
+  action    String
+  createdAt DateTime @default(now())
+
+  @@unique([adId, scanRunId])
 }
