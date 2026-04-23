@@ -37,7 +37,6 @@ export default async function DashboardPage({
       </p>
 
 <h2>Latest qualified ads</h2>
-<p>Total industries in filter: {industries.length}</p>
 
 <Suspense fallback={<p>Loading filters…</p>}>
         <DashboardFilter
