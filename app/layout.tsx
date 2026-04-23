@@ -1,7 +1,8 @@
 import './globals.css';
+import type { Metadata } from 'next';
 import Link from 'next/link';
 
-export const metadata = {
+export const metadata: Metadata = {
   title: 'Meta Competitor Ad Library',
 };
 

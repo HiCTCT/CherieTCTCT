@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { Suspense } from 'react';
 import { getDashboardCounts, getQualifiedAds } from '@/lib/queries/ads';
-import { db } from '@/lib/db';
+import { getIndustriesWithQualifiedAds } from '@/lib/queries/industries';
 import DashboardFilter from '@/app/components/DashboardFilter';
 
 export default async function DashboardPage({
@@ -14,13 +14,7 @@ export default async function DashboardPage({
 
   const [industryCount, clientCount, qualifiedAdCount] = await getDashboardCounts();
 
-  const industries = await db.industry.findMany({
-    where: {
-      ads: { some: { qualified: true } },
-    },
-    select: { slug: true, name: true },
-    orderBy: { name: 'asc' },
-  });
+  const industries = await getIndustriesWithQualifiedAds();
 
   const latestAds = await getQualifiedAds({
     limit: 12,
