@@ -143,6 +143,164 @@ async function run(): Promise<void> {
     }
   }
 
+  // --- Phase 2 checks: sub-scores, framework mapping, format separation ---
+
+  const SHARED_SCORE_FIELDS = [
+    'hookStopScrollScore',
+    'audienceRelevanceScore',
+    'valueClarityScore',
+    'trustProofStrengthScore',
+    'ctaClarityScore',
+  ] as const;
+
+  const STATIC_SCORE_FIELDS = [
+    'visualHierarchyScore',
+    'productClarityScore',
+    'offerClarityScore',
+    'headlineStrengthScore',
+    'descriptionUsefulnessScore',
+    'ctaVisibilityScore',
+    'trustSignalsScore',
+  ] as const;
+
+  const VIDEO_SCORE_FIELDS = [
+    'firstThreeSecondsScore',
+    'soundOffDesignScore',
+    'soundOnEnhancementScore',
+    'onScreenTextScore',
+    'storyFlowScore',
+    'authenticityScore',
+    'platformNativeFeelScore',
+  ] as const;
+
+  const VALID_FUNNEL_STAGES = ['TOFU', 'MOFU', 'BOFU'];
+  const VALID_RACE_STAGES = ['REACH', 'ACT', 'CONVERT', 'ENGAGE'];
+  const AIDA_KEYS = ['attention', 'interest', 'desire', 'action'];
+
+  const allAds = await prisma.ad.findMany({
+    where: { qualified: true },
+    include: { analysis: true },
+  });
+
+  // Check 1: Framework mapping populated on all analyses
+  let frameworkOk = true;
+  for (const ad of allAds) {
+    const a = ad.analysis;
+    if (!a) {
+      frameworkOk = false;
+      continue;
+    }
+
+    if (!a.funnelStage || !VALID_FUNNEL_STAGES.includes(a.funnelStage)) {
+      frameworkOk = false;
+    }
+    if (!a.raceStage || !VALID_RACE_STAGES.includes(a.raceStage)) {
+      frameworkOk = false;
+    }
+
+    if (a.aidaJson) {
+      try {
+        const aida = JSON.parse(a.aidaJson);
+        const hasAllKeys = AIDA_KEYS.every(
+          (k) => typeof aida[k] === 'string' && aida[k].length > 0
+        );
+        if (!hasAllKeys) frameworkOk = false;
+      } catch {
+        frameworkOk = false;
+      }
+    } else {
+      frameworkOk = false;
+    }
+  }
+
+  if (frameworkOk) {
+    pass('Framework mapping populated (AIDA, funnel stage, RACE stage) on all analyses');
+  } else {
+    fail('Framework mapping missing or invalid on one or more analyses');
+    failures += 1;
+  }
+
+  // Check 2: Shared sub-scores populated on all analyses
+  let sharedOk = true;
+  for (const ad of allAds) {
+    const a = ad.analysis;
+    if (!a) { sharedOk = false; continue; }
+    for (const field of SHARED_SCORE_FIELDS) {
+      if (a[field] === null || a[field] === undefined) {
+        sharedOk = false;
+      }
+    }
+  }
+
+  if (sharedOk) {
+    pass('Shared sub-scores populated on all analyses (5 fields)');
+  } else {
+    fail('Shared sub-scores missing on one or more analyses');
+    failures += 1;
+  }
+
+  // Check 3: Format-specific sub-score separation
+  let separationOk = true;
+  const separationErrors: string[] = [];
+
+  for (const ad of allAds) {
+    const a = ad.analysis;
+    if (!a) { separationOk = false; continue; }
+
+    if (ad.adFormat === 'STATIC') {
+      for (const field of STATIC_SCORE_FIELDS) {
+        if (a[field] === null || a[field] === undefined) {
+          separationOk = false;
+          separationErrors.push(`STATIC ad ${ad.id}: ${field} is null`);
+        }
+      }
+      for (const field of VIDEO_SCORE_FIELDS) {
+        if (a[field] !== null && a[field] !== undefined) {
+          separationOk = false;
+          separationErrors.push(`STATIC ad ${ad.id}: video field ${field} is not null`);
+        }
+      }
+    } else if (ad.adFormat === 'VIDEO') {
+      for (const field of VIDEO_SCORE_FIELDS) {
+        if (a[field] === null || a[field] === undefined) {
+          separationOk = false;
+          separationErrors.push(`VIDEO ad ${ad.id}: ${field} is null`);
+        }
+      }
+      for (const field of STATIC_SCORE_FIELDS) {
+        if (a[field] !== null && a[field] !== undefined) {
+          separationOk = false;
+          separationErrors.push(`VIDEO ad ${ad.id}: static field ${field} is not null`);
+        }
+      }
+    }
+  }
+
+  if (separationOk) {
+    pass('Format-specific sub-score separation correct (STATIC: 7 static fields, VIDEO: 7 video fields, no cross-contamination)');
+  } else {
+    fail('Format-specific sub-score separation violated', separationErrors.slice(0, 5));
+    failures += 1;
+  }
+
+  // Check 4: Overall score consistency (analysis.overallScore matches ad.score)
+  let scoreConsistencyOk = true;
+  for (const ad of allAds) {
+    const a = ad.analysis;
+    if (!a) { scoreConsistencyOk = false; continue; }
+    const diff = Math.abs(a.overallScore - ad.score);
+    if (diff > 0.01) {
+      scoreConsistencyOk = false;
+    }
+  }
+
+  if (scoreConsistencyOk) {
+    pass('Overall score consistency (analysis.overallScore matches ad.score on all records)');
+  } else {
+    fail('Overall score mismatch between ad.score and analysis.overallScore');
+    failures += 1;
+  }
+
   console.log('\nFinal inserted counts:');
   console.log(JSON.stringify(counts, null, 2));
 
