@@ -97,6 +97,18 @@ type NormalisedResult = {
   };
 };
 
+// ─── Token redaction ──────────────────────────────────────────────────────────
+
+function redactToken(value: string): string {
+  return value.replace(/access_token=[^&\s]+/g, 'access_token=REDACTED');
+}
+
+function safeUrlLabel(url: string | undefined): string {
+  if (!url) return 'N/A';
+  if (/access_token=/i.test(url)) return 'present (token redacted)';
+  return url;
+}
+
 // ─── Meta API fetch ───────────────────────────────────────────────────────────
 
 const META_API_BASE = 'https://graph.facebook.com/v25.0/ads_archive';
@@ -137,7 +149,7 @@ async function fetchFromMetaApi(token: string): Promise<MetaAdRecord[]> {
 
   if (json.error) {
     throw new Error(
-      `Meta API error (code ${json.error.code}): ${json.error.message}`,
+      `Meta API error (code ${json.error.code}): ${redactToken(json.error.message)}`,
     );
   }
 
@@ -313,14 +325,14 @@ async function main() {
     console.log(`  Platforms:    ${r.metaFields.platforms?.join(', ') ?? 'N/A'}`);
     console.log(`  Start date:   ${r.metaFields.deliveryStartTime ?? 'N/A'}`);
     console.log(`  Stop date:    ${r.metaFields.deliveryStopTime ?? 'still running'}`);
-    console.log(`  Snapshot URL: ${r.metaFields.snapshotUrl ?? 'N/A'}`);
+    console.log(`  Snapshot URL: ${safeUrlLabel(r.metaFields.snapshotUrl)}`);
     console.log('');
     console.log('  Mapped ExampleRow fields:');
     console.log(`    Product:     ${r.row.Product}`);
     console.log(`    Headline:    ${r.row.Headline ?? '(empty)'}`);
     console.log(`    Copy:        ${(r.row.Copy ?? '').substring(0, 80)}${(r.row.Copy ?? '').length > 80 ? '...' : ''}`);
     console.log(`    Description: ${(r.row.Description ?? '').substring(0, 80)}${(r.row.Description ?? '').length > 80 ? '...' : ''}`);
-    console.log(`    Ad Link:     ${r.row['Ad Link'] ?? '(empty)'}`);
+    console.log(`    Ad Link:     ${safeUrlLabel(r.row['Ad Link'])}`);
     console.log(`    Active Since:${r.row['Active Since'] ?? '(empty)'}`);
     console.log('');
     console.log('  Analysis output:');
@@ -427,6 +439,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('\n❌ Spike failed:', err);
+  const message = err instanceof Error ? err.message : String(err);
+  console.error('\n❌ Spike failed:', redactToken(message));
   process.exit(1);
 });
