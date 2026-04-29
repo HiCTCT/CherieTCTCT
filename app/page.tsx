@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { Suspense } from 'react';
 import { getDashboardCounts, getQualifiedAds } from '@/lib/queries/ads';
-import { getIndustriesWithQualifiedAds } from '@/lib/queries/industries';
+import { getAllIndustriesForFilter } from '@/lib/queries/industries';
 import DashboardFilter from '@/app/components/DashboardFilter';
 
 export default async function DashboardPage({
@@ -14,7 +14,7 @@ export default async function DashboardPage({
 
   const [industryCount, clientCount, qualifiedAdCount] = await getDashboardCounts();
 
-  const industries = await getIndustriesWithQualifiedAds();
+  const industries = await getAllIndustriesForFilter();
 
   const latestAds = await getQualifiedAds({
     limit: 12,
@@ -36,9 +36,9 @@ export default async function DashboardPage({
         <Link href="/industries">Browse industries</Link>
       </p>
 
-      <h2>Latest qualified ads</h2>
+<h2>Latest qualified ads</h2>
 
-      <Suspense fallback={<p>Loading filters…</p>}>
+<Suspense fallback={<p>Loading filters…</p>}>
         <DashboardFilter
           industries={industries}
           currentIndustry={industrySlug}
