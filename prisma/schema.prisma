@@ -40,6 +40,7 @@ model Competitor {
   status          String       @default("APPROVED")
   discoverySource String       @default("seed")
   facebookPageUrl String?
+  metaPageId      String?
   lastScannedAt   DateTime?
   ads             Ad[]
   scanRuns        ScanRun[]
@@ -64,6 +65,9 @@ model Ad {
   primaryCopy      String?
   headline         String?
   description      String?
+  metaAdId         String?     @unique
+  adSource         String      @default("seed")
+  reviewStatus     String?
   score            Float
   qualified        Boolean     @default(false)
   firstSeenAt      DateTime?
