@@ -121,6 +121,24 @@ model AdAnalysis {
   funnelStage                String?
   raceStage                  String?
 
+  // Phase 3.5: Conversion-focused scoring fields (all nullable for backwards compatibility)
+  copyScore                  Float?
+  headlineScore              Float?   // null = headline not provided
+  descriptionScore           Float?   // null = description not provided
+  creativeScore              Float?
+  aidaAttentionScore         Float?
+  aidaInterestScore          Float?
+  aidaDesireScore            Float?
+  aidaActionScore            Float?
+  clarityScore               Float?
+  connectionScore            Float?
+  convictionScore            Float?
+  trustFunnelStage           String?
+  behaviouralTriggersJson    String?
+  recommendationsJson        String?
+  rewriteDirectionJson       String?
+  finalVerdict               String?
+
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt
 }

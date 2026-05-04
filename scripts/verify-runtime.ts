@@ -301,6 +301,117 @@ async function run(): Promise<void> {
     failures += 1;
   }
 
+  // --- Phase 3.5 checks: conversion-focused scoring fields ---
+
+  const PHASE_3_5_REQUIRED_FIELDS = [
+    'copyScore',
+    'creativeScore',
+    'clarityScore',
+    'connectionScore',
+    'convictionScore',
+    'trustFunnelStage',
+    'finalVerdict',
+    'behaviouralTriggersJson',
+    'recommendationsJson',
+  ] as const;
+
+  const VALID_VERDICTS = [
+    'STRONG_READY_TO_TEST',
+    'GOOD_NEEDS_SHARPENING',
+    'CLEAR_IDEA_WEAK_SIGNALS',
+    'TOO_VAGUE_MAJOR_REWORK',
+    'INSUFFICIENT_INFORMATION',
+  ];
+
+  const VALID_TRUST_FUNNEL_STAGES = [
+    'UNAWARE',
+    'PROBLEM_AWARE',
+    'SOLUTION_AWARE',
+    'PRODUCT_AWARE',
+    'READY_TO_BUY',
+  ];
+
+  let conversionFieldsOk = true;
+  const conversionFieldErrors: string[] = [];
+
+  for (const ad of allAds) {
+    const a = ad.analysis;
+    if (!a) { conversionFieldsOk = false; continue; }
+
+    for (const field of PHASE_3_5_REQUIRED_FIELDS) {
+      const value = a[field as keyof typeof a];
+      if (value === null || value === undefined) {
+        conversionFieldsOk = false;
+        conversionFieldErrors.push(`Ad ${ad.id}: ${field} is null/undefined`);
+      }
+    }
+
+    if (a.finalVerdict && !VALID_VERDICTS.includes(a.finalVerdict)) {
+      conversionFieldsOk = false;
+      conversionFieldErrors.push(`Ad ${ad.id}: invalid finalVerdict "${a.finalVerdict}"`);
+    }
+
+    if (a.trustFunnelStage && !VALID_TRUST_FUNNEL_STAGES.includes(a.trustFunnelStage)) {
+      conversionFieldsOk = false;
+      conversionFieldErrors.push(`Ad ${ad.id}: invalid trustFunnelStage "${a.trustFunnelStage}"`);
+    }
+
+    if (a.behaviouralTriggersJson) {
+      try {
+        const triggers = JSON.parse(a.behaviouralTriggersJson);
+        if (!Array.isArray(triggers) || triggers.length === 0) {
+          conversionFieldsOk = false;
+          conversionFieldErrors.push(`Ad ${ad.id}: behaviouralTriggersJson is empty array`);
+        }
+      } catch {
+        conversionFieldsOk = false;
+        conversionFieldErrors.push(`Ad ${ad.id}: behaviouralTriggersJson is invalid JSON`);
+      }
+    }
+
+    if (a.recommendationsJson) {
+      try {
+        const recs = JSON.parse(a.recommendationsJson);
+        const recKeys = ['copy', 'headline', 'description', 'creative', 'conversionStrength'];
+        const hasAllKeys = recKeys.every((k) => typeof recs[k] === 'string' && recs[k].length > 0);
+        if (!hasAllKeys) {
+          conversionFieldsOk = false;
+          conversionFieldErrors.push(`Ad ${ad.id}: recommendationsJson missing required keys`);
+        }
+      } catch {
+        conversionFieldsOk = false;
+        conversionFieldErrors.push(`Ad ${ad.id}: recommendationsJson is invalid JSON`);
+      }
+    }
+  }
+
+  if (conversionFieldsOk) {
+    pass('Phase 3.5 conversion scoring fields populated on all analyses');
+  } else {
+    fail('Phase 3.5 conversion scoring fields missing or invalid', conversionFieldErrors.slice(0, 5));
+    failures += 1;
+  }
+
+  // Phase 3.5: Show example conversion summary for one ad
+  const exampleAd = allAds[0];
+  if (exampleAd?.analysis) {
+    const ea = exampleAd.analysis;
+    pass('Phase 3.5 example conversion summary', {
+      adId: exampleAd.id,
+      format: exampleAd.adFormat,
+      overallScore: ea.overallScore,
+      copyScore: ea.copyScore,
+      headlineScore: ea.headlineScore,
+      descriptionScore: ea.descriptionScore,
+      creativeScore: ea.creativeScore,
+      clarityScore: ea.clarityScore,
+      connectionScore: ea.connectionScore,
+      convictionScore: ea.convictionScore,
+      trustFunnelStage: ea.trustFunnelStage,
+      finalVerdict: ea.finalVerdict,
+    });
+  }
+
   console.log('\nFinal inserted counts:');
   console.log(JSON.stringify(counts, null, 2));
 
