@@ -9,9 +9,11 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev --name init_sqlite",
     "db:seed": "tsx prisma/seed.ts",
-    "verify:runtime": "tsx scripts/verify-runtime.ts"
+    "verify:runtime": "tsx scripts/verify-runtime.ts",
+    "meta:dry-run": "tsx scripts/dry-run-meta-fetch.ts"
   },
   "dependencies": {
+    "@esbuild/linux-x64": "^0.28.0",
     "@prisma/client": "^5.22.0",
     "csv-parse": "^5.5.6",
     "next": "14.2.18",
