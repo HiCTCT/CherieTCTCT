@@ -94,6 +94,26 @@ export async function ingestExampleRows(params: {
         weaknessesJson: JSON.stringify(analysed.weaknesses),
         improvementsJson: JSON.stringify(analysed.improvements),
         rubricScoresJson: JSON.stringify(analysed.subScores),
+
+        // Phase 3.5: Conversion-focused scoring fields
+        copyScore: analysed.copyScore,
+        headlineScore: analysed.headlineScore,
+        descriptionScore: analysed.descriptionScore,
+        creativeScore: analysed.creativeScore,
+        aidaAttentionScore: analysed.aidaScores.attention,
+        aidaInterestScore: analysed.aidaScores.interest,
+        aidaDesireScore: analysed.aidaScores.desire,
+        aidaActionScore: analysed.aidaScores.action,
+        clarityScore: analysed.clarityScore,
+        connectionScore: analysed.connectionScore,
+        convictionScore: analysed.convictionScore,
+        trustFunnelStage: analysed.trustFunnelStage,
+        behaviouralTriggersJson: JSON.stringify(analysed.behaviouralTriggers),
+        recommendationsJson: JSON.stringify(analysed.recommendations),
+        rewriteDirectionJson: analysed.rewriteDirection
+          ? JSON.stringify(analysed.rewriteDirection)
+          : null,
+        finalVerdict: analysed.finalVerdict,
       },
     });
 
