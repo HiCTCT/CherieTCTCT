@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getCompetitorById, getCompetitorWithScanHistory } from '@/lib/queries/competitors';
+import { getPendingAdCount } from '@/lib/queries/pendingAds';
 
 function formatDate(date: Date | string | null | undefined): string {
   if (!date) return 'N/A';
@@ -18,9 +19,10 @@ export default async function CompetitorDetailPage({
 }: {
   params: { id: string };
 }) {
-  const [competitor, competitorWithScans] = await Promise.all([
+  const [competitor, competitorWithScans, pendingAdCount] = await Promise.all([
     getCompetitorById(params.id),
     getCompetitorWithScanHistory(params.id),
+    getPendingAdCount(params.id),
   ]);
 
   if (!competitor) {
@@ -60,6 +62,22 @@ export default async function CompetitorDetailPage({
         <p>Qualified ads: {competitor.ads.length}</p>
         <p>Scan runs: {competitor._count.scanRuns}</p>
       </div>
+
+      {pendingAdCount > 0 && (
+        <div className="card">
+          <h2>Pending Meta ads</h2>
+          <p>
+            <strong>{pendingAdCount}</strong> ad
+            {pendingAdCount !== 1 ? 's' : ''} discovered via the Meta Ad Library
+            API {pendingAdCount !== 1 ? 'are' : 'is'} awaiting review.
+          </p>
+          <p>
+            <Link href={`/meta-review?competitorId=${competitor.id}`}>
+              Review pending ads →
+            </Link>
+          </p>
+        </div>
+      )}
 
       <div className="card">
         <h2>Recent qualified ads</h2>
