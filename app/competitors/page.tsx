@@ -10,6 +10,12 @@ function formatDate(date: Date | null | undefined): string {
   });
 }
 
+function getMetaReadinessLabel(metaPageId: string | null, lastScannedAt: Date | null): string {
+  if (!metaPageId) return 'No page ID';
+  if (!lastScannedAt) return 'Meta ready - not yet scanned';
+  return 'Meta ready - previously scanned';
+}
+
 export default async function CompetitorsPage() {
   const competitors = await getCompetitors();
 
@@ -35,6 +41,7 @@ export default async function CompetitorsPage() {
             <p>Client: {competitor.client.name}</p>
             <p>Industry: {competitor.industry.name}</p>
             <p>Status: {competitor.status}</p>
+            <p>Meta readiness: {getMetaReadinessLabel(competitor.metaPageId, competitor.lastScannedAt)}</p>
             <p>Ads: {competitor._count.ads}</p>
             <p>Scan runs: {competitor._count.scanRuns}</p>
             <p>Last scanned: {formatDate(competitor.lastScannedAt)}</p>
