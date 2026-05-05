@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import CompetitorMetaConfigForm from '@/app/components/CompetitorMetaConfigForm';
 import { getCompetitorById, getCompetitorWithScanHistory } from '@/lib/queries/competitors';
 import { getPendingAdCount } from '@/lib/queries/pendingAds';
 
@@ -12,6 +13,27 @@ function formatDate(date: Date | string | null | undefined): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function getMetaReadiness(metaPageId: string | null, lastScannedAt: Date | null) {
+  if (!metaPageId) {
+    return {
+      label: 'Not ready - Meta page ID missing',
+      detail: 'Add a Meta Page ID below to enable competitor-specific Meta ingestion.',
+    };
+  }
+
+  if (!lastScannedAt) {
+    return {
+      label: 'Ready - not yet scanned',
+      detail: 'This competitor has a Meta Page ID and is ready for its first Meta ingestion run.',
+    };
+  }
+
+  return {
+    label: 'Ready - previously scanned',
+    detail: `This competitor has a Meta Page ID and was last scanned on ${formatDate(lastScannedAt)}.`,
+  };
 }
 
 export default async function CompetitorDetailPage({
@@ -30,6 +52,7 @@ export default async function CompetitorDetailPage({
   }
 
   const scanRuns = competitorWithScans?.scanRuns ?? [];
+  const metaReadiness = getMetaReadiness(competitor.metaPageId, competitor.lastScannedAt);
 
   return (
     <section>
@@ -45,15 +68,38 @@ export default async function CompetitorDetailPage({
         <p><strong>Industry:</strong> {competitor.industry.name}</p>
         <p><strong>Status:</strong> {competitor.status}</p>
         <p><strong>Discovery source:</strong> {competitor.discoverySource}</p>
-        {competitor.facebookPageUrl && (
-          <p>
-            <strong>Facebook page:</strong>{' '}
+        <p>
+          <strong>Facebook page:</strong>{' '}
+          {competitor.facebookPageUrl ? (
             <a href={competitor.facebookPageUrl} target="_blank" rel="noreferrer">
               {competitor.facebookPageUrl}
             </a>
+          ) : (
+            'Not set'
+          )}
+        </p>
+        <p>
+          <strong>Meta Page ID:</strong>{' '}
+          {competitor.metaPageId ? <code>{competitor.metaPageId}</code> : 'Not set'}
+        </p>
+        <p><strong>Readiness:</strong> {metaReadiness.label}</p>
+        <p><strong>Last scanned:</strong> {formatDate(competitor.lastScannedAt)}</p>
+      </div>
+
+      <div className="card">
+        <h2>Meta configuration</h2>
+        <p>{metaReadiness.detail}</p>
+        {competitor.metaPageId && (
+          <p>
+            Ingestion command:{' '}
+            <code>COMPETITOR_ID={competitor.id} npm run meta:ingest</code>
           </p>
         )}
-        <p><strong>Last scanned:</strong> {formatDate(competitor.lastScannedAt)}</p>
+        <CompetitorMetaConfigForm
+          competitorId={competitor.id}
+          facebookPageUrl={competitor.facebookPageUrl}
+          metaPageId={competitor.metaPageId}
+        />
       </div>
 
       <div className="card">
@@ -73,7 +119,7 @@ export default async function CompetitorDetailPage({
           </p>
           <p>
             <Link href={`/meta-review?competitorId=${competitor.id}`}>
-              Review pending ads →
+              Review pending ads
             </Link>
           </p>
         </div>
