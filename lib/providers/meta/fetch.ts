@@ -95,6 +95,10 @@ function filterSimulatedRecords(records: MetaAdRecord[], config: MetaFetchConfig
   return filtered;
 }
 
+function serialisePageIdsForGraphApi(pageIds: string[]): string {
+  return `[${pageIds.join(',')}]`;
+}
+
 // ─── Live fetch ───────────────────────────────────────────────────────────────
 
 async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
@@ -108,10 +112,10 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
   });
 
   if (config.searchPageIds && config.searchPageIds.length > 0) {
-    params.set('search_page_ids', JSON.stringify(config.searchPageIds));
+    params.set('search_page_ids', serialisePageIdsForGraphApi(config.searchPageIds));
   }
 
-  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds?.join(',') ?? ''}&ad_reached_countries=...&fields=...&limit=${config.limit}&access_token=REDACTED`;
+  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&ad_reached_countries=...&fields=...&limit=${config.limit}&access_token=REDACTED`;
   console.log('\n  Fetching from Meta Ad Library API...');
   console.log(`  Search terms:  ${config.searchTerms || '(empty)'}`);
   console.log(`  Page IDs:      ${config.searchPageIds?.join(', ') ?? '(not set)'}`);
