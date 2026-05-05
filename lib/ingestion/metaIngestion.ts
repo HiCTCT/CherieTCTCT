@@ -197,14 +197,22 @@ export async function ingestMetaAds(
       continue;
     }
 
-    // Deduplication: skip if this metaAdId already exists
+    // Deduplication: update lifecycle fields and record as SEEN — no reinsert
     const existing = await prisma.ad.findUnique({ where: { metaAdId } });
     if (existing) {
-      console.log(`  → Duplicate (skipping insert): ${metaAdId}`);
-      // Still record that this ad was seen in this scan
+      // Update lastSeenAt and adStatus to reflect current fetch state
+      await prisma.ad.update({
+        where: { id: existing.id },
+        data: {
+          lastSeenAt: new Date(),
+          adStatus,
+        },
+      });
+      // Record that this ad was seen in this scan
       await prisma.adScanRecord.create({
         data: { adId: existing.id, scanRunId: scanRun.id, action: 'SEEN' },
       });
+      console.log(`  → Updated lifecycle (SEEN): ${metaAdId} | adStatus: ${adStatus}`);
       skipped++;
       continue;
     }
