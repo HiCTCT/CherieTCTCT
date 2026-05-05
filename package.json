@@ -11,7 +11,8 @@
     "db:seed": "tsx prisma/seed.ts",
     "verify:runtime": "tsx scripts/verify-runtime.ts",
     "meta:dry-run": "tsx scripts/dry-run-meta-fetch.ts",
-    "meta:ingest": "tsx scripts/ingest-meta-ads.ts"
+    "meta:ingest": "tsx scripts/ingest-meta-ads.ts",
+    "meta:verify": "tsx scripts/verify-meta-ingestion.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
