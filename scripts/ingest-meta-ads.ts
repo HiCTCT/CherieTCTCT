@@ -1,8 +1,9 @@
 /**
- * Phase 4 Step 2 — Meta Ad Ingestion: CLI Entry Point
+ * Phase 4 Step 5 — Meta Ad Ingestion targeted by page ID: CLI Entry Point
  *
  * Fetches ads from the Meta Ad Library API for a specific Competitor and writes
  * them to the database as discovered activity (qualified=false, reviewStatus=PENDING).
+ * The competitor must have a saved Meta Page ID before ingestion can run.
  *
  * Usage:
  *   # Dry-run (no DB writes — proves fetch → analyse → plan chain):
@@ -21,6 +22,7 @@
  *   COMPETITOR_ID         — required — Prisma cuid of the target Competitor
  *   META_DRY_RUN          — 'true' skips all DB writes (Competitor read still runs)
  *   META_ADLIB_TOKEN      — access token (absent = simulation mode)
+ *   META_PAGE_IDS         — optional comma-separated page IDs for dry-run/fetch tests; ingestion overrides this with Competitor.metaPageId
  *   META_SEARCH_TERMS     — keyword(s) for the Ad Library query (default: 'skincare')
  *   META_COUNTRIES        — comma-separated ISO codes (default: 'SG')
  *   META_FETCH_LIMIT      — number of ads per page (default: 5, max: 25)
@@ -47,14 +49,16 @@ async function main(): Promise<void> {
   const fetchConfig = buildConfigFromEnv();
 
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  Phase 4 Step 2 — Meta Ad Ingestion');
+  console.log('  Phase 4 Step 5 — Meta Ad Ingestion targeted by page ID');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log(`  Mode:          ${dryRun ? 'DRY RUN (no DB writes)' : 'LIVE WRITE'}`);
   console.log(`  Competitor ID: ${competitorId}`);
   console.log(`  Format:        ${fetchConfig.format}`);
   console.log(`  Search terms:  ${fetchConfig.searchTerms}`);
+  console.log(`  Page IDs:      ${fetchConfig.searchPageIds?.join(', ') ?? '(loaded from competitor during ingestion)'}`);
   console.log(`  Countries:     ${fetchConfig.countries.join(', ')}`);
   console.log(`  Limit:         ${fetchConfig.limit}`);
+  console.log('  Note:          Competitor.metaPageId is loaded and enforced after competitor lookup.');
 
   const prisma = new PrismaClient();
 
@@ -89,7 +93,6 @@ async function main(): Promise<void> {
     console.log('═══════════════════════════════════════════════════════════════');
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    // Redact any token that may have leaked into the error message
     console.error('\n❌ Ingestion failed:', redactToken(message));
     process.exit(1);
   } finally {
