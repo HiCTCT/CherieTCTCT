@@ -1,4 +1,4 @@
-import { redactToken, safeLog } from '@/lib/providers/meta/redact';
+import { redactToken } from '@/lib/providers/meta/redact';
 import type { MetaAdRecord, MetaApiResponse, MetaFetchConfig } from '@/lib/providers/meta/types';
 
 const META_API_BASE = 'https://graph.facebook.com/v25.0/ads_archive';
@@ -82,6 +82,23 @@ function getSimulatedRecords(): MetaAdRecord[] {
   ];
 }
 
+function filterSimulatedRecords(records: MetaAdRecord[], config: MetaFetchConfig): MetaAdRecord[] {
+  if (!config.searchPageIds || config.searchPageIds.length === 0) return records;
+
+  const pageIdSet = new Set(config.searchPageIds);
+  const filtered = records.filter((record) => record.page_id && pageIdSet.has(record.page_id));
+
+  if (filtered.length === 0) {
+    console.log(`  Simulation note: no mock ads found for page ID(s): ${config.searchPageIds.join(', ')}`);
+  }
+
+  return filtered;
+}
+
+function serialisePageIdsForGraphApi(pageIds: string[]): string {
+  return `[${pageIds.join(',')}]`;
+}
+
 // ─── Live fetch ───────────────────────────────────────────────────────────────
 
 async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
@@ -91,13 +108,17 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
     ad_active_status: config.adActiveStatus,
     fields: FIELDS,
     limit: String(config.limit),
-    access_token: config.token!, // present — checked before calling this function
+    access_token: config.token!,
   });
 
-  // Log the request without the token in the URL
-  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&ad_reached_countries=...&fields=...&limit=${config.limit}&access_token=REDACTED`;
-  console.log(`\n  Fetching from Meta Ad Library API...`);
-  console.log(`  Search terms:  ${config.searchTerms}`);
+  if (config.searchPageIds && config.searchPageIds.length > 0) {
+    params.set('search_page_ids', serialisePageIdsForGraphApi(config.searchPageIds));
+  }
+
+  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&ad_reached_countries=...&fields=...&limit=${config.limit}&access_token=REDACTED`;
+  console.log('\n  Fetching from Meta Ad Library API...');
+  console.log(`  Search terms:  ${config.searchTerms || '(empty)'}`);
+  console.log(`  Page IDs:      ${config.searchPageIds?.join(', ') ?? '(not set)'}`);
   console.log(`  Countries:     ${config.countries.join(', ')}`);
   console.log(`  Active status: ${config.adActiveStatus}`);
   console.log(`  Limit:         ${config.limit}`);
@@ -108,7 +129,6 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
   const json = (await response.json()) as MetaApiResponse;
 
   if (json.error) {
-    // Redact token from error messages before throwing
     const safeMessage = redactToken(
       `Meta API error (code ${json.error.code}): ${json.error.message}`,
     );
@@ -116,15 +136,13 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
   }
 
   if (!json.data || json.data.length === 0) {
-    throw new Error('Meta API returned no ads for this search. Try a different search_terms or country.');
+    throw new Error('Meta API returned no ads for this page ID or search. Try a different Meta Page ID, search_terms, or country.');
   }
 
   console.log(`  ✓ Received ${json.data.length} ad(s)`);
 
-  // paging.next is a token-bearing URL — log only whether pagination exists,
-  // never the URL itself. Step 1 does not follow pagination.
   if (json.paging?.next) {
-    console.log(`  ℹ  Pagination available — not followed in Step 1 (single page only)`);
+    console.log('  ℹ  Pagination available — not followed in this step (single page only)');
   }
 
   return json.data;
@@ -132,46 +150,25 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Fetches ads from the Meta Ad Library API, or returns simulation data if
- * no token is configured or simulation mode is explicitly set.
- *
- * Token safety:
- *  - The token never appears in log output
- *  - Error messages are redacted before throwing
- *  - paging.next is consumed internally and never logged
- *  - ad_snapshot_url values are logged via safeLog() in the calling script
- */
 export async function fetchMetaAds(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
   const isSimulation = config.simulationMode || !config.token;
 
   if (isSimulation) {
-    const records = getSimulatedRecords();
-    console.log(`\n  Mode: SIMULATION (META_ADLIB_TOKEN not set)`);
+    const records = filterSimulatedRecords(getSimulatedRecords(), config);
+    console.log('\n  Mode: SIMULATION (META_ADLIB_TOKEN not set)');
+    console.log(`  Page IDs: ${config.searchPageIds?.join(', ') ?? '(not set)'}`);
     console.log(`  Returning ${records.length} mock record(s)`);
-    console.log(`  ⚠  This proves normalise → analyse pipeline only.`);
-    console.log(`     Set META_ADLIB_TOKEN to test real API fetch.`);
+    console.log('  ⚠  This proves normalise → analyse pipeline only.');
+    console.log('     Set META_ADLIB_TOKEN to test real API fetch.');
     return records;
   }
 
-  console.log(`\n  Mode: LIVE API FETCH (META_ADLIB_TOKEN detected)`);
+  console.log('\n  Mode: LIVE API FETCH (META_ADLIB_TOKEN detected)');
   return fetchFromApi(config);
 }
 
 // ─── Config builder ───────────────────────────────────────────────────────────
 
-/**
- * Builds MetaFetchConfig from environment variables.
- * All values have safe defaults so the dry-run works with no env vars set.
- *
- * Environment variables:
- *   META_ADLIB_TOKEN    — access token (absent = simulation mode)
- *   META_SEARCH_TERMS   — keyword(s) passed to search_terms (default: 'skincare')
- *   META_COUNTRIES      — comma-separated ISO codes (default: 'SG')
- *   META_FETCH_LIMIT    — number of ads to fetch (default: 5, max: 25)
- *   META_AD_FORMAT      — 'STATIC' or 'VIDEO' (default: 'STATIC')
- *   META_SIMULATION_MODE — 'true' forces simulation even if token is set
- */
 export function buildConfigFromEnv(): MetaFetchConfig {
   const token = process.env.META_ADLIB_TOKEN || undefined;
   const searchTerms = process.env.META_SEARCH_TERMS ?? 'skincare';
@@ -186,10 +183,15 @@ export function buildConfigFromEnv(): MetaFetchConfig {
   const rawFormat = (process.env.META_AD_FORMAT ?? 'STATIC').toUpperCase();
   const format = rawFormat === 'VIDEO' ? 'VIDEO' : 'STATIC';
   const simulationMode = process.env.META_SIMULATION_MODE === 'true';
+  const searchPageIds = (process.env.META_PAGE_IDS ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
 
   return {
     token,
     searchTerms,
+    searchPageIds: searchPageIds.length > 0 ? searchPageIds : undefined,
     countries,
     adActiveStatus: 'ALL',
     limit,

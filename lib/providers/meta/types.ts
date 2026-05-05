@@ -48,6 +48,8 @@ export type MetaFetchConfig = {
   token: string | undefined;
   /** search_terms passed to the API */
   searchTerms: string;
+  /** search_page_ids passed to the API, usually from Competitor.metaPageId */
+  searchPageIds?: string[];
   /** ISO country codes, e.g. ['SG'] */
   countries: string[];
   /** ad_active_status — 'ALL' | 'ACTIVE' | 'INACTIVE' */
