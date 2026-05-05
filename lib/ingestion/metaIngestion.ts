@@ -1,17 +1,18 @@
 /**
- * Phase 4 Step 2 — Meta Ad Ingestion
+ * Phase 4 Step 5 — Meta Ad Ingestion targeted by competitor Meta Page ID
  *
  * Fetches ads from the Meta Ad Library API and writes them to the database as
  * discovered competitor activity. All writes are guarded by the dryRun flag.
  *
  * Design invariants enforced here:
+ *  - competitor.metaPageId is required before any fetch occurs
+ *  - fetchConfig.searchPageIds is forced to [competitor.metaPageId]
  *  - qualified is always false for API-sourced ads (7.0 threshold is not weakened)
  *  - reviewStatus is always 'PENDING' on first insert
  *  - adSource is always 'meta_api'
  *  - adLink is always run through redactToken() before storage
  *  - metaAdId uniqueness is checked before every insert (deduplication)
  *  - Post-write token safety verification queries for any stored access_token= value
- *  - paging.next is consumed by fetchMetaAds() and never reaches this layer
  */
 
 import type { PrismaClient } from '@prisma/client';
@@ -21,32 +22,19 @@ import { fetchMetaAds } from '@/lib/providers/meta/fetch';
 import type { MetaAdRecord, MetaFetchConfig } from '@/lib/providers/meta/types';
 import { redactToken } from '@/lib/providers/meta/redact';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
 export type IngestionConfig = {
-  /** Prisma cuid of the Competitor whose library this scan targets */
   competitorId: string;
-  /** Meta fetch parameters — built by buildConfigFromEnv() in the calling script */
   fetchConfig: MetaFetchConfig;
-  /**
-   * When true: fetch, normalise, analyse, and print what would be written,
-   * then return without any Prisma writes. Competitor lookup (read) still runs.
-   */
   dryRun: boolean;
 };
 
 export type IngestionResult = {
   adsProcessed: number;
   adsInserted: number;
-  /** Duplicates — metaAdId already exists in the database */
   adsSkipped: number;
-  /** Records with no id field — cannot deduplicate, skipped */
   adsErrored: number;
-  /** null when dryRun is true */
   scanRunId: string | null;
 };
-
-// ─── Internal helpers ─────────────────────────────────────────────────────────
 
 function firstOrEmpty(values: string[] | undefined): string {
   if (!values || values.length === 0) return '';
@@ -79,37 +67,37 @@ function deriveAdStatus(record: MetaAdRecord): string {
   return record.ad_delivery_stop_time ? 'INACTIVE' : 'ACTIVE';
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * Core ingestion function. Fetches Meta ads, analyses them, and writes to the
- * database under the specified Competitor. Pass dryRun=true to prove the full
- * chain without any database writes.
- *
- * Token safety:
- *  - ad_snapshot_url is run through redactToken() before assignment to adLink
- *  - After all writes, a verification query asserts no stored adLink contains
- *    access_token= — throws with a TOKEN SAFETY VIOLATION message if found
- *  - Error messages from fetch are already redacted by fetchMetaAds()
- */
 export async function ingestMetaAds(
   config: IngestionConfig,
   prisma: PrismaClient,
 ): Promise<IngestionResult> {
   const { competitorId, fetchConfig, dryRun } = config;
 
-  // ── 1. Load Competitor ──────────────────────────────────────────────────────
-  // Always runs — dry-run skips writes, not reads.
   const competitor = await prisma.competitor.findUniqueOrThrow({
     where: { id: competitorId },
-    select: { id: true, name: true, clientId: true, industryId: true },
+    select: {
+      id: true,
+      name: true,
+      clientId: true,
+      industryId: true,
+      metaPageId: true,
+    },
   });
+
+  if (!competitor.metaPageId) {
+    throw new Error(
+      `Competitor "${competitor.name}" has no Meta Page ID configured. ` +
+        'Set it via the competitor config page before running ingestion.',
+    );
+  }
+
+  fetchConfig.searchPageIds = [competitor.metaPageId];
 
   console.log(`\n  Competitor:   ${competitor.name} (${competitor.id})`);
   console.log(`  Client ID:    ${competitor.clientId}`);
   console.log(`  Industry ID:  ${competitor.industryId}`);
+  console.log(`  Meta Page ID: ${competitor.metaPageId}`);
 
-  // ── 2. Fetch ────────────────────────────────────────────────────────────────
   const records = await fetchMetaAds(fetchConfig);
 
   if (records.length === 0) {
@@ -117,7 +105,6 @@ export async function ingestMetaAds(
     return { adsProcessed: 0, adsInserted: 0, adsSkipped: 0, adsErrored: 0, scanRunId: null };
   }
 
-  // ── 3. Normalise + Analyse ──────────────────────────────────────────────────
   type Processed = {
     record: MetaAdRecord;
     row: ExampleRow;
@@ -126,28 +113,29 @@ export async function ingestMetaAds(
     adStatus: string;
   };
 
-  const processed: Processed[] = records.map((record) => ({
-    record,
-    row: normaliseRecord(record),
-    analysis: analyseAdRow(normaliseRecord(record), fetchConfig.format as AdFormat),
-    // Token stripped here — this is the value that will be stored in adLink
-    safeAdLink: record.ad_snapshot_url ? redactToken(record.ad_snapshot_url) : '',
-    adStatus: deriveAdStatus(record),
-  }));
+  const processed: Processed[] = records.map((record) => {
+    const row = normaliseRecord(record);
+    return {
+      record,
+      row,
+      analysis: analyseAdRow(row, fetchConfig.format as AdFormat),
+      safeAdLink: record.ad_snapshot_url ? redactToken(record.ad_snapshot_url) : '',
+      adStatus: deriveAdStatus(record),
+    };
+  });
 
-  // ── 4. Dry-run: print plan and exit ─────────────────────────────────────────
   if (dryRun) {
-    console.log('\n  ── DRY RUN — no DB writes ──────────────────────────────────');
-    console.log(`\n  Would create 1 ScanRun (source: META_API, status: IN_PROGRESS → COMPLETED)`);
+    console.log('\n  DRY RUN - no DB writes');
+    console.log(`  Would create 1 ScanRun (source: META_API, status: IN_PROGRESS to COMPLETED)`);
     console.log(`  Would process ${processed.length} ad record(s):\n`);
 
     for (let i = 0; i < processed.length; i++) {
       const { record, analysis, safeAdLink, adStatus } = processed[i];
-      const metaAdId = record.id ?? `(no id — index ${i})`;
+      const metaAdId = record.id ?? `(no id - index ${i})`;
       const hasId = !!record.id;
 
       console.log(`  [${i + 1}/${processed.length}]`);
-      console.log(`    metaAdId:     ${metaAdId}${hasId ? '' : ' ← WOULD BE SKIPPED (no id)'}`);
+      console.log(`    metaAdId:     ${metaAdId}${hasId ? '' : ' - WOULD BE SKIPPED (no id)'}`);
       console.log(`    advertiser:   ${record.page_name ?? 'Unknown'}`);
       console.log(`    adSource:     meta_api`);
       console.log(`    reviewStatus: PENDING`);
@@ -160,7 +148,6 @@ export async function ingestMetaAds(
     }
 
     console.log('\n  Written to DB: 0');
-    console.log('  ────────────────────────────────────────────────────────────');
 
     return {
       adsProcessed: processed.length,
@@ -171,7 +158,6 @@ export async function ingestMetaAds(
     };
   }
 
-  // ── 5. Create ScanRun ───────────────────────────────────────────────────────
   const scanRun = await prisma.scanRun.create({
     data: {
       competitorId,
@@ -186,21 +172,17 @@ export async function ingestMetaAds(
   let skipped = 0;
   let errored = 0;
 
-  // ── 6. Ingest each record ───────────────────────────────────────────────────
   for (const { record, analysis, safeAdLink, adStatus } of processed) {
     const metaAdId = record.id;
 
-    // Records with no id cannot be deduplicated — skip
     if (!metaAdId) {
-      console.log(`  ⚠  Skipping record with no id (page: ${record.page_name ?? 'unknown'})`);
+      console.log(`  Skipping record with no id (page: ${record.page_name ?? 'unknown'})`);
       errored++;
       continue;
     }
 
-    // Deduplication: update lifecycle fields and record as SEEN — no reinsert
     const existing = await prisma.ad.findUnique({ where: { metaAdId } });
     if (existing) {
-      // Update lastSeenAt and adStatus to reflect current fetch state
       await prisma.ad.update({
         where: { id: existing.id },
         data: {
@@ -208,18 +190,14 @@ export async function ingestMetaAds(
           adStatus,
         },
       });
-      // Record that this ad was seen in this scan
       await prisma.adScanRecord.create({
         data: { adId: existing.id, scanRunId: scanRun.id, action: 'SEEN' },
       });
-      console.log(`  → Updated lifecycle (SEEN): ${metaAdId} | adStatus: ${adStatus}`);
+      console.log(`  Updated lifecycle (SEEN): ${metaAdId} | adStatus: ${adStatus}`);
       skipped++;
       continue;
     }
 
-    // Create Ad
-    // qualified is always false — API-sourced ads enter as discovered activity
-    // reviewStatus='PENDING' — requires human review before promotion to library
     const ad = await prisma.ad.create({
       data: {
         metaAdId,
@@ -229,7 +207,7 @@ export async function ingestMetaAds(
         clientId: competitor.clientId,
         industryId: competitor.industryId,
         adFormat: fetchConfig.format,
-        adLink: safeAdLink,              // token already stripped by redactToken()
+        adLink: safeAdLink,
         productOrService: record.page_name ?? null,
         primaryCopy: firstOrEmpty(record.ad_creative_bodies) || null,
         headline: firstOrEmpty(record.ad_creative_link_titles) || null,
@@ -243,16 +221,13 @@ export async function ingestMetaAds(
       },
     });
 
-    // Create AdAnalysis — all component scores stored even when below 7.0
     await prisma.adAnalysis.create({
       data: {
         adId: ad.id,
-        // Human-written fields are empty for API-sourced ads
         creativeAnalysis: '',
         copyAnalysis: '',
         headlineAnalysis: '',
         descriptionAnalysis: '',
-        // Computed fields
         strengthsJson: JSON.stringify(analysis.strengths),
         weaknessesJson: JSON.stringify(analysis.weaknesses),
         improvementsJson: JSON.stringify(analysis.improvements),
@@ -261,7 +236,6 @@ export async function ingestMetaAds(
         aidaJson: JSON.stringify(analysis.aida),
         funnelStage: analysis.funnelStage,
         raceStage: analysis.raceStage,
-        // Phase 3.5 conversion scoring
         copyScore: analysis.copyScore,
         headlineScore: analysis.headlineScore,
         descriptionScore: analysis.descriptionScore,
@@ -280,13 +254,11 @@ export async function ingestMetaAds(
           ? JSON.stringify(analysis.rewriteDirection)
           : null,
         finalVerdict: analysis.finalVerdict,
-        // Shared sub-scores
         hookStopScrollScore: analysis.subScores.hookStopScroll,
         audienceRelevanceScore: analysis.subScores.audienceRelevance,
         valueClarityScore: analysis.subScores.valueClarity,
         trustProofStrengthScore: analysis.subScores.trustProofStrength,
         ctaClarityScore: analysis.subScores.ctaClarity,
-        // Static-specific sub-scores (null for video)
         visualHierarchyScore: analysis.subScores.visualHierarchy ?? null,
         productClarityScore: analysis.subScores.productClarity ?? null,
         offerClarityScore: analysis.subScores.offerClarity ?? null,
@@ -294,7 +266,6 @@ export async function ingestMetaAds(
         descriptionUsefulnessScore: analysis.subScores.descriptionUsefulness ?? null,
         ctaVisibilityScore: analysis.subScores.ctaVisibility ?? null,
         trustSignalsScore: analysis.subScores.trustSignals ?? null,
-        // Video-specific sub-scores (null for static)
         firstThreeSecondsScore: analysis.subScores.firstThreeSeconds ?? null,
         soundOffDesignScore: analysis.subScores.soundOffDesign ?? null,
         soundOnEnhancementScore: analysis.subScores.soundOnEnhancement ?? null,
@@ -305,18 +276,16 @@ export async function ingestMetaAds(
       },
     });
 
-    // Link Ad to this ScanRun
     await prisma.adScanRecord.create({
       data: { adId: ad.id, scanRunId: scanRun.id, action: 'NEW' },
     });
 
     console.log(
-      `  ✓ Inserted: ${metaAdId} | score: ${analysis.overallScore.toFixed(1)} | verdict: ${analysis.finalVerdict}`,
+      `  Inserted: ${metaAdId} | score: ${analysis.overallScore.toFixed(1)} | verdict: ${analysis.finalVerdict}`,
     );
     inserted++;
   }
 
-  // ── 7. Close ScanRun ────────────────────────────────────────────────────────
   await prisma.scanRun.update({
     where: { id: scanRun.id },
     data: {
@@ -327,15 +296,11 @@ export async function ingestMetaAds(
     },
   });
 
-  // ── 8. Update Competitor.lastScannedAt ──────────────────────────────────────
   await prisma.competitor.update({
     where: { id: competitorId },
     data: { lastScannedAt: new Date() },
   });
 
-  // ── 9. Token safety verification ────────────────────────────────────────────
-  // Query all API-sourced Ads and assert none have a bare access_token= in adLink.
-  // This is a hard post-write invariant — any match means redactToken() was bypassed.
   const leakedTokenAds = await prisma.ad.findMany({
     where: {
       adSource: 'meta_api',
@@ -352,7 +317,7 @@ export async function ingestMetaAds(
     );
   }
 
-  console.log('  ✓ Token safety verified — no access_token= in stored adLink values');
+  console.log('  Token safety verified - no access_token= in stored adLink values');
 
   return {
     adsProcessed: processed.length,
