@@ -187,7 +187,7 @@ export default async function MetaReviewPage({
               </p>
 
               {/* ── Review actions ── */}
-              <p>
+              <div>
                 <form
                   method="POST"
                   action={`/api/ads/${ad.id}/review`}
@@ -207,7 +207,7 @@ export default async function MetaReviewPage({
                   <input type="hidden" name="action" value="REJECT" />
                   <button type="submit">Reject</button>
                 </form>
-              </p>
+              </div>
 
               {/* ── Meta ID (for audit / debugging) ── */}
               {ad.metaAdId && (
