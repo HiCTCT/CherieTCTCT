@@ -9,6 +9,11 @@ export type CompetitorsFilter = {
   offset?: number;
 };
 
+export type MetaConfigUpdate = {
+  facebookPageUrl?: string | null;
+  metaPageId?: string | null;
+};
+
 export function getCompetitors(filter: CompetitorsFilter = {}) {
   const where: Prisma.CompetitorWhereInput = {};
 
@@ -80,5 +85,36 @@ export function getCompetitorsWithQualifiedAds() {
     },
     select: { id: true, name: true },
     orderBy: { name: 'asc' },
+  });
+}
+
+export function findMetaPageIdConflict(metaPageId: string, currentCompetitorId: string) {
+  return db.competitor.findFirst({
+    where: {
+      metaPageId,
+      id: { not: currentCompetitorId },
+    },
+    select: {
+      id: true,
+      name: true,
+    },
+  });
+}
+
+export function updateCompetitorMetaConfig(
+  id: string,
+  data: MetaConfigUpdate,
+) {
+  return db.competitor.update({
+    where: { id },
+    data,
+    select: {
+      id: true,
+      name: true,
+      facebookPageUrl: true,
+      metaPageId: true,
+      lastScannedAt: true,
+      updatedAt: true,
+    },
   });
 }
