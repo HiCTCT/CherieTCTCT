@@ -18,14 +18,7 @@ const FIELDS = [
 
 // ─── Simulation data ──────────────────────────────────────────────────────────
 
-/**
- * Realistic mock records that prove the normalise → analyse pipeline
- * without a real Meta API call. One STATIC-shaped and one VIDEO-shaped
- * record included so the dry-run covers both analytical paths.
- *
- * These are NOT real ads. Field shapes mirror real Meta API responses.
- */
-function getSimulatedRecords(): MetaAdRecord[] {
+function getSimulatedImageRecords(): MetaAdRecord[] {
   return [
     {
       id: 'sim-001',
@@ -48,7 +41,7 @@ function getSimulatedRecords(): MetaAdRecord[] {
     {
       id: 'sim-002',
       page_name: 'Dr Jart+ Singapore',
-      page_id: '100009876543210',
+      page_id: '100001234567890',
       ad_creative_bodies: [
         'NEW Ceramidin Cream — your skin barrier\'s best friend. ' +
         'Book a consultation at our Orchard Road store. Results guaranteed or your money back.',
@@ -63,10 +56,15 @@ function getSimulatedRecords(): MetaAdRecord[] {
       ad_creation_time: '2026-01-28T14:00:00+0800',
       publisher_platforms: ['facebook'],
     },
+  ];
+}
+
+function getSimulatedVideoRecords(): MetaAdRecord[] {
+  return [
     {
       id: 'sim-003',
       page_name: 'The Ordinary SG',
-      page_id: '100005555555555',
+      page_id: '100001234567890',
       ad_creative_bodies: [
         'Hyaluronic Acid 2% + B5. Simple, effective hydration for every skin type. ' +
         'Learn more about our science-first approach to skincare.',
@@ -80,6 +78,12 @@ function getSimulatedRecords(): MetaAdRecord[] {
       publisher_platforms: ['facebook', 'instagram', 'audience_network'],
     },
   ];
+}
+
+function getSimulatedRecords(config: MetaFetchConfig): MetaAdRecord[] {
+  if (config.mediaType === 'IMAGE') return getSimulatedImageRecords();
+  if (config.mediaType === 'VIDEO') return getSimulatedVideoRecords();
+  return [...getSimulatedImageRecords(), ...getSimulatedVideoRecords()];
 }
 
 function filterSimulatedRecords(records: MetaAdRecord[], config: MetaFetchConfig): MetaAdRecord[] {
@@ -115,10 +119,15 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
     params.set('search_page_ids', serialisePageIdsForGraphApi(config.searchPageIds));
   }
 
-  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&ad_reached_countries=...&fields=...&limit=${config.limit}&access_token=REDACTED`;
+  if (config.mediaType) {
+    params.set('media_type', config.mediaType);
+  }
+
+  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&media_type=${config.mediaType ?? ''}&ad_reached_countries=...&fields=...&limit=${config.limit}&access_token=REDACTED`;
   console.log('\n  Fetching from Meta Ad Library API...');
   console.log(`  Search terms:  ${config.searchTerms || '(empty)'}`);
   console.log(`  Page IDs:      ${config.searchPageIds?.join(', ') ?? '(not set)'}`);
+  console.log(`  Media type:    ${config.mediaType ?? '(not set)'}`);
   console.log(`  Countries:     ${config.countries.join(', ')}`);
   console.log(`  Active status: ${config.adActiveStatus}`);
   console.log(`  Limit:         ${config.limit}`);
@@ -136,7 +145,8 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
   }
 
   if (!json.data || json.data.length === 0) {
-    throw new Error('Meta API returned no ads for this page ID or search. Try a different Meta Page ID, search_terms, or country.');
+    console.log('  No ads returned for this media type and page ID.');
+    return [];
   }
 
   console.log(`  ✓ Received ${json.data.length} ad(s)`);
@@ -154,9 +164,10 @@ export async function fetchMetaAds(config: MetaFetchConfig): Promise<MetaAdRecor
   const isSimulation = config.simulationMode || !config.token;
 
   if (isSimulation) {
-    const records = filterSimulatedRecords(getSimulatedRecords(), config);
+    const records = filterSimulatedRecords(getSimulatedRecords(config), config);
     console.log('\n  Mode: SIMULATION (META_ADLIB_TOKEN not set)');
     console.log(`  Page IDs: ${config.searchPageIds?.join(', ') ?? '(not set)'}`);
+    console.log(`  Media type: ${config.mediaType ?? '(not set)'}`);
     console.log(`  Returning ${records.length} mock record(s)`);
     console.log('  ⚠  This proves normalise → analyse pipeline only.');
     console.log('     Set META_ADLIB_TOKEN to test real API fetch.');
