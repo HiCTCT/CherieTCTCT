@@ -267,7 +267,7 @@ async function ingestPass(
         trustSignalsScore: analysis.subScores.trustSignals ?? null,
         firstThreeSecondsScore: analysis.subScores.firstThreeSeconds ?? null,
         soundOffDesignScore: analysis.subScores.soundOffDesign ?? null,
-        soundOnEnhancementScore: analysis.subScores.soundOffDesign ?? null,
+        soundOnEnhancementScore: analysis.subScores.soundOnEnhancement ?? null,
         onScreenTextScore: analysis.subScores.onScreenText ?? null,
         storyFlowScore: analysis.subScores.storyFlow ?? null,
         authenticityScore: analysis.subScores.authenticity ?? null,
