@@ -1,9 +1,13 @@
 /**
- * Phase 4 Step 5 — Meta Ad Ingestion targeted by page ID: CLI Entry Point
+ * Phase 4 Step 7B — Meta Ad Ingestion with media-type format detection: CLI Entry Point
  *
  * Fetches ads from the Meta Ad Library API for a specific Competitor and writes
  * them to the database as discovered activity (qualified=false, reviewStatus=PENDING).
  * The competitor must have a saved Meta Page ID before ingestion can run.
+ *
+ * Ingestion now runs two internal passes:
+ *   1. media_type=IMAGE -> adFormat=STATIC
+ *   2. media_type=VIDEO -> adFormat=VIDEO
  *
  * Usage:
  *   # Dry-run (no DB writes — proves fetch → analyse → plan chain):
@@ -15,8 +19,8 @@
  *   # Live ingestion (real Meta API):
  *   COMPETITOR_ID=<cuid> META_ADLIB_TOKEN=<token> npm run meta:ingest
  *
- *   # Override format, search terms, country:
- *   COMPETITOR_ID=<cuid> META_AD_FORMAT=VIDEO META_SEARCH_TERMS=makeup META_COUNTRIES=SG npm run meta:ingest
+ *   # Override search terms, country, limit:
+ *   COMPETITOR_ID=<cuid> META_SEARCH_TERMS=makeup META_COUNTRIES=SG META_FETCH_LIMIT=5 npm run meta:ingest
  *
  * Environment variables:
  *   COMPETITOR_ID         — required — Prisma cuid of the target Competitor
@@ -25,8 +29,8 @@
  *   META_PAGE_IDS         — optional comma-separated page IDs for dry-run/fetch tests; ingestion overrides this with Competitor.metaPageId
  *   META_SEARCH_TERMS     — keyword(s) for the Ad Library query (default: 'skincare')
  *   META_COUNTRIES        — comma-separated ISO codes (default: 'SG')
- *   META_FETCH_LIMIT      — number of ads per page (default: 5, max: 25)
- *   META_AD_FORMAT        — 'STATIC' or 'VIDEO' (default: 'STATIC')
+ *   META_FETCH_LIMIT      — number of ads per media-type pass (default: 5, max: 25)
+ *   META_AD_FORMAT        — retained for meta:dry-run/backward compatibility; meta:ingest overrides format per media-type pass
  *   META_SIMULATION_MODE  — 'true' forces simulation even when token is set
  */
 
@@ -49,16 +53,16 @@ async function main(): Promise<void> {
   const fetchConfig = buildConfigFromEnv();
 
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  Phase 4 Step 5 — Meta Ad Ingestion targeted by page ID');
+  console.log('  Phase 4 Step 7B — Meta Ad Ingestion by media_type');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log(`  Mode:          ${dryRun ? 'DRY RUN (no DB writes)' : 'LIVE WRITE'}`);
   console.log(`  Competitor ID: ${competitorId}`);
-  console.log(`  Format:        ${fetchConfig.format}`);
   console.log(`  Search terms:  ${fetchConfig.searchTerms}`);
   console.log(`  Page IDs:      ${fetchConfig.searchPageIds?.join(', ') ?? '(loaded from competitor during ingestion)'}`);
   console.log(`  Countries:     ${fetchConfig.countries.join(', ')}`);
-  console.log(`  Limit:         ${fetchConfig.limit}`);
-  console.log('  Note:          Competitor.metaPageId is loaded and enforced after competitor lookup.');
+  console.log(`  Limit:         ${fetchConfig.limit} per media-type pass`);
+  console.log('  Passes:        IMAGE -> STATIC, VIDEO -> VIDEO');
+  console.log('  Note:          META_AD_FORMAT is ignored by meta:ingest; format is set by media_type.');
 
   const prisma = new PrismaClient();
 
@@ -73,13 +77,19 @@ async function main(): Promise<void> {
     console.log('═══════════════════════════════════════════════════════════════');
     console.log(`  Ads fetched:    ${result.adsProcessed}`);
 
+    for (const pass of result.byPass) {
+      console.log(
+        `  ${pass.mediaType} -> ${pass.format}: processed ${pass.adsProcessed}, inserted ${pass.adsInserted}, seen ${pass.adsSkipped}, errored ${pass.adsErrored}`,
+      );
+    }
+
     if (dryRun) {
       console.log(`  Written to DB:  0`);
       console.log('');
       console.log('  ⚠  DRY RUN — set META_DRY_RUN=false (or unset it) to write to DB.');
     } else {
       console.log(`  Ads inserted:   ${result.adsInserted}`);
-      console.log(`  Ads skipped:    ${result.adsSkipped} (duplicates)`);
+      console.log(`  Ads skipped:    ${result.adsSkipped} (duplicates / SEEN)`);
       console.log(`  Ads errored:    ${result.adsErrored} (no metaAdId — skipped)`);
       console.log(`  ScanRun ID:     ${result.scanRunId}`);
       console.log(`  Written to DB:  ${result.adsInserted}`);
