@@ -1,13 +1,16 @@
 /**
- * Phase 4 Step 7B — Meta Ad Ingestion with media-type format detection: CLI Entry Point
+ * Phase 4 Step 8A — Meta Ad Ingestion with pagination support: CLI Entry Point
  *
  * Fetches ads from the Meta Ad Library API for a specific Competitor and writes
  * them to the database as discovered activity (qualified=false, reviewStatus=PENDING).
  * The competitor must have a saved Meta Page ID before ingestion can run.
  *
- * Ingestion now runs two internal passes:
+ * Ingestion runs two internal passes:
  *   1. media_type=IMAGE -> adFormat=STATIC
  *   2. media_type=VIDEO -> adFormat=VIDEO
+ *
+ * The fetcher follows Meta pagination until the configured total per-pass limit,
+ * no next page, or a hard safety page cap is reached.
  *
  * Usage:
  *   # Dry-run (no DB writes — proves fetch → analyse → plan chain):
@@ -19,8 +22,8 @@
  *   # Live ingestion (real Meta API):
  *   COMPETITOR_ID=<cuid> META_ADLIB_TOKEN=<token> npm run meta:ingest
  *
- *   # Override search terms, country, limit:
- *   COMPETITOR_ID=<cuid> META_SEARCH_TERMS=makeup META_COUNTRIES=SG META_FETCH_LIMIT=5 npm run meta:ingest
+ *   # Override search terms, country, total per-pass limit:
+ *   COMPETITOR_ID=<cuid> META_SEARCH_TERMS=makeup META_COUNTRIES=SG META_FETCH_LIMIT=25 npm run meta:ingest
  *
  * Environment variables:
  *   COMPETITOR_ID         — required — Prisma cuid of the target Competitor
@@ -29,7 +32,7 @@
  *   META_PAGE_IDS         — optional comma-separated page IDs for dry-run/fetch tests; ingestion overrides this with Competitor.metaPageId
  *   META_SEARCH_TERMS     — keyword(s) for the Ad Library query (default: 'skincare')
  *   META_COUNTRIES        — comma-separated ISO codes (default: 'SG')
- *   META_FETCH_LIMIT      — number of ads per media-type pass (default: 5, max: 25)
+ *   META_FETCH_LIMIT      — total maximum ads per media-type pass (default: 5, max: 25)
  *   META_AD_FORMAT        — retained for meta:dry-run/backward compatibility; meta:ingest overrides format per media-type pass
  *   META_SIMULATION_MODE  — 'true' forces simulation even when token is set
  */
@@ -53,14 +56,14 @@ async function main(): Promise<void> {
   const fetchConfig = buildConfigFromEnv();
 
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  Phase 4 Step 7B — Meta Ad Ingestion by media_type');
+  console.log('  Phase 4 Step 8A — Meta Ad Ingestion with pagination');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log(`  Mode:          ${dryRun ? 'DRY RUN (no DB writes)' : 'LIVE WRITE'}`);
   console.log(`  Competitor ID: ${competitorId}`);
   console.log(`  Search terms:  ${fetchConfig.searchTerms}`);
   console.log(`  Page IDs:      ${fetchConfig.searchPageIds?.join(', ') ?? '(loaded from competitor during ingestion)'}`);
   console.log(`  Countries:     ${fetchConfig.countries.join(', ')}`);
-  console.log(`  Limit:         ${fetchConfig.limit} per media-type pass`);
+  console.log(`  Limit:         ${fetchConfig.limit} total ads per media-type pass`);
   console.log('  Passes:        IMAGE -> STATIC, VIDEO -> VIDEO');
   console.log('  Note:          META_AD_FORMAT is ignored by meta:ingest; format is set by media_type.');
 
