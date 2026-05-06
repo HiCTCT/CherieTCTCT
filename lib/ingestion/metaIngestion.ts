@@ -1,12 +1,13 @@
 /**
- * Phase 4 Step 7A — Meta Ad Ingestion with public reviewer links
+ * Phase 4 Step 7B — Meta Ad Ingestion with media-type-based format detection
  *
- * Fetches ads from the Meta Ad Library API and writes them to the database as
- * discovered competitor activity. All writes are guarded by the dryRun flag.
+ * Fetches Meta ads in two internal passes:
+ *  - media_type=IMAGE -> adFormat=STATIC
+ *  - media_type=VIDEO -> adFormat=VIDEO
  *
  * Design invariants enforced here:
  *  - competitor.metaPageId is required before any fetch occurs
- *  - fetchConfig.searchPageIds is forced to [competitor.metaPageId]
+ *  - each pass targets the same competitor.metaPageId
  *  - qualified is always false for API-sourced ads (7.0 threshold is not weakened)
  *  - reviewStatus is always 'PENDING' on first insert
  *  - adSource is always 'meta_api'
@@ -19,12 +20,24 @@ import type { PrismaClient } from '@prisma/client';
 import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
 import { fetchMetaAds } from '@/lib/providers/meta/fetch';
-import type { MetaAdRecord, MetaFetchConfig } from '@/lib/providers/meta/types';
+import type { MetaAdRecord, MetaFetchConfig, MetaMediaType } from '@/lib/providers/meta/types';
 
 export type IngestionConfig = {
   competitorId: string;
   fetchConfig: MetaFetchConfig;
   dryRun: boolean;
+};
+
+type PassName = 'IMAGE_TO_STATIC' | 'VIDEO_TO_VIDEO';
+
+type PassResult = {
+  passName: PassName;
+  mediaType: MetaMediaType;
+  format: AdFormat;
+  adsProcessed: number;
+  adsInserted: number;
+  adsSkipped: number;
+  adsErrored: number;
 };
 
 export type IngestionResult = {
@@ -33,6 +46,7 @@ export type IngestionResult = {
   adsSkipped: number;
   adsErrored: number;
   scanRunId: string | null;
+  byPass: PassResult[];
 };
 
 function firstOrEmpty(values: string[] | undefined): string {
@@ -70,112 +84,94 @@ function deriveAdStatus(record: MetaAdRecord): string {
   return record.ad_delivery_stop_time ? 'INACTIVE' : 'ACTIVE';
 }
 
-export async function ingestMetaAds(
-  config: IngestionConfig,
-  prisma: PrismaClient,
-): Promise<IngestionResult> {
-  const { competitorId, fetchConfig, dryRun } = config;
+type Processed = {
+  record: MetaAdRecord;
+  row: ExampleRow;
+  analysis: AnalysisOutput;
+  publicAdLink: string;
+  adStatus: string;
+  format: AdFormat;
+};
 
-  const competitor = await prisma.competitor.findUniqueOrThrow({
-    where: { id: competitorId },
-    select: {
-      id: true,
-      name: true,
-      clientId: true,
-      industryId: true,
-      metaPageId: true,
-    },
-  });
+type PassConfig = {
+  passName: PassName;
+  label: string;
+  mediaType: MetaMediaType;
+  format: AdFormat;
+  fetchConfig: MetaFetchConfig;
+};
 
-  if (!competitor.metaPageId) {
-    throw new Error(
-      `Competitor "${competitor.name}" has no Meta Page ID configured. ` +
-        'Set it via the competitor config page before running ingestion.',
-    );
-  }
-
-  fetchConfig.searchPageIds = [competitor.metaPageId];
-
-  console.log(`\n  Competitor:   ${competitor.name} (${competitor.id})`);
-  console.log(`  Client ID:    ${competitor.clientId}`);
-  console.log(`  Industry ID:  ${competitor.industryId}`);
-  console.log(`  Meta Page ID: ${competitor.metaPageId}`);
-
-  const records = await fetchMetaAds(fetchConfig);
-
-  if (records.length === 0) {
-    console.log('  No records returned. Nothing to ingest.');
-    return { adsProcessed: 0, adsInserted: 0, adsSkipped: 0, adsErrored: 0, scanRunId: null };
-  }
-
-  type Processed = {
-    record: MetaAdRecord;
-    row: ExampleRow;
-    analysis: AnalysisOutput;
-    publicAdLink: string;
-    adStatus: string;
-  };
-
-  const processed: Processed[] = records.map((record) => {
+function processRecords(records: MetaAdRecord[], format: AdFormat): Processed[] {
+  return records.map((record) => {
     const row = normaliseRecord(record);
     return {
       record,
       row,
-      analysis: analyseAdRow(row, fetchConfig.format as AdFormat),
+      analysis: analyseAdRow(row, format),
       publicAdLink: record.id ? buildPublicAdLibraryUrl(record.id) : '',
       adStatus: deriveAdStatus(record),
+      format,
     };
   });
+}
 
-  if (dryRun) {
-    console.log('\n  DRY RUN - no DB writes');
-    console.log(`  Would create 1 ScanRun (source: META_API, status: IN_PROGRESS to COMPLETED)`);
-    console.log(`  Would process ${processed.length} ad record(s):\n`);
+function emptyPassResult(pass: PassConfig): PassResult {
+  return {
+    passName: pass.passName,
+    mediaType: pass.mediaType,
+    format: pass.format,
+    adsProcessed: 0,
+    adsInserted: 0,
+    adsSkipped: 0,
+    adsErrored: 0,
+  };
+}
 
-    for (let i = 0; i < processed.length; i++) {
-      const { record, analysis, publicAdLink, adStatus } = processed[i];
-      const metaAdId = record.id ?? `(no id - index ${i})`;
-      const hasId = !!record.id;
+function printDryRunPass(pass: PassConfig, processed: Processed[]): PassResult {
+  console.log(`\n  ${pass.label}`);
+  console.log(`  Would process ${processed.length} ad record(s):\n`);
 
-      console.log(`  [${i + 1}/${processed.length}]`);
-      console.log(`    metaAdId:     ${metaAdId}${hasId ? '' : ' - WOULD BE SKIPPED (no id)'}`);
-      console.log(`    advertiser:   ${record.page_name ?? 'Unknown'}`);
-      console.log(`    adSource:     meta_api`);
-      console.log(`    reviewStatus: PENDING`);
-      console.log(`    qualified:    false`);
-      console.log(`    adStatus:     ${adStatus}`);
-      console.log(`    score:        ${analysis.overallScore.toFixed(1)} / 10`);
-      console.log(`    finalVerdict: ${analysis.finalVerdict}`);
-      console.log(`    adLink:       ${publicAdLink || '(empty)'}`);
-      console.log(`    platforms:    ${record.publisher_platforms?.join(', ') ?? 'N/A'}`);
-    }
+  for (let i = 0; i < processed.length; i++) {
+    const { record, analysis, publicAdLink, adStatus, format } = processed[i];
+    const metaAdId = record.id ?? `(no id - index ${i})`;
+    const hasId = !!record.id;
 
-    console.log('\n  Written to DB: 0');
-
-    return {
-      adsProcessed: processed.length,
-      adsInserted: 0,
-      adsSkipped: 0,
-      adsErrored: 0,
-      scanRunId: null,
-    };
+    console.log(`  [${i + 1}/${processed.length}]`);
+    console.log(`    metaAdId:     ${metaAdId}${hasId ? '' : ' - WOULD BE SKIPPED (no id)'}`);
+    console.log(`    advertiser:   ${record.page_name ?? 'Unknown'}`);
+    console.log(`    mediaType:    ${pass.mediaType}`);
+    console.log(`    adFormat:     ${format}`);
+    console.log(`    adSource:     meta_api`);
+    console.log(`    reviewStatus: PENDING`);
+    console.log(`    qualified:    false`);
+    console.log(`    adStatus:     ${adStatus}`);
+    console.log(`    score:        ${analysis.overallScore.toFixed(1)} / 10`);
+    console.log(`    finalVerdict: ${analysis.finalVerdict}`);
+    console.log(`    adLink:       ${publicAdLink || '(empty)'}`);
+    console.log(`    platforms:    ${record.publisher_platforms?.join(', ') ?? 'N/A'}`);
   }
 
-  const scanRun = await prisma.scanRun.create({
-    data: {
-      competitorId,
-      source: 'META_API',
-      status: 'IN_PROGRESS',
-    },
-  });
+  return {
+    ...emptyPassResult(pass),
+    adsProcessed: processed.length,
+    adsErrored: processed.filter((item) => !item.record.id).length,
+  };
+}
 
-  console.log(`\n  ScanRun created: ${scanRun.id}`);
-
+async function ingestPass(
+  pass: PassConfig,
+  processed: Processed[],
+  prisma: PrismaClient,
+  ids: { competitorId: string; clientId: string; industryId: string; scanRunId: string },
+): Promise<PassResult> {
   let inserted = 0;
   let skipped = 0;
   let errored = 0;
 
-  for (const { record, analysis, publicAdLink, adStatus } of processed) {
+  console.log(`\n  ${pass.label}`);
+  console.log(`  Processing ${processed.length} ad record(s)`);
+
+  for (const { record, analysis, publicAdLink, adStatus, format } of processed) {
     const metaAdId = record.id;
 
     if (!metaAdId) {
@@ -194,9 +190,9 @@ export async function ingestMetaAds(
         },
       });
       await prisma.adScanRecord.create({
-        data: { adId: existing.id, scanRunId: scanRun.id, action: 'SEEN' },
+        data: { adId: existing.id, scanRunId: ids.scanRunId, action: 'SEEN' },
       });
-      console.log(`  Updated lifecycle (SEEN): ${metaAdId} | adStatus: ${adStatus}`);
+      console.log(`  Updated lifecycle (SEEN): ${metaAdId} | mediaType: ${pass.mediaType} | adFormat: ${format}`);
       skipped++;
       continue;
     }
@@ -206,10 +202,10 @@ export async function ingestMetaAds(
         metaAdId,
         adSource: 'meta_api',
         reviewStatus: 'PENDING',
-        competitorId,
-        clientId: competitor.clientId,
-        industryId: competitor.industryId,
-        adFormat: fetchConfig.format,
+        competitorId: ids.competitorId,
+        clientId: ids.clientId,
+        industryId: ids.industryId,
+        adFormat: format,
         adLink: publicAdLink,
         productOrService: record.page_name ?? null,
         primaryCopy: firstOrEmpty(record.ad_creative_bodies) || null,
@@ -280,22 +276,145 @@ export async function ingestMetaAds(
     });
 
     await prisma.adScanRecord.create({
-      data: { adId: ad.id, scanRunId: scanRun.id, action: 'NEW' },
+      data: { adId: ad.id, scanRunId: ids.scanRunId, action: 'NEW' },
     });
 
     console.log(
-      `  Inserted: ${metaAdId} | score: ${analysis.overallScore.toFixed(1)} | verdict: ${analysis.finalVerdict} | adLink: ${publicAdLink}`,
+      `  Inserted: ${metaAdId} | mediaType: ${pass.mediaType} | adFormat: ${format} | score: ${analysis.overallScore.toFixed(1)} | adLink: ${publicAdLink}`,
     );
     inserted++;
   }
+
+  return {
+    passName: pass.passName,
+    mediaType: pass.mediaType,
+    format: pass.format,
+    adsProcessed: processed.length,
+    adsInserted: inserted,
+    adsSkipped: skipped,
+    adsErrored: errored,
+  };
+}
+
+function aggregateResults(results: PassResult[], scanRunId: string | null): IngestionResult {
+  return {
+    adsProcessed: results.reduce((sum, item) => sum + item.adsProcessed, 0),
+    adsInserted: results.reduce((sum, item) => sum + item.adsInserted, 0),
+    adsSkipped: results.reduce((sum, item) => sum + item.adsSkipped, 0),
+    adsErrored: results.reduce((sum, item) => sum + item.adsErrored, 0),
+    scanRunId,
+    byPass: results,
+  };
+}
+
+export async function ingestMetaAds(
+  config: IngestionConfig,
+  prisma: PrismaClient,
+): Promise<IngestionResult> {
+  const { competitorId, fetchConfig, dryRun } = config;
+
+  const competitor = await prisma.competitor.findUniqueOrThrow({
+    where: { id: competitorId },
+    select: {
+      id: true,
+      name: true,
+      clientId: true,
+      industryId: true,
+      metaPageId: true,
+    },
+  });
+
+  if (!competitor.metaPageId) {
+    throw new Error(
+      `Competitor "${competitor.name}" has no Meta Page ID configured. ` +
+        'Set it via the competitor config page before running ingestion.',
+    );
+  }
+
+  const baseFetchConfig: MetaFetchConfig = {
+    ...fetchConfig,
+    searchPageIds: [competitor.metaPageId],
+  };
+
+  const passes: PassConfig[] = [
+    {
+      passName: 'IMAGE_TO_STATIC',
+      label: 'Pass 1: IMAGE -> STATIC',
+      mediaType: 'IMAGE',
+      format: 'STATIC',
+      fetchConfig: {
+        ...baseFetchConfig,
+        mediaType: 'IMAGE',
+        format: 'STATIC',
+      },
+    },
+    {
+      passName: 'VIDEO_TO_VIDEO',
+      label: 'Pass 2: VIDEO -> VIDEO',
+      mediaType: 'VIDEO',
+      format: 'VIDEO',
+      fetchConfig: {
+        ...baseFetchConfig,
+        mediaType: 'VIDEO',
+        format: 'VIDEO',
+      },
+    },
+  ];
+
+  console.log(`\n  Competitor:   ${competitor.name} (${competitor.id})`);
+  console.log(`  Client ID:    ${competitor.clientId}`);
+  console.log(`  Industry ID:  ${competitor.industryId}`);
+  console.log(`  Meta Page ID: ${competitor.metaPageId}`);
+  console.log('  Format mode:  media_type two-pass detection');
+
+  const fetchedPasses = [] as Array<{ pass: PassConfig; processed: Processed[] }>;
+
+  for (const pass of passes) {
+    console.log(`\n  Fetching ${pass.label}`);
+    const records = await fetchMetaAds(pass.fetchConfig);
+    fetchedPasses.push({ pass, processed: processRecords(records, pass.format) });
+  }
+
+  if (dryRun) {
+    console.log('\n  DRY RUN - no DB writes');
+    console.log('  Would create 1 ScanRun (source: META_API, status: IN_PROGRESS to COMPLETED)');
+
+    const results = fetchedPasses.map(({ pass, processed }) => printDryRunPass(pass, processed));
+
+    console.log('\n  Written to DB: 0');
+    return aggregateResults(results, null);
+  }
+
+  const scanRun = await prisma.scanRun.create({
+    data: {
+      competitorId,
+      source: 'META_API',
+      status: 'IN_PROGRESS',
+    },
+  });
+
+  console.log(`\n  ScanRun created: ${scanRun.id}`);
+
+  const passResults: PassResult[] = [];
+  for (const { pass, processed } of fetchedPasses) {
+    const result = await ingestPass(pass, processed, prisma, {
+      competitorId,
+      clientId: competitor.clientId,
+      industryId: competitor.industryId,
+      scanRunId: scanRun.id,
+    });
+    passResults.push(result);
+  }
+
+  const aggregated = aggregateResults(passResults, scanRun.id);
 
   await prisma.scanRun.update({
     where: { id: scanRun.id },
     data: {
       status: 'COMPLETED',
       completedAt: new Date(),
-      newAdsFound: inserted,
-      adsUnchanged: skipped,
+      newAdsFound: aggregated.adsInserted,
+      adsUnchanged: aggregated.adsSkipped,
     },
   });
 
@@ -322,11 +441,5 @@ export async function ingestMetaAds(
 
   console.log('  Token safety verified - no access_token= in stored adLink values');
 
-  return {
-    adsProcessed: processed.length,
-    adsInserted: inserted,
-    adsSkipped: skipped,
-    adsErrored: errored,
-    scanRunId: scanRun.id,
-  };
+  return aggregated;
 }
