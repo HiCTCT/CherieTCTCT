@@ -1,5 +1,5 @@
 /**
- * Phase 4 Step 5 — Meta Ad Ingestion targeted by competitor Meta Page ID
+ * Phase 4 Step 7A — Meta Ad Ingestion with public reviewer links
  *
  * Fetches ads from the Meta Ad Library API and writes them to the database as
  * discovered competitor activity. All writes are guarded by the dryRun flag.
@@ -10,7 +10,7 @@
  *  - qualified is always false for API-sourced ads (7.0 threshold is not weakened)
  *  - reviewStatus is always 'PENDING' on first insert
  *  - adSource is always 'meta_api'
- *  - adLink is always run through redactToken() before storage
+ *  - adLink is stored as a public Meta Ad Library URL, never a token-bearing snapshot URL
  *  - metaAdId uniqueness is checked before every insert (deduplication)
  *  - Post-write token safety verification queries for any stored access_token= value
  */
@@ -20,7 +20,6 @@ import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
 import { fetchMetaAds } from '@/lib/providers/meta/fetch';
 import type { MetaAdRecord, MetaFetchConfig } from '@/lib/providers/meta/types';
-import { redactToken } from '@/lib/providers/meta/redact';
 
 export type IngestionConfig = {
   competitorId: string;
@@ -39,6 +38,10 @@ export type IngestionResult = {
 function firstOrEmpty(values: string[] | undefined): string {
   if (!values || values.length === 0) return '';
   return values[0];
+}
+
+function buildPublicAdLibraryUrl(metaAdId: string): string {
+  return `https://www.facebook.com/ads/library/?id=${metaAdId}`;
 }
 
 function normaliseRecord(record: MetaAdRecord): ExampleRow {
@@ -109,7 +112,7 @@ export async function ingestMetaAds(
     record: MetaAdRecord;
     row: ExampleRow;
     analysis: AnalysisOutput;
-    safeAdLink: string;
+    publicAdLink: string;
     adStatus: string;
   };
 
@@ -119,7 +122,7 @@ export async function ingestMetaAds(
       record,
       row,
       analysis: analyseAdRow(row, fetchConfig.format as AdFormat),
-      safeAdLink: record.ad_snapshot_url ? redactToken(record.ad_snapshot_url) : '',
+      publicAdLink: record.id ? buildPublicAdLibraryUrl(record.id) : '',
       adStatus: deriveAdStatus(record),
     };
   });
@@ -130,7 +133,7 @@ export async function ingestMetaAds(
     console.log(`  Would process ${processed.length} ad record(s):\n`);
 
     for (let i = 0; i < processed.length; i++) {
-      const { record, analysis, safeAdLink, adStatus } = processed[i];
+      const { record, analysis, publicAdLink, adStatus } = processed[i];
       const metaAdId = record.id ?? `(no id - index ${i})`;
       const hasId = !!record.id;
 
@@ -143,7 +146,7 @@ export async function ingestMetaAds(
       console.log(`    adStatus:     ${adStatus}`);
       console.log(`    score:        ${analysis.overallScore.toFixed(1)} / 10`);
       console.log(`    finalVerdict: ${analysis.finalVerdict}`);
-      console.log(`    adLink:       ${safeAdLink || '(empty)'}`);
+      console.log(`    adLink:       ${publicAdLink || '(empty)'}`);
       console.log(`    platforms:    ${record.publisher_platforms?.join(', ') ?? 'N/A'}`);
     }
 
@@ -172,7 +175,7 @@ export async function ingestMetaAds(
   let skipped = 0;
   let errored = 0;
 
-  for (const { record, analysis, safeAdLink, adStatus } of processed) {
+  for (const { record, analysis, publicAdLink, adStatus } of processed) {
     const metaAdId = record.id;
 
     if (!metaAdId) {
@@ -207,7 +210,7 @@ export async function ingestMetaAds(
         clientId: competitor.clientId,
         industryId: competitor.industryId,
         adFormat: fetchConfig.format,
-        adLink: safeAdLink,
+        adLink: publicAdLink,
         productOrService: record.page_name ?? null,
         primaryCopy: firstOrEmpty(record.ad_creative_bodies) || null,
         headline: firstOrEmpty(record.ad_creative_link_titles) || null,
@@ -281,7 +284,7 @@ export async function ingestMetaAds(
     });
 
     console.log(
-      `  Inserted: ${metaAdId} | score: ${analysis.overallScore.toFixed(1)} | verdict: ${analysis.finalVerdict}`,
+      `  Inserted: ${metaAdId} | score: ${analysis.overallScore.toFixed(1)} | verdict: ${analysis.finalVerdict} | adLink: ${publicAdLink}`,
     );
     inserted++;
   }
