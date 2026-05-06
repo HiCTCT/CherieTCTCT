@@ -1,5 +1,5 @@
 /**
- * Phase 4 Step 8A — Meta Ad Ingestion with pagination support: CLI Entry Point
+ * Phase 4 Step 8B — Meta Ad Ingestion with CLI safety guardrails: CLI Entry Point
  *
  * Fetches ads from the Meta Ad Library API for a specific Competitor and writes
  * them to the database as discovered activity (qualified=false, reviewStatus=PENDING).
@@ -14,19 +14,19 @@
  *
  * Usage:
  *   # Dry-run (no DB writes — proves fetch → analyse → plan chain):
- *   COMPETITOR_ID=<cuid> META_DRY_RUN=true npm run meta:ingest
+ *   COMPETITOR_ID=<database_competitor_id> META_DRY_RUN=true npm run meta:ingest
  *
  *   # Live ingestion (simulation mode — no META_ADLIB_TOKEN required):
- *   COMPETITOR_ID=<cuid> npm run meta:ingest
+ *   COMPETITOR_ID=<database_competitor_id> npm run meta:ingest
  *
  *   # Live ingestion (real Meta API):
- *   COMPETITOR_ID=<cuid> META_ADLIB_TOKEN=<token> npm run meta:ingest
+ *   COMPETITOR_ID=<database_competitor_id> META_ADLIB_TOKEN=<meta_token> npm run meta:ingest
  *
  *   # Override search terms, country, total per-pass limit:
- *   COMPETITOR_ID=<cuid> META_SEARCH_TERMS=makeup META_COUNTRIES=SG META_FETCH_LIMIT=25 npm run meta:ingest
+ *   COMPETITOR_ID=<database_competitor_id> META_SEARCH_TERMS=makeup META_COUNTRIES=SG META_FETCH_LIMIT=25 npm run meta:ingest
  *
  * Environment variables:
- *   COMPETITOR_ID         — required — Prisma cuid of the target Competitor
+ *   COMPETITOR_ID         — required — Prisma cuid of the target Competitor, e.g. cmos9wvfb016dvwmp40ww0ef1
  *   META_DRY_RUN          — 'true' skips all DB writes (Competitor read still runs)
  *   META_ADLIB_TOKEN      — access token (absent = simulation mode)
  *   META_PAGE_IDS         — optional comma-separated page IDs for dry-run/fetch tests; ingestion overrides this with Competitor.metaPageId
@@ -42,21 +42,58 @@ import { buildConfigFromEnv } from '@/lib/providers/meta/fetch';
 import { redactToken } from '@/lib/providers/meta/redact';
 import { ingestMetaAds } from '@/lib/ingestion/metaIngestion';
 
-async function main(): Promise<void> {
-  const competitorId = process.env.COMPETITOR_ID;
-  if (!competitorId || competitorId.trim() === '') {
+const EXAMPLE_COMMAND =
+  'COMPETITOR_ID=cmos9wvfb016dvwmp40ww0ef1 META_ADLIB_TOKEN=<meta_token> npm run meta:ingest';
+
+function looksLikeMetaToken(value: string): boolean {
+  if (/^EAA/i.test(value)) return true;
+  if (value.length > 60) return true;
+  return false;
+}
+
+function looksLikeCuid(value: string): boolean {
+  return /^c[a-z0-9]{20,}$/i.test(value);
+}
+
+function validateCompetitorId(value: string | undefined): string {
+  const competitorId = value?.trim();
+
+  if (!competitorId) {
     throw new Error(
       'COMPETITOR_ID env var is required.\n' +
-        'Set it to a valid Competitor cuid from the database.\n' +
-        'Example: COMPETITOR_ID=clxxxxxxxxxxxxxxxx npm run meta:ingest',
+        'Use your database competitor ID, not the Meta Page ID and not the Meta token.\n' +
+        `Example: ${EXAMPLE_COMMAND}`,
     );
   }
+
+  if (looksLikeMetaToken(competitorId)) {
+    throw new Error(
+      'COMPETITOR_ID looks like a Meta access token — do not put your token there.\n' +
+        'Put your token in META_ADLIB_TOKEN instead.\n' +
+        `Correct format: ${EXAMPLE_COMMAND}`,
+    );
+  }
+
+  if (!looksLikeCuid(competitorId)) {
+    throw new Error(
+      'COMPETITOR_ID does not look like a valid database competitor ID.\n' +
+        "It must start with 'c' and contain only letters and digits (20+ characters total).\n" +
+        'Use the id from your Competitor table, for example cmos9wvfb016dvwmp40ww0ef1.\n' +
+        `Correct format: ${EXAMPLE_COMMAND}`,
+    );
+  }
+
+  return competitorId;
+}
+
+async function main(): Promise<void> {
+  const competitorId = validateCompetitorId(process.env.COMPETITOR_ID);
 
   const dryRun = process.env.META_DRY_RUN === 'true';
   const fetchConfig = buildConfigFromEnv();
 
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  Phase 4 Step 8A — Meta Ad Ingestion with pagination');
+  console.log('  Phase 4 Step 8B — Meta Ad Ingestion with CLI safety');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log(`  Mode:          ${dryRun ? 'DRY RUN (no DB writes)' : 'LIVE WRITE'}`);
   console.log(`  Competitor ID: ${competitorId}`);
