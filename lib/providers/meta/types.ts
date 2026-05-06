@@ -1,5 +1,7 @@
 import type { AdFormat } from '@/lib/analysis/types';
 
+export type MetaMediaType = 'IMAGE' | 'VIDEO';
+
 /**
  * Raw shape of a single ad record returned by the Meta Ad Library API.
  * Fields map to what `GET /v25.0/ads_archive` returns for the field list
@@ -50,13 +52,15 @@ export type MetaFetchConfig = {
   searchTerms: string;
   /** search_page_ids passed to the API, usually from Competitor.metaPageId */
   searchPageIds?: string[];
+  /** media_type passed to the API. IMAGE maps to STATIC, VIDEO maps to VIDEO. */
+  mediaType?: MetaMediaType;
   /** ISO country codes, e.g. ['SG'] */
   countries: string[];
   /** ad_active_status — 'ALL' | 'ACTIVE' | 'INACTIVE' */
   adActiveStatus: 'ALL' | 'ACTIVE' | 'INACTIVE';
   /** Number of ads to fetch per request */
   limit: number;
-  /** Format used for the whole run — known at query time, not per-record */
+  /** Format used for analysis and storage. In ingestion this is set per media-type pass. */
   format: AdFormat;
   /** When true or token is absent, returns mock data without a network call */
   simulationMode: boolean;
