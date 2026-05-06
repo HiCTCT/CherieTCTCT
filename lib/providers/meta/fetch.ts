@@ -2,6 +2,8 @@ import { redactToken } from '@/lib/providers/meta/redact';
 import type { MetaAdRecord, MetaApiResponse, MetaFetchConfig } from '@/lib/providers/meta/types';
 
 const META_API_BASE = 'https://graph.facebook.com/v25.0/ads_archive';
+const META_API_MAX_PAGE_SIZE = 25;
+const PAGE_SAFETY_CAP = 10;
 
 const FIELDS = [
   'ad_creation_time',
@@ -103,15 +105,13 @@ function serialisePageIdsForGraphApi(pageIds: string[]): string {
   return `[${pageIds.join(',')}]`;
 }
 
-// ─── Live fetch ───────────────────────────────────────────────────────────────
-
-async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
+function buildBaseParams(config: MetaFetchConfig, pageSize: number): URLSearchParams {
   const params = new URLSearchParams({
     search_terms: config.searchTerms,
     ad_reached_countries: `['${config.countries.join("','")}']`,
     ad_active_status: config.adActiveStatus,
     fields: FIELDS,
-    limit: String(config.limit),
+    limit: String(pageSize),
     access_token: config.token!,
   });
 
@@ -123,39 +123,89 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
     params.set('media_type', config.mediaType);
   }
 
-  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&media_type=${config.mediaType ?? ''}&ad_reached_countries=...&fields=...&limit=${config.limit}&access_token=REDACTED`;
+  return params;
+}
+
+// ─── Live fetch ───────────────────────────────────────────────────────────────
+
+async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
+  const pageSize = Math.min(config.limit, META_API_MAX_PAGE_SIZE);
+  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&media_type=${config.mediaType ?? ''}&ad_reached_countries=...&fields=...&limit=${pageSize}&access_token=REDACTED`;
+
   console.log('\n  Fetching from Meta Ad Library API...');
   console.log(`  Search terms:  ${config.searchTerms || '(empty)'}`);
   console.log(`  Page IDs:      ${config.searchPageIds?.join(', ') ?? '(not set)'}`);
   console.log(`  Media type:    ${config.mediaType ?? '(not set)'}`);
   console.log(`  Countries:     ${config.countries.join(', ')}`);
   console.log(`  Active status: ${config.adActiveStatus}`);
-  console.log(`  Limit:         ${config.limit}`);
+  console.log(`  Total limit:   ${config.limit}`);
+  console.log(`  Page size:     ${pageSize}`);
   console.log(`  URL:           ${safeDisplayUrl}`);
 
-  const fullUrl = `${META_API_BASE}?${params.toString()}`;
-  const response = await fetch(fullUrl);
-  const json = (await response.json()) as MetaApiResponse;
+  const collected: MetaAdRecord[] = [];
+  let afterCursor: string | undefined;
+  let pageNum = 0;
+  let stopReason = 'no next page';
 
-  if (json.error) {
-    const safeMessage = redactToken(
-      `Meta API error (code ${json.error.code}): ${json.error.message}`,
-    );
-    throw new Error(safeMessage);
+  while (pageNum < PAGE_SAFETY_CAP && collected.length < config.limit) {
+    pageNum++;
+
+    const params = buildBaseParams(config, pageSize);
+    if (afterCursor) {
+      params.set('after', afterCursor);
+    }
+
+    const fullUrl = `${META_API_BASE}?${params.toString()}`;
+    const response = await fetch(fullUrl);
+    const json = (await response.json()) as MetaApiResponse;
+
+    if (json.error) {
+      const safeMessage = redactToken(
+        `Meta API error (code ${json.error.code}): ${json.error.message}`,
+      );
+      throw new Error(safeMessage);
+    }
+
+    const pageRecords = json.data ?? [];
+    console.log(`  Page ${pageNum}: received ${pageRecords.length} ad(s)`);
+
+    if (pageRecords.length === 0) {
+      stopReason = 'page returned 0 ads';
+      break;
+    }
+
+    collected.push(...pageRecords);
+
+    if (collected.length >= config.limit) {
+      stopReason = 'limit reached';
+      break;
+    }
+
+    const hasNextPage = Boolean(json.paging?.next);
+    const nextCursor = json.paging?.cursors?.after;
+
+    if (!hasNextPage || !nextCursor) {
+      stopReason = 'no next page';
+      break;
+    }
+
+    afterCursor = nextCursor;
   }
 
-  if (!json.data || json.data.length === 0) {
+  if (pageNum >= PAGE_SAFETY_CAP && collected.length < config.limit) {
+    stopReason = `safety cap reached (${PAGE_SAFETY_CAP} pages)`;
+  }
+
+  const result = collected.slice(0, config.limit);
+
+  if (result.length === 0) {
     console.log('  No ads returned for this media type and page ID.');
-    return [];
   }
 
-  console.log(`  ✓ Received ${json.data.length} ad(s)`);
+  console.log(`  Pagination stopped: ${stopReason}`);
+  console.log(`  Total collected: ${result.length} ad(s)`);
 
-  if (json.paging?.next) {
-    console.log('  ℹ  Pagination available — not followed in this step (single page only)');
-  }
-
-  return json.data;
+  return result;
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
