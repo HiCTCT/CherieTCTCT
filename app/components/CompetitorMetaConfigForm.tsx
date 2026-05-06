@@ -8,6 +8,21 @@ type CompetitorMetaConfigFormProps = {
   metaPageId: string | null;
 };
 
+type MetaConfigResponse = {
+  error?: string;
+};
+
+async function parseJsonSafely(response: Response): Promise<MetaConfigResponse> {
+  const text = await response.text();
+  if (!text) return {};
+
+  try {
+    return JSON.parse(text) as MetaConfigResponse;
+  } catch {
+    return {};
+  }
+}
+
 export default function CompetitorMetaConfigForm({
   competitorId,
   facebookPageUrl,
@@ -35,10 +50,10 @@ export default function CompetitorMetaConfigForm({
         }),
       });
 
-      const payload = (await response.json()) as { error?: string };
+      const payload = await parseJsonSafely(response);
 
       if (!response.ok) {
-        throw new Error(payload.error ?? 'Unable to save Meta configuration.');
+        throw new Error(payload.error ?? `Request failed (${response.status}).`);
       }
 
       setStatusMessage('Meta configuration saved. Refreshing page...');
