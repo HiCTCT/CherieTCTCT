@@ -47,6 +47,10 @@ function validateMetaPageId(value: string | null | undefined): string | null | u
   return value;
 }
 
+function isPrismaError(error: unknown): error is Prisma.PrismaClientKnownRequestError {
+  return error instanceof Prisma.PrismaClientKnownRequestError;
+}
+
 export async function PATCH(
   request: NextRequest,
   { params }: { params: { id: string } },
@@ -84,9 +88,9 @@ export async function PATCH(
 
     const updatedCompetitor = await updateCompetitorMetaConfig(params.id, data);
 
-    return NextResponse.json({ competitor: updatedCompetitor });
+    return NextResponse.json({ competitor: updatedCompetitor }, { status: 200 });
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+    if (isPrismaError(error) && error.code === 'P2025') {
       return NextResponse.json({ error: 'Competitor not found.' }, { status: 404 });
     }
 
@@ -94,7 +98,18 @@ export async function PATCH(
       return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 });
     }
 
-    const message = error instanceof Error ? error.message : 'Unable to update competitor Meta configuration.';
+    if (isPrismaError(error)) {
+      console.error('[meta-config PATCH] Database error:', error);
+      return NextResponse.json(
+        { error: 'Unexpected server error. Please try again.' },
+        { status: 500 },
+      );
+    }
+
+    const message = error instanceof Error
+      ? error.message
+      : 'Unable to update competitor Meta configuration.';
+
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }
