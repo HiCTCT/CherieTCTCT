@@ -13,7 +13,8 @@
     "meta:dry-run": "tsx scripts/dry-run-meta-fetch.ts",
     "meta:ingest": "tsx scripts/ingest-meta-ads.ts",
     "meta:verify": "tsx scripts/verify-meta-ingestion.ts",
-    "meta:ready": "tsx scripts/list-ready-competitors.ts"
+    "meta:ready": "tsx scripts/list-ready-competitors.ts",
+    "meta:batch": "tsx scripts/batch-ingest-meta-ads.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
