@@ -1,0 +1,11 @@
+Client Name,Industry,What They Sell,Competitor Name,Competitor Website,Facebook Page URL,Meta Ad Library URL,Meta Page ID,Notes
+PCF Singapore,Early Childhood Education,Childcare and preschool services,My First Skool,https://www.myfirstskool.com,https://www.facebook.com/myfirstskool,,123456789012345,NTUC-backed childcare provider
+PCF Singapore,Early Childhood Education,,Kiddiwinkie Schoolhouse,https://www.kiddiwinkie.com.sg,,,987654321098765,
+PCF Singapore,Early Childhood Education,,Skool4Kidz,https://www.skool4kidz.com.sg,https://www.facebook.com/skool4kidz,https://www.facebook.com/ads/library/?view_all_page_id=111222333444555,,Meta Page ID will be extracted from URL column
+PCF Singapore,Early Childhood Education,,Little Greenhouse,https://www.littlegreenhouse.com.sg,,,,No Meta setup yet - needs discovery
+PCF Singapore,Early Childhood Education,,,,,,,Client-only row - no competitor known yet
+Glow Skincare SG,Beauty and Skincare,Vitamin C serums and moisturisers,Dr Jart+ Singapore,https://www.drjart.com,https://www.facebook.com/drjartsg,,222333444555666,K-beauty brand
+Glow Skincare SG,Beauty and Skincare,,The Ordinary SG,https://theordinary.com/en-sg,,https://www.facebook.com/ads/library/?view_all_page_id=777888999000111,,Meta Page ID extracted from URL
+Glow Skincare SG,Beauty and Skincare,,Tatcha Singapore,https://www.tatcha.com,,,333444555666777,Japanese luxury skincare
+Glow Skincare SG,Beauty and Skincare,,,,,,,No competitors identified yet for this client
+Tech Startup SG,Technology and SaaS,Project management software,Notion Singapore,,https://www.facebook.com/notion,,444555666777888,Cross-client example: run import twice to see duplicate detection
