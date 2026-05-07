@@ -14,6 +14,26 @@ export type MetaConfigUpdate = {
   metaPageId?: string | null;
 };
 
+export type MetaReadyCompetitor = {
+  id: string;
+  name: string;
+  facebookPageUrl: string | null;
+  metaPageId: string;
+  lastScannedAt: Date | null;
+  client: { name: string } | null;
+  industry: { name: string } | null;
+  latestScanRun: {
+    id: string;
+    status: string;
+    startedAt: Date;
+    completedAt: Date | null;
+    newAdsFound: number;
+    adsUnchanged: number;
+  } | null;
+  totalMetaAdCount: number;
+  pendingMetaAdCount: number;
+};
+
 export function getCompetitors(filter: CompetitorsFilter = {}) {
   const where: Prisma.CompetitorWhereInput = {};
 
@@ -37,6 +57,81 @@ export function getCompetitors(filter: CompetitorsFilter = {}) {
     take: filter.limit ?? 50,
     skip: filter.offset ?? 0,
   });
+}
+
+export async function getMetaReadyCompetitors(): Promise<MetaReadyCompetitor[]> {
+  const competitors = await db.competitor.findMany({
+    where: {
+      metaPageId: {
+        not: null,
+      },
+      NOT: {
+        metaPageId: '',
+      },
+    },
+    select: {
+      id: true,
+      name: true,
+      facebookPageUrl: true,
+      metaPageId: true,
+      lastScannedAt: true,
+      client: { select: { name: true } },
+      industry: { select: { name: true } },
+      _count: {
+        select: {
+          ads: {
+            where: { adSource: 'meta_api' },
+          },
+        },
+      },
+      scanRuns: {
+        orderBy: { startedAt: 'desc' },
+        take: 1,
+        select: {
+          id: true,
+          status: true,
+          startedAt: true,
+          completedAt: true,
+          newAdsFound: true,
+          adsUnchanged: true,
+        },
+      },
+    },
+    orderBy: [
+      { lastScannedAt: { sort: 'asc', nulls: 'first' } },
+      { name: 'asc' },
+    ],
+  });
+
+  if (competitors.length === 0) return [];
+
+  const competitorIds = competitors.map((competitor) => competitor.id);
+  const pendingGroups = await db.ad.groupBy({
+    by: ['competitorId'],
+    where: {
+      competitorId: { in: competitorIds },
+      adSource: 'meta_api',
+      reviewStatus: 'PENDING',
+    },
+    _count: { _all: true },
+  });
+
+  const pendingCountByCompetitorId = new Map(
+    pendingGroups.map((group) => [group.competitorId, group._count._all]),
+  );
+
+  return competitors.map((competitor) => ({
+    id: competitor.id,
+    name: competitor.name,
+    facebookPageUrl: competitor.facebookPageUrl,
+    metaPageId: competitor.metaPageId!,
+    lastScannedAt: competitor.lastScannedAt,
+    client: competitor.client,
+    industry: competitor.industry,
+    latestScanRun: competitor.scanRuns[0] ?? null,
+    totalMetaAdCount: competitor._count.ads,
+    pendingMetaAdCount: pendingCountByCompetitorId.get(competitor.id) ?? 0,
+  }));
 }
 
 export function getCompetitorById(id: string) {
