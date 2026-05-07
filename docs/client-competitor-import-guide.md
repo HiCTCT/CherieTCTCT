@@ -1,16 +1,18 @@
 # Client and Competitor Import Guide
 
-This guide covers how to import clients, industries, and competitors from a CSV file using the Phase 6 Step 1 import script.
+This guide covers how to import clients, industries, and competitors from a CSV file using the Phase 6 Step 2 import script.
 
 ## Overview
 
 The import script reads a CSV file and safely creates or updates:
 
-- **Industries** — created if the industry name does not exist.
-- **Clients** — created if the client name does not exist; `What They Sell` updated if the field is currently blank.
-- **Competitors** — created under the correct client if they do not already exist. Existing competitors are updated only when new data fills a blank field.
+- **Industries** - created if the industry name does not exist.
+- **Clients** - created if the client name does not exist; `What They Sell` updated if the field is currently blank.
+- **Competitors** - created under the correct client if they do not already exist. Existing competitors are updated only when new data fills a blank field.
 
 Dry-run is the default mode. No database writes occur unless `CLIENT_IMPORT_CONFIRM_WRITE=true` is explicitly set.
+
+The script also detects suspected duplicates before writes happen, including same Meta Page ID, same Facebook URL, similar competitor names, and repeated websites within the CSV.
 
 ## CSV format
 
@@ -24,7 +26,7 @@ Client Name,Industry,What They Sell,Competitor Name,Competitor Website,Facebook 
 | `Industry` | Yes | Creates industry if it does not exist. Slug is auto-generated. |
 | `What They Sell` | No | Sets client description. Skipped if client already has this field. |
 | `Competitor Name` | No | If blank, the row creates/updates the client only |
-| `Competitor Website` | No | Stored as reference only, not written to DB |
+| `Competitor Website` | No | Used for within-CSV duplicate detection. Not written to DB. |
 | `Facebook Page URL` | No | Must start with `https://facebook.com/` or `https://www.facebook.com/` |
 | `Meta Ad Library URL` | No | If `Meta Page ID` is blank, `view_all_page_id=<number>` is extracted automatically |
 | `Meta Page ID` | No | Must be numeric digits only. Takes priority over URL extraction. |
@@ -39,19 +41,69 @@ Client Name,Industry,What They Sell,Competitor Name,Competitor Website,Facebook 
 - Existing `Meta Page ID` and `Facebook Page URL` are never overwritten with a blank value.
 - If an incoming value conflicts with an existing value, the existing value is kept and the conflict is reported in the summary.
 - Competitors imported this way are set to `discoverySource=manual` and `status=APPROVED`.
-- Imported competitors with no Meta Page ID can still be imported — they will appear in the "missing Meta Page ID" section of the summary.
-- Competitors are only automatically scanned after import if they already have a confirmed Meta Page ID. No automatic Meta scan is triggered by this script.
-- If a competitor name already exists under a different client in the database, this is reported as a cross-client match. If that other record has a Meta Page ID and the current row does not, the Meta Page ID is reused and noted in the summary.
+- Imported competitors with no Meta Page ID can still be imported. They will appear in the missing Meta Page ID section of the summary.
+- No automatic Meta scan is triggered by this script.
+
+## Duplicate detection
+
+The script performs multi-signal duplicate detection across both the current CSV and the existing database. Each detected signal is classified as **BLOCKED**, **WARN**, or **INFO**.
+
+### Signal reference
+
+| Signal | Scope | Action | Reason |
+|---|---|---|---|
+| Same Meta Page ID, different name | Same client | **BLOCKED** | Meta Page ID is the advertiser identifier. Two names with the same ID under the same client are the same entity. |
+| Same Facebook Page URL, different name | Same client | **BLOCKED** | A Facebook Page belongs to one advertiser. Two names sharing the same URL under the same client are duplicates. |
+| Same Meta Page ID, different name | Cross-client | INFO | Same advertiser tracked under multiple clients. Expected in some categories. |
+| Same Facebook Page URL, different name | Cross-client | INFO | Informational only. |
+| Same normalised name, different exact name | Same client | WARN | Likely the same advertiser with a name variant, such as `Castlery SG` vs `Castlery Singapore`. Row is created but flagged. |
+| Same normalised name, different exact name | Cross-client | INFO | Informational only. |
+| Exact name | Cross-client | INFO | Same competitor tracked under multiple clients. Expected. Meta Page ID may be carried over automatically. |
+| Same website within CSV | Any | WARN | Two rows in the same file share a website. Row is created but flagged. |
+
+### Name normalisation
+
+Competitor names are normalised for fuzzy matching only. The original name is always stored unchanged.
+
+Normalisation strips common legal suffixes, geographic qualifiers, and punctuation.
+
+Examples:
+
+- `Castlery SG` becomes `castlery`
+- `Castlery Singapore` becomes `castlery`
+- `Castlery Pte Ltd` becomes `castlery`
+- `Dr Jart+ Singapore` becomes `dr jart`
+- `My First Skool` stays `my first skool`
+
+If the normalised form of an incoming competitor matches an existing competitor under the same client, the row is still created but a WARN is shown. If the normalised forms match under a different client, an INFO is shown.
+
+### Meta Page ID reuse from cross-client exact name match
+
+If a competitor name exists exactly under a different client, and that existing record has a Meta Page ID that the incoming row does not, the Meta Page ID is carried over automatically.
+
+This is the only case where automatic reuse occurs. The output labels it clearly so you can verify the advertiser identity.
+
+Fuzzy name matches and URL-only matches are never auto-reused. Those require manual action.
+
+### BLOCKED rows
+
+A BLOCKED row is not created in the database, whether in dry-run simulation or live mode.
+
+To resolve a BLOCKED row:
+
+- Remove the row from the CSV if it is a true duplicate.
+- Use the same competitor name as the existing record to route through the update path.
+- Correct the Meta Page ID or Facebook URL if the incoming data is wrong.
 
 ## Commands
 
-### Dry-run (safe, no writes)
+### Dry-run, safe with no writes
 
 ```bash
 CLIENT_IMPORT_FILE=data/examples/client-competitor-import.example.csv CLIENT_IMPORT_DRY_RUN=true npm run import:clients
 ```
 
-### Live import (writes to database)
+### Live import, writes to database
 
 ```bash
 CLIENT_IMPORT_FILE=data/examples/client-competitor-import.example.csv CLIENT_IMPORT_CONFIRM_WRITE=true npm run import:clients
@@ -71,18 +123,22 @@ The dry-run summary shows:
 
 - Industries that would be created
 - Clients that would be created
-- Clients that would be updated (e.g. `What They Sell` would be populated)
+- Clients that would be updated
 - Competitors that would be created, with a warning for any missing Meta Page IDs
-- Competitors that would be updated (e.g. Meta Page ID or Facebook URL would be filled)
-- Rows with no competitor name — client-only rows that need competitor discovery
+- Competitors that would be updated
+- Rows with no competitor name
 - Duplicate rows in the CSV that would be skipped
-- Cross-client competitor matches found in the database
-- Conflicts between incoming and existing values (existing values always win)
+- Suspected duplicates, including BLOCKED, WARN, and INFO signals
+- Conflicts between incoming and existing values
 - Total rows processed and `Written to DB: 0`
+
+If any rows are BLOCKED, the footer shows a count and reminds you to fix the CSV before running live.
 
 ## Live import output
 
-The live summary shows the same sections, with "would be created/updated" replaced by "created/updated". At the end, if any competitors are missing Meta Page IDs, the summary reminds you to add them via the app and run `npm run meta:ready`.
+The live summary shows the same sections, with "would be created/updated" replaced by "created/updated". BLOCKED rows are confirmed as not created. WARN rows are confirmed as created with a review note.
+
+At the end, if any competitors are missing Meta Page IDs or have suspected duplicates, the summary reminds you to review them before running `npm run meta:ready`.
 
 ## After import
 
@@ -124,7 +180,8 @@ Running the import script twice against the same CSV is safe:
 
 - Industries and clients that already exist are not recreated.
 - Competitors that already exist with the same values are skipped and reported as `already exists with same values`.
-- Only genuinely new data (e.g. a Meta Page ID added to a previously blank field) will be applied.
+- Only genuinely new data, such as a Meta Page ID added to a previously blank field, will be applied.
+- Detection signals may still appear on demo rows that intentionally reuse IDs, URLs, or websites.
 
 ## Common errors
 
@@ -162,7 +219,11 @@ data/examples/client-competitor-import.example.csv
 
 This file demonstrates:
 
-- A client with multiple competitors (some with Meta Page IDs, some without)
+- A client with multiple competitors, some with Meta Page IDs and some without
 - A competitor with Meta Page ID extracted from the Meta Ad Library URL column
 - Client-only rows with no competitor
-- A cross-client competitor (run the import twice to see duplicate detection in action)
+- A cross-client competitor example
+- Three Phase 6 Step 2 detection demo rows at the bottom:
+  - `My First Skool Global` is BLOCKED because it shares a Meta Page ID with `My First Skool`.
+  - `My First Skool Alt` is BLOCKED because it shares a Facebook URL with `My First Skool`.
+  - `Kiddiwinkie` is WARNED because it shares a website with `Kiddiwinkie Schoolhouse`.
