@@ -1,0 +1,66 @@
+name: Meta Batch Weekly Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run in dry-run mode? (no DB writes)'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+  # Cron is intentionally disabled until a hosted network database is configured.
+  # Required before enabling:
+  # 1. DATABASE_URL points to hosted Postgres/PlanetScale/Supabase/Railway, not SQLite.
+  # 2. Meta token is set as a GitHub Actions secret.
+  # 3. META_BATCH_CONFIRM_LIVE is set to true as a GitHub Actions secret.
+  # 4. Manual dry-run workflow passes.
+  # 5. Manual live workflow passes and meta:verify confirms correct counts.
+  # schedule:
+  #   - cron: '0 1 * * 1' # Monday 09:00 SGT
+
+jobs:
+  batch-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: meta-batch
+      cancel-in-progress: false
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      META_ADLIB_TOKEN: ${{ secrets.META_ADLIB_TOKEN }}
+      META_BATCH_CONFIRM_LIVE: ${{ secrets.META_BATCH_CONFIRM_LIVE }}
+      META_COUNTRIES: ${{ vars.META_COUNTRIES }}
+      META_SEARCH_TERMS: ${{ vars.META_SEARCH_TERMS }}
+      META_FETCH_LIMIT: ${{ vars.META_FETCH_LIMIT }}
+      META_BATCH_DELAY_MS: ${{ vars.META_BATCH_DELAY_MS }}
+      SCHEDULED_MODE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
+      - name: Validate hosted database URL
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "ERROR: DATABASE_URL is not set. Add a hosted database URL in GitHub Secrets."
+            exit 1
+          fi
+          if echo "$DATABASE_URL" | grep -qE '(^file:|\.db$|\.sqlite$)'; then
+            echo "ERROR: DATABASE_URL appears to point to local SQLite."
+            echo "Scheduled batch requires a hosted network database."
+            exit 1
+          fi
+      - name: Run scheduled batch scan
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            META_DRY_RUN=true npm run meta:batch:scheduled
+          else
+            npm run meta:batch:scheduled
+          fi
