@@ -15,7 +15,8 @@
     "meta:verify": "tsx scripts/verify-meta-ingestion.ts",
     "meta:ready": "tsx scripts/list-ready-competitors.ts",
     "meta:batch": "tsx scripts/batch-ingest-meta-ads.ts",
-    "meta:batch:scheduled": "tsx scripts/meta-batch-scheduled.ts"
+    "meta:batch:scheduled": "tsx scripts/meta-batch-scheduled.ts",
+    "import:clients": "tsx scripts/import-client-competitors.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
