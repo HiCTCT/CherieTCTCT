@@ -433,3 +433,103 @@ Do not include these in Phase 4:
 - Bulk competitor imports.
 
 These belong in later phases.
+
+---
+
+## Scheduled batch scan (Phase 5 Step 5)
+
+### What exists now
+
+A GitHub Actions workflow (`meta-batch-weekly.yml`) and a scheduled-mode script (`meta-batch-scheduled.ts`) have been created as a safe scheduler foundation.
+
+The workflow is **manual-trigger only** (`workflow_dispatch`). The automatic weekly cron is intentionally commented out and must not be enabled until all prerequisites below are met.
+
+### What the scheduled script does differently from `meta:batch`
+
+- Prints a `[SCHEDULED]` header with ISO timestamp at the start of every run — makes it easy to filter in GitHub Actions logs or a log aggregator
+- Warns if `SCHEDULED_MODE` is not set — signals to the operator that this script is intended for CI use, not manual runs
+- Prints a one-line machine-readable summary at the end: `[SCHEDULED:DONE] mode=... competitors=... failed=... inserted=... duration=...`
+- All safety gates remain unchanged: `META_ADLIB_TOKEN` required, `META_BATCH_CONFIRM_LIVE=true` required for live writes, all inserted ads remain `reviewStatus=PENDING` and `qualified=false`
+
+### Current limitations — SQLite / local database
+
+This repo currently uses a local SQLite database file (`file:./dev.db`). The GitHub Actions runner cannot reach a local file. If a live run were attempted on the runner with a local `DATABASE_URL`, all inserted ads would be written to a temporary file on the runner and lost when the job finishes.
+
+The workflow includes a guard step that checks `DATABASE_URL` before any script runs. If the URL matches a local SQLite pattern (`file:`, `.db`, `.sqlite`), the job exits 1 immediately with a clear error. This guard fires in both dry-run and live mode.
+
+### How to trigger a dry-run manually (safe now, no hosted DB required)
+
+You can trigger the workflow at any time to verify the structure works — the SQLite guard will fire and exit 1, which is the correct expected outcome while on a local database.
+
+When you have a hosted DB set in Secrets, the guard will pass and the dry-run will execute against the real database.
+
+Steps:
+
+1. Push a branch containing `.github/workflows/meta-batch-weekly.yml` to GitHub.
+2. Go to GitHub → Actions → "Meta Batch Weekly Scan".
+3. Click "Run workflow".
+4. Leave `dry_run = true` (default).
+5. Click "Run workflow".
+6. View the log — confirm `[SCHEDULED]` header appears.
+
+### GitHub Secrets and Variables to configure
+
+Set these in: GitHub repo → Settings → Secrets and variables → Actions
+
+**Secrets** (encrypted, not visible after saving):
+
+| Secret | Value | Notes |
+|---|---|---|
+| `DATABASE_URL` | Hosted Postgres/PlanetScale URL | Must NOT be a local SQLite path |
+| `META_ADLIB_TOKEN` | Your long-lived Meta access token | Rotates every ~60 days |
+| `META_BATCH_CONFIRM_LIVE` | `true` | Set only when ready for live scheduled writes |
+
+**Variables** (visible, non-sensitive config):
+
+| Variable | Example value | Notes |
+|---|---|---|
+| `META_COUNTRIES` | `SG` | Comma-separated ISO codes |
+| `META_SEARCH_TERMS` | `skincare` | Keyword(s) for Meta Ad Library query |
+| `META_FETCH_LIMIT` | `25` | Ads per media-type pass (max 25) |
+| `META_BATCH_DELAY_MS` | `2000` | Delay between competitors in ms |
+
+### Checklist before enabling the automatic weekly cron
+
+All five conditions must be true before you uncomment the `schedule:` block in `.github/workflows/meta-batch-weekly.yml`:
+
+- [ ] `DATABASE_URL` in GitHub Secrets points to a hosted network database (not a local SQLite file)
+- [ ] `META_ADLIB_TOKEN` in GitHub Secrets is a valid long-lived token
+- [ ] `META_BATCH_CONFIRM_LIVE` in GitHub Secrets is set to `true`
+- [ ] A manual `workflow_dispatch` dry-run has completed successfully (SQLite guard passed, ads shown in dry-run output)
+- [ ] A manual `workflow_dispatch` live run has completed successfully and `meta:verify` has confirmed correct ad counts in the hosted DB
+
+To enable: open `.github/workflows/meta-batch-weekly.yml`, uncomment the `schedule:` block, open a PR, get it reviewed, merge.
+
+### How to disable the workflow
+
+Go to GitHub → Actions → "Meta Batch Weekly Scan" → click the `...` menu → "Disable workflow". No code change required. Re-enable from the same menu.
+
+### Token rotation procedure
+
+Meta long-lived tokens expire after approximately 60 days. When the token expires:
+
+1. Generate a new long-lived token.
+2. Go to GitHub → Settings → Secrets → update `META_ADLIB_TOKEN`.
+3. Trigger a manual `workflow_dispatch` dry-run to confirm the new token works.
+4. No code changes, no branch, no PR required.
+
+### Local test of the scheduled script
+
+To test the scheduled script locally before pushing:
+
+```bash
+META_ADLIB_TOKEN=<token> META_DRY_RUN=true SCHEDULED_MODE=true npm run meta:batch:scheduled
+```
+
+Expected output:
+
+- `[SCHEDULED]` header with ISO timestamp
+- Mode: `DRY RUN — no DB writes`
+- Per-competitor rows with `✓`/`✗` icons
+- `SCHEDULED DRY-RUN SUMMARY` block
+- `[SCHEDULED:DONE]` machine-readable summary line on the last line
