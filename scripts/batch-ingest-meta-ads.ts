@@ -1,5 +1,5 @@
 /**
- * Phase 5 Step 3 — Controlled live batch Meta ingestion
+ * Phase 5 Step 4 — Batch reporting and operator safety
  *
  * Safe batch wrapper around ingestMetaAds().
  * Dry-run remains the default recommended mode. Live writes require an explicit
@@ -103,39 +103,101 @@ type BatchItemResult = {
   errorMessage?: string;
 };
 
-function printBatchSummary(results: BatchItemResult[], isDryRun: boolean): void {
-  const totalProcessed = results.reduce((sum, result) => sum + result.adsProcessed, 0);
-  const totalInserted = results.reduce((sum, result) => sum + result.adsInserted, 0);
-  const totalSkipped = results.reduce((sum, result) => sum + result.adsSkipped, 0);
-  const totalErrored = results.reduce((sum, result) => sum + result.adsErrored, 0);
-  const failed = results.filter((result) => result.status === 'FAILED');
+function formatDuration(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
 
-  console.log('\n═══════════════════════════════════════════════════════════════');
+function printBatchSummary(
+  results: BatchItemResult[],
+  isDryRun: boolean,
+  totalDurationMs: number,
+): void {
+  const totalProcessed = results.reduce((sum, r) => sum + r.adsProcessed, 0);
+  const totalInserted = results.reduce((sum, r) => sum + r.adsInserted, 0);
+  const totalSkipped = results.reduce((sum, r) => sum + r.adsSkipped, 0);
+  const totalErrored = results.reduce((sum, r) => sum + r.adsErrored, 0);
+  const failed = results.filter((r) => r.status === 'FAILED');
+
+  const LINE =
+    '═══════════════════════════════════════════════════════════════';
+  const DIVIDER =
+    '───────────────────────────────────────────────────────────────';
+
+  console.log(`\n${LINE}`);
   console.log(`  ${isDryRun ? 'BATCH DRY-RUN SUMMARY' : 'BATCH LIVE WRITE SUMMARY'}`);
-  console.log('═══════════════════════════════════════════════════════════════');
+  if (!isDryRun) {
+    console.log('  ⚠ LIVE WRITE MODE');
+  }
+  console.log(`  Total time:    ${formatDuration(totalDurationMs)}`);
+  console.log(`  Competitors:   ${results.length}  |  Failed: ${failed.length}`);
+  console.log(LINE);
 
   for (const result of results) {
-    console.log(
-      `  ${result.status.padEnd(10)} ${result.competitorName} (${result.competitorId}) — processed ${result.adsProcessed}, inserted ${result.adsInserted}, seen ${result.adsSkipped}, errored ${result.adsErrored}, duration ${result.durationMs}ms`,
-    );
+    const icon = result.status === 'FAILED' ? '✗' : '✓';
+    console.log(`\n  ${icon}  ${result.competitorName}`);
 
-    if (result.errorMessage) {
-      console.log(`    Error: ${result.errorMessage}`);
+    if (result.status === 'FAILED') {
+      console.log(`     Status: FAILED  |  ${result.errorMessage ?? 'Unknown error'}`);
+    } else {
+      const insertLabel = isDryRun ? 'Would insert' : 'Inserted';
+      console.log(
+        `     Status: ${result.status}  |  Fetched: ${result.adsProcessed}  |  ${insertLabel}: ${result.adsInserted}  |  Skipped: ${result.adsSkipped}  |  Errored: ${result.adsErrored}  |  ${formatDuration(result.durationMs)}`,
+      );
     }
   }
 
-  console.log('');
-  console.log(`  Competitors checked: ${results.length}`);
-  console.log(`  Failed:              ${failed.length}`);
-  console.log(`  Ads processed:       ${totalProcessed}`);
-  console.log(`  ${isDryRun ? 'Would insert' : 'Ads inserted'}:        ${totalInserted}`);
-  console.log(`  ${isDryRun ? 'Would mark seen' : 'Ads seen'}:        ${totalSkipped}`);
-  console.log(`  ${isDryRun ? 'Would error' : 'Ads errored'}:         ${totalErrored}`);
-  console.log(`  Written to DB:       ${isDryRun ? 0 : totalInserted}`);
-  console.log('═══════════════════════════════════════════════════════════════');
+  console.log(`\n${LINE}`);
+  console.log(`  Ads processed:    ${totalProcessed}`);
+  console.log(`  ${isDryRun ? 'Would insert' : 'Inserted'}:         ${totalInserted}`);
+  console.log(`  ${isDryRun ? 'Would mark seen' : 'Seen'}:          ${totalSkipped}`);
+  console.log(`  ${isDryRun ? 'Would error' : 'Errored'}:           ${totalErrored}`);
+  console.log(`  Written to DB:    ${isDryRun ? 0 : totalInserted}`);
+
+  if (failed.length > 0) {
+    console.log(`\n${DIVIDER}`);
+    console.log(`  ⚠ FAILURES (${failed.length})`);
+    console.log(DIVIDER);
+    for (const result of failed) {
+      console.log(`  ${result.competitorName.padEnd(30)} (${result.competitorId})`);
+      console.log(`  → ${result.errorMessage ?? 'Unknown error'}`);
+    }
+  }
+
+  if (!isDryRun) {
+    console.log(`\n${DIVIDER}`);
+    console.log('  All inserted ads: reviewStatus=PENDING, qualified=false');
+    console.log('  Review and approve at: http://localhost:3000/ads');
+
+    const withInserts = results.filter((r) => r.status === 'LIVE_OK' && r.adsInserted > 0);
+    if (withInserts.length > 0) {
+      console.log(`\n${DIVIDER}`);
+      console.log('  NEXT STEPS — verify each ingest:');
+      console.log('');
+      for (const result of withInserts) {
+        console.log(
+          `  COMPETITOR_ID=${result.competitorId} npm run meta:verify   # ${result.competitorName}`,
+        );
+      }
+      console.log('');
+      console.log('  Review pending ads:');
+      console.log('  http://localhost:3000/ads?reviewStatus=PENDING&adSource=meta_api');
+    }
+  }
+
+  if (isDryRun) {
+    console.log(`\n${DIVIDER}`);
+    console.log('  NEXT STEP — when ready to write to the database:');
+    console.log('');
+    console.log(
+      '  META_ADLIB_TOKEN=<token> META_BATCH_CONFIRM_LIVE=true npm run meta:batch',
+    );
+  }
+
+  console.log(LINE);
 }
 
 async function main(): Promise<void> {
+  const batchStartedAt = Date.now();
   const { isDryRun } = determineBatchMode();
   assertTokenPresent();
 
@@ -145,7 +207,7 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
 
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  Phase 5 Step 3 — Batch Meta Ingestion');
+  console.log('  Phase 5 Step 4 — Batch Meta Ingestion');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log(`  Mode:          ${isDryRun ? 'DRY RUN — no DB writes' : 'LIVE WRITE'}`);
   if (!isDryRun) {
@@ -199,7 +261,9 @@ async function main(): Promise<void> {
         });
       } catch (error: unknown) {
         const message = redactToken(error instanceof Error ? error.message : String(error));
-        console.error(`\n❌ Batch ${isDryRun ? 'dry-run' : 'live write'} failed for ${competitor.name}: ${message}`);
+        console.error(
+          `\n❌ Batch ${isDryRun ? 'dry-run' : 'live write'} failed for ${competitor.name}: ${message}`,
+        );
 
         results.push({
           competitorId: competitor.id,
@@ -220,9 +284,9 @@ async function main(): Promise<void> {
       }
     }
 
-    printBatchSummary(results, isDryRun);
+    printBatchSummary(results, isDryRun, Date.now() - batchStartedAt);
 
-    if (results.some((result) => result.status === 'FAILED')) {
+    if (results.some((r) => r.status === 'FAILED')) {
       process.exitCode = 1;
     }
   } finally {
