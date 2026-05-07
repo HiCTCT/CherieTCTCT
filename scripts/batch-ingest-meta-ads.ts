@@ -1,15 +1,19 @@
 /**
- * Phase 5 Step 2 — Batch Meta ingestion dry-run
+ * Phase 5 Step 3 — Controlled live batch Meta ingestion
  *
  * Safe batch wrapper around ingestMetaAds().
- * This step is dry-run only. Live batch writes are intentionally blocked until Phase 5 Step 3.
+ * Dry-run remains the default recommended mode. Live writes require an explicit
+ * META_BATCH_CONFIRM_LIVE=true guardrail.
  *
- * Usage:
+ * Dry-run usage:
  *   META_ADLIB_TOKEN=<token> META_DRY_RUN=true npm run meta:batch
+ *
+ * Live usage:
+ *   META_ADLIB_TOKEN=<token> META_BATCH_CONFIRM_LIVE=true npm run meta:batch
  *
  * Optional:
  *   COMPETITOR_IDS=id1,id2 META_ADLIB_TOKEN=<token> META_DRY_RUN=true npm run meta:batch
- *   META_BATCH_DELAY_MS=2000 META_ADLIB_TOKEN=<token> META_DRY_RUN=true npm run meta:batch
+ *   META_BATCH_DELAY_MS=2000 META_ADLIB_TOKEN=<token> META_BATCH_CONFIRM_LIVE=true npm run meta:batch
  */
 
 import { PrismaClient } from '@prisma/client';
@@ -19,6 +23,10 @@ import { redactToken } from '@/lib/providers/meta/redact';
 import { getMetaReadyCompetitors, type MetaReadyCompetitor } from '@/lib/queries/competitors';
 
 const DEFAULT_BATCH_DELAY_MS = 2000;
+
+type BatchMode = {
+  isDryRun: boolean;
+};
 
 function parseBatchDelayMs(): number {
   const raw = process.env.META_BATCH_DELAY_MS;
@@ -46,20 +54,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function assertDryRunOnly(): void {
-  if (process.env.META_DRY_RUN !== 'true') {
+function determineBatchMode(): BatchMode {
+  const isDryRun = process.env.META_DRY_RUN === 'true';
+  const isLiveConfirmed = process.env.META_BATCH_CONFIRM_LIVE === 'true';
+
+  if (isDryRun) {
+    return { isDryRun: true };
+  }
+
+  if (!isLiveConfirmed) {
     throw new Error(
-      'Phase 5 Step 2 batch ingestion is dry-run only.\n' +
-        'Set META_DRY_RUN=true to run this command.\n' +
-        'Live batch writes will be enabled in a later step after dry-run testing passes.',
+      'Live batch writes are blocked unless META_BATCH_CONFIRM_LIVE=true is set.\n\n' +
+        'Choose one of:\n\n' +
+        '  Dry-run:    META_ADLIB_TOKEN=<token> META_DRY_RUN=true npm run meta:batch\n' +
+        '  Live write: META_ADLIB_TOKEN=<token> META_BATCH_CONFIRM_LIVE=true npm run meta:batch',
     );
   }
+
+  return { isDryRun: false };
 }
 
 function assertTokenPresent(): void {
   if (!process.env.META_ADLIB_TOKEN) {
     throw new Error(
-      'META_ADLIB_TOKEN is required for batch dry-run.\n' +
+      'META_ADLIB_TOKEN is required for batch ingestion.\n' +
         'Use the token only in the terminal. Do not paste it into chat, code, or GitHub.',
     );
   }
@@ -76,7 +94,7 @@ function selectCompetitors(
 type BatchItemResult = {
   competitorId: string;
   competitorName: string;
-  status: 'DRY_RUN_OK' | 'FAILED';
+  status: 'DRY_RUN_OK' | 'LIVE_OK' | 'FAILED';
   adsProcessed: number;
   adsInserted: number;
   adsSkipped: number;
@@ -85,7 +103,7 @@ type BatchItemResult = {
   errorMessage?: string;
 };
 
-function printBatchSummary(results: BatchItemResult[]): void {
+function printBatchSummary(results: BatchItemResult[], isDryRun: boolean): void {
   const totalProcessed = results.reduce((sum, result) => sum + result.adsProcessed, 0);
   const totalInserted = results.reduce((sum, result) => sum + result.adsInserted, 0);
   const totalSkipped = results.reduce((sum, result) => sum + result.adsSkipped, 0);
@@ -93,7 +111,7 @@ function printBatchSummary(results: BatchItemResult[]): void {
   const failed = results.filter((result) => result.status === 'FAILED');
 
   console.log('\n═══════════════════════════════════════════════════════════════');
-  console.log('  BATCH DRY-RUN SUMMARY');
+  console.log(`  ${isDryRun ? 'BATCH DRY-RUN SUMMARY' : 'BATCH LIVE WRITE SUMMARY'}`);
   console.log('═══════════════════════════════════════════════════════════════');
 
   for (const result of results) {
@@ -110,15 +128,15 @@ function printBatchSummary(results: BatchItemResult[]): void {
   console.log(`  Competitors checked: ${results.length}`);
   console.log(`  Failed:              ${failed.length}`);
   console.log(`  Ads processed:       ${totalProcessed}`);
-  console.log(`  Would insert:        ${totalInserted}`);
-  console.log(`  Would mark seen:     ${totalSkipped}`);
-  console.log(`  Would error:         ${totalErrored}`);
-  console.log(`  Written to DB:       0`);
+  console.log(`  ${isDryRun ? 'Would insert' : 'Ads inserted'}:        ${totalInserted}`);
+  console.log(`  ${isDryRun ? 'Would mark seen' : 'Ads seen'}:        ${totalSkipped}`);
+  console.log(`  ${isDryRun ? 'Would error' : 'Ads errored'}:         ${totalErrored}`);
+  console.log(`  Written to DB:       ${isDryRun ? 0 : totalInserted}`);
   console.log('═══════════════════════════════════════════════════════════════');
 }
 
 async function main(): Promise<void> {
-  assertDryRunOnly();
+  const { isDryRun } = determineBatchMode();
   assertTokenPresent();
 
   const filter = parseCompetitorIdFilter();
@@ -127,9 +145,12 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
 
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  Phase 5 Step 2 — Batch Meta Ingestion Dry-Run');
+  console.log('  Phase 5 Step 3 — Batch Meta Ingestion');
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('  Mode:          DRY RUN ONLY — no DB writes');
+  console.log(`  Mode:          ${isDryRun ? 'DRY RUN — no DB writes' : 'LIVE WRITE'}`);
+  if (!isDryRun) {
+    console.log('  ⚠ LIVE WRITE MODE: new ads can be inserted as PENDING review records.');
+  }
   console.log(`  Search terms:  ${fetchConfig.searchTerms || '(empty)'}`);
   console.log(`  Countries:     ${fetchConfig.countries.join(', ')}`);
   console.log(`  Limit:         ${fetchConfig.limit} total ads per media-type pass`);
@@ -162,14 +183,14 @@ async function main(): Promise<void> {
 
       try {
         const result = await ingestMetaAds(
-          { competitorId: competitor.id, fetchConfig: { ...fetchConfig }, dryRun: true },
+          { competitorId: competitor.id, fetchConfig: { ...fetchConfig }, dryRun: isDryRun },
           prisma,
         );
 
         results.push({
           competitorId: competitor.id,
           competitorName: competitor.name,
-          status: 'DRY_RUN_OK',
+          status: isDryRun ? 'DRY_RUN_OK' : 'LIVE_OK',
           adsProcessed: result.adsProcessed,
           adsInserted: result.adsInserted,
           adsSkipped: result.adsSkipped,
@@ -178,7 +199,7 @@ async function main(): Promise<void> {
         });
       } catch (error: unknown) {
         const message = redactToken(error instanceof Error ? error.message : String(error));
-        console.error(`\n❌ Batch dry-run failed for ${competitor.name}: ${message}`);
+        console.error(`\n❌ Batch ${isDryRun ? 'dry-run' : 'live write'} failed for ${competitor.name}: ${message}`);
 
         results.push({
           competitorId: competitor.id,
@@ -199,7 +220,7 @@ async function main(): Promise<void> {
       }
     }
 
-    printBatchSummary(results);
+    printBatchSummary(results, isDryRun);
 
     if (results.some((result) => result.status === 'FAILED')) {
       process.exitCode = 1;
@@ -211,6 +232,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   const message = redactToken(error instanceof Error ? error.message : String(error));
-  console.error('\n❌ Batch dry-run failed:', message);
+  console.error('\n❌ Batch ingestion failed:', message);
   process.exitCode = 1;
 });
