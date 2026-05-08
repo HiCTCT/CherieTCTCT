@@ -675,7 +675,9 @@ async function processImport(
               (d) =>
                 d.matchType === 'meta-page-id-within-csv' &&
                 d.incomingName === row.competitorName &&
-                d.existingName === prior.name,
+                d.incomingClient === row.clientName &&
+                d.existingName === prior.name &&
+                d.existingClient === prior.client,
             )
           ) {
             summary.suspectedDuplicates.push({
@@ -717,7 +719,9 @@ async function processImport(
               (d) =>
                 d.matchType === 'facebook-url-within-csv' &&
                 d.incomingName === row.competitorName &&
-                d.existingName === prior.name,
+                d.incomingClient === row.clientName &&
+                d.existingName === prior.name &&
+                d.existingClient === prior.client,
             )
           ) {
             summary.suspectedDuplicates.push({
