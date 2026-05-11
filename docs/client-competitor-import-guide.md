@@ -354,7 +354,7 @@ The report shows:
 
 - Summary counts of clients, competitors, Meta Page IDs, and Facebook URLs
 - All clients and their competitor counts
-- Competitors ready for Meta scan (approved and have a Meta Page ID)
+- Competitors ready for Meta scan (have a Meta Page ID — matches what batch scan will touch)
 - Competitors missing a Meta Page ID
 - Competitors with a Facebook URL but no Meta Page ID — with direct Ad Library search links
 - Competitors with a Meta Page ID but no Facebook URL
