@@ -93,15 +93,19 @@ async function main(): Promise<void> {
   // ── Segment competitors ─────────────────────────────────────────────────────
 
   const manual = allCompetitors.filter((c) => c.discoverySource === 'manual');
-  const approved = allCompetitors.filter((c) => c.status === 'APPROVED');
-  const withMetaId = allCompetitors.filter((c) => !!c.metaPageId);
-  const missingMetaId = allCompetitors.filter((c) => !c.metaPageId);
+  const withMetaId = allCompetitors.filter((c) => !!c.metaPageId && c.metaPageId !== '');
+  const missingMetaId = allCompetitors.filter((c) => !c.metaPageId || c.metaPageId === '');
   const withFbUrl = allCompetitors.filter((c) => !!c.facebookPageUrl);
-  const fbNoMeta = allCompetitors.filter((c) => !!c.facebookPageUrl && !c.metaPageId);
-  const metaNoFb = allCompetitors.filter((c) => !!c.metaPageId && !c.facebookPageUrl);
-  const readyToScan = allCompetitors.filter((c) => !!c.metaPageId && c.status === 'APPROVED');
+  const fbNoMeta = allCompetitors.filter((c) => !!c.facebookPageUrl && (!c.metaPageId || c.metaPageId === ''));
+  const metaNoFb = allCompetitors.filter((c) => !!c.metaPageId && c.metaPageId !== '' && !c.facebookPageUrl);
+  // readyToScan mirrors getMetaReadyCompetitors() in lib/queries/competitors.ts:
+  // the only gate is a non-null, non-empty metaPageId. Status is not a filter.
+  const readyToScan = withMetaId;
   const neverScanned = readyToScan.filter((c) => !c.lastScannedAt);
   const scanned = readyToScan.filter((c) => !!c.lastScannedAt);
+  // Status breakdown among scan-eligible competitors (informational only).
+  const approvedAndReady = readyToScan.filter((c) => c.status === 'APPROVED');
+  const nonApprovedAndReady = readyToScan.filter((c) => c.status !== 'APPROVED');
 
   // ── Possible duplicates (same normalised name, different exact name, same client) ──
 
@@ -183,15 +187,16 @@ async function main(): Promise<void> {
   console.log(indent(`Clients:                         ${clients.length}`));
   console.log(indent(`Competitors (total):             ${allCompetitors.length}`));
   console.log(indent(`  Manually imported:             ${manual.length}`));
-  console.log(indent(`  Status APPROVED:               ${approved.length}`));
   console.log(indent(`  With Meta Page ID:             ${withMetaId.length}`));
   console.log(indent(`  Missing Meta Page ID:          ${missingMetaId.length}`));
   console.log(indent(`  With Facebook URL:             ${withFbUrl.length}`));
   console.log(indent(`  Facebook URL, no Meta ID:      ${fbNoMeta.length}`));
   console.log(indent(`  Meta ID, no Facebook URL:      ${metaNoFb.length}`));
-  console.log(indent(`Ready for Meta scan (approved + Meta ID): ${readyToScan.length}`));
+  console.log(indent(`Ready for Meta scan (has Meta Page ID): ${readyToScan.length}`));
   console.log(indent(`  Never scanned:                 ${neverScanned.length}`));
   console.log(indent(`  Previously scanned:            ${scanned.length}`));
+  console.log(indent(`  Status APPROVED:               ${approvedAndReady.length}`));
+  console.log(indent(`  Other status:                  ${nonApprovedAndReady.length}`));
   console.log(indent(`Possible duplicates (name):      ${dupCandidates.length}`));
   console.log(indent(`Possible duplicates (Meta ID):   ${metaDups.length}`));
 
@@ -200,7 +205,7 @@ async function main(): Promise<void> {
   section('Clients');
   for (const client of clients) {
     const total = client.competitors.length;
-    const ready = client.competitors.filter((c) => !!c.metaPageId && c.status === 'APPROVED').length;
+    const ready = client.competitors.filter((c) => !!c.metaPageId && c.metaPageId !== '').length;
     const missing = client.competitors.filter((c) => !c.metaPageId).length;
     console.log(indent(`${client.name}  [${client.industry.name}]`));
     console.log(indent(`  Competitors: ${total}  |  Ready to scan: ${ready}  |  Missing Meta ID: ${missing}`));
@@ -211,7 +216,7 @@ async function main(): Promise<void> {
 
   // ── Ready to scan ───────────────────────────────────────────────────────────
 
-  section(`Competitors ready for Meta scan (${readyToScan.length})`);
+  section(`Competitors ready for Meta scan — has Meta Page ID (${readyToScan.length})`);
   if (readyToScan.length === 0) {
     console.log(indent('None. Add Meta Page IDs to competitors to enable scanning.'));
   } else {
