@@ -160,7 +160,7 @@ function normalizeFacebookUrl(url: string): string {
     .toLowerCase()
     .replace(/^https?:\/\//, '')
     .replace(/^www\./, '')
-    .replace(/\/$/, '');
+    .replace(/\/+$/, '');
 }
 
 /**
@@ -172,7 +172,7 @@ function normalizeWebsite(url: string): string {
     .toLowerCase()
     .replace(/^https?:\/\//, '')
     .replace(/^www\./, '')
-    .replace(/\/$/, '');
+    .replace(/\/+$/, '');
 }
 
 // ── CSV parsing and validation ────────────────────────────────────────────────
@@ -695,11 +695,6 @@ async function processImport(
           }
         }
       }
-      // Always push current row — even if prior entries exist for this key
-      if (!seenMetaPageIds.has(row.metaPageId)) {
-        seenMetaPageIds.set(row.metaPageId, []);
-      }
-      seenMetaPageIds.get(row.metaPageId)!.push({ name: row.competitorName, client: row.clientName });
     }
 
     // Within-CSV: Facebook URL
@@ -739,11 +734,6 @@ async function processImport(
           }
         }
       }
-      // Always push current row — even if prior entries exist for this key
-      if (!seenFacebookUrls.has(normFb)) {
-        seenFacebookUrls.set(normFb, []);
-      }
-      seenFacebookUrls.get(normFb)!.push({ name: row.competitorName, client: row.clientName });
     }
 
     // Within-CSV: Website (WARN only)
@@ -774,9 +764,6 @@ async function processImport(
             reusedMetaPageId: null,
           });
         }
-      }
-      if (!seenWebsites.has(normSite)) {
-        seenWebsites.set(normSite, { name: row.competitorName, client: row.clientName });
       }
     }
 
@@ -940,6 +927,33 @@ async function processImport(
     }
 
     if (isBlocked) continue;
+
+    // ── Register surviving row in within-CSV tracking maps ───────────────────
+    // Appended only after all blocking checks pass. Blocked rows are never
+    // added to the seen maps, so they cannot generate false within-CSV signals
+    // against later rows.
+
+    if (row.metaPageId) {
+      if (!seenMetaPageIds.has(row.metaPageId)) {
+        seenMetaPageIds.set(row.metaPageId, []);
+      }
+      seenMetaPageIds.get(row.metaPageId)!.push({ name: row.competitorName, client: row.clientName });
+    }
+
+    if (row.facebookPageUrl) {
+      const normFb = normalizeFacebookUrl(row.facebookPageUrl);
+      if (!seenFacebookUrls.has(normFb)) {
+        seenFacebookUrls.set(normFb, []);
+      }
+      seenFacebookUrls.get(normFb)!.push({ name: row.competitorName, client: row.clientName });
+    }
+
+    if (row.competitorWebsite) {
+      const normSite = normalizeWebsite(row.competitorWebsite);
+      if (!seenWebsites.has(normSite)) {
+        seenWebsites.set(normSite, { name: row.competitorName, client: row.clientName });
+      }
+    }
 
     // ── Existing same-client exact-name competitor (update path) ─────────────
 
