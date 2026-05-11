@@ -796,6 +796,8 @@ async function processImport(
           (d) =>
             d.matchType === 'exact-name' &&
             d.incomingName === row.competitorName &&
+            d.incomingClient === row.clientName &&
+            d.existingName === match.name &&
             d.existingClient === match.client.name,
         )
       ) {
