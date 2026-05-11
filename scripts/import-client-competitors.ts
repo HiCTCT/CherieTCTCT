@@ -843,6 +843,7 @@ async function processImport(
             (d) =>
               d.matchType === 'meta-page-id' &&
               d.incomingName === row.competitorName &&
+              d.incomingClient === row.clientName &&
               d.existingName === match.name &&
               d.existingClient === match.client.name,
           )
@@ -879,6 +880,7 @@ async function processImport(
             (d) =>
               d.matchType === 'facebook-url' &&
               d.incomingName === row.competitorName &&
+              d.incomingClient === row.clientName &&
               d.existingName === match.name &&
               d.existingClient === match.client.name,
           )
@@ -915,6 +917,7 @@ async function processImport(
               (d) =>
                 d.matchType === 'normalized-name' &&
                 d.incomingName === row.competitorName &&
+                d.incomingClient === row.clientName &&
                 d.existingName === match.name &&
                 d.existingClient === match.client.name,
             )
