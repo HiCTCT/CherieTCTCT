@@ -206,7 +206,7 @@ async function main(): Promise<void> {
   for (const client of clients) {
     const total = client.competitors.length;
     const ready = client.competitors.filter((c) => !!c.metaPageId && c.metaPageId !== '').length;
-    const missing = client.competitors.filter((c) => !c.metaPageId).length;
+    const missing = client.competitors.filter((c) => !c.metaPageId || c.metaPageId === '').length;
     console.log(indent(`${client.name}  [${client.industry.name}]`));
     console.log(indent(`  Competitors: ${total}  |  Ready to scan: ${ready}  |  Missing Meta ID: ${missing}`));
     if (client.whatTheySell) {
