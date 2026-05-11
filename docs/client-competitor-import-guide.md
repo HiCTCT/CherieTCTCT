@@ -335,6 +335,36 @@ At the end, if any competitors are missing Meta Page IDs or have suspected dupli
 
 ## After import
 
+### Run the import readiness check
+
+After a live import, run the readiness check to confirm what was created and identify anything that still needs attention:
+
+```bash
+npm run import:check
+```
+
+To scope the report to a single client or industry:
+
+```bash
+CHECK_CLIENT="PCF Singapore" npm run import:check
+CHECK_INDUSTRY="Early Childhood Education" npm run import:check
+```
+
+The report shows:
+
+- Summary counts of clients, competitors, Meta Page IDs, and Facebook URLs
+- All clients and their competitor counts
+- Competitors ready for Meta scan (have a Meta Page ID — matches what batch scan will touch)
+- Competitors missing a Meta Page ID
+- Competitors with a Facebook URL but no Meta Page ID — with direct Ad Library search links
+- Competitors with a Meta Page ID but no Facebook URL
+- Possible duplicate names under the same client
+- Possible duplicate Meta Page IDs under the same client
+- All manually imported competitors
+- Recommended next steps
+
+The check is read-only. It does not write to the database or call the Meta API.
+
 ### Check which competitors are ready to scan
 
 ```bash
@@ -404,6 +434,7 @@ The URL format is not valid. Correct the URL or leave the field blank if unknown
 
 ### `Client Name is required` / `Industry is required`
 
+A row is mis
 A row is missing one of these required fields. Check for blank cells or rows with only partial data.
 
 ---
