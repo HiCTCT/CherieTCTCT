@@ -41,17 +41,13 @@ function pad(s: string, width: number): string {
 
 // ── Normalisation (mirrors import script — for duplicate detection only) ──────
 
+// Mirrors normalizeCompetitorName in scripts/import-client-competitors.ts exactly.
+// Keep these two functions in sync whenever the import script's normalisation changes.
 function normalizeName(name: string): string {
   return name
     .toLowerCase()
-    .replace(/\bpte\.?\s*ltd\.?\b/gi, '')
-    .replace(/\bsdn\.?\s*bhd\.?\b/gi, '')
-    .replace(/\binc\.?\b/gi, '')
-    .replace(/\bllc\.?\b/gi, '')
-    .replace(/\bco\.?\b/gi, '')
-    .replace(/\blimited\b/gi, '')
-    .replace(/\bsingapore\b/gi, '')
-    .replace(/\bsg\b/gi, '')
+    .replace(/\b(pte\.?\s*ltd\.?|sdn\.?\s*bhd\.?|ltd\.?|inc\.?|corp\.?|llc\.?|co\.?)\b/g, '')
+    .replace(/\b(singapore|sg|asia|global|international|intl)\b/g, '')
     .replace(/[^a-z0-9\s]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -135,7 +131,7 @@ async function main(): Promise<void> {
           a.normalized.length > 0 &&
           a.name !== b.name
         ) {
-          const pairKey = [a.name, b.name].sort().join('||');
+          const pairKey = `${a.clientName}::${[a.name, b.name].sort().join('||')}`;
           if (!seenDupPairs.has(pairKey)) {
             seenDupPairs.add(pairKey);
             dupCandidates.push({ a, b });
