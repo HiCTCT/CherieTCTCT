@@ -748,7 +748,10 @@ async function processImport(
             (d) =>
               d.matchType === 'website-within-csv' &&
               d.incomingName === row.competitorName &&
-              d.existingName === prior.name,
+              d.incomingClient === row.clientName &&
+              d.existingName === prior.name &&
+              d.existingClient === prior.client &&
+              d.matchValue === row.competitorWebsite,
           )
         ) {
           summary.suspectedDuplicates.push({
