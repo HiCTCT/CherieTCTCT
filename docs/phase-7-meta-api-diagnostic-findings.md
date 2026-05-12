@@ -1,7 +1,7 @@
 # Phase 7 — Meta Ad Library API: Diagnostic Findings
 
 **Date:** 2026-05-12
-**Status:** Ingestion paused pending resolution
+**Status:** Ingestion paused — Meta API route assessed as unsuitable for reliable competitor-level collection
 **Branch:** main
 
 ---
@@ -13,9 +13,17 @@ after the client import pipeline was completed. A series of diagnostic tests
 confirmed that the Meta Ad Library API token and connection are functional, but
 competitor-specific ad retrieval is not returning results as expected.
 
-Live ingestion remains paused. No competitor data has been written to the database
-via the API. No schema, scoring, or ingestion logic has been changed as a result
-of these findings.
+A further category keyword diagnostic confirmed that even broad keyword searches
+(`furniture`, `sofa`, `dining table`, `home furniture`) return ads from unrelated
+advertisers — and do not return Castlery's ads at all. The category keyword
+fallback is not reliable enough for competitor-specific ingestion.
+
+**Conclusion: The Meta API route is currently unsuitable for reliable
+competitor-level commercial ad collection in this project. Live ingestion
+remains paused.**
+
+No competitor data has been written to the database via the API. No schema,
+scoring, or ingestion logic has been changed as a result of these findings.
 
 ---
 
@@ -162,51 +170,46 @@ competitors while the API issue is resolved.
 
 ---
 
-## Next Diagnostic: Category Keyword Fetch
+## Phase 4 — Category Keyword Diagnostic Results
 
-Before any code or ingestion changes, run a controlled category keyword test to
-determine whether the target competitors' ads appear in broad keyword results.
-This is a read-only API call — no DB writes, no ingestion.
+Run manually against the Meta API. No script changes were required.
+Parameters for all tests: `ad_reached_countries=SG`, `ad_active_status=ACTIVE`,
+`ad_type=ALL`, no `search_page_ids`, `limit=25`.
 
-**Test 1 — Castlery**
+### Castlery (page ID `374586035998186`)
 
-```
-search_terms=furniture
-ad_reached_countries=SG
-ad_active_status=ACTIVE
-ad_type=ALL
-(no search_page_ids)
-limit=25
-```
+| search_terms | Ads returned | Castlery page ID found |
+|-------------|-------------|------------------------|
+| `furniture` | Yes | No |
+| `sofa` | Yes | No |
+| `dining table` | Yes | No |
+| `home furniture` | Yes | No |
 
-Inspect the returned `page_id` and `page_name` values.
-Check whether Castlery page ID `374586035998186` appears in any record.
+Castlery's page ID `374586035998186` did not appear in any returned record
+across four keyword variations.
 
-**Test 2 — Wellaholic**
+### Wellaholic (page ID `1143803892307840`)
 
-```
-search_terms=slimming
-ad_reached_countries=SG
-ad_active_status=ACTIVE
-ad_type=ALL
-(no search_page_ids)
-limit=25
-```
+Not tested — the Castlery results were conclusive enough to determine that
+category keyword post-filtering is not a viable path for this access tier.
 
-Inspect the returned `page_id` and `page_name` values.
-Check whether Wellaholic page ID `1143803892307840` appears in any record.
+### Observations
 
-**What each result tells us:**
+- Category keyword results returned ads, confirming the API responds to broad
+  terms in SG.
+- Results were noisy. Returned advertisers included unrelated businesses such as
+  fiction/story platforms (e.g. ReadingOnline2), indicating the keyword matching
+  is loose and category-level filtering is not reliable for commercial ad targeting.
+- Castlery's ads do not surface under any tested furniture-related keyword.
+- Category keyword fetching combined with `page_id` post-filtering is not a
+  viable ingestion strategy under the current API access tier.
 
-| Outcome | Interpretation |
-|---------|---------------|
-| Competitor page ID appears in category results | Category keyword fetch with post-filter is a viable ingestion path. Proceed to Option 2 engineering. |
-| Category results return ads but competitor page ID absent | Competitor's ads do not surface under this keyword. Try alternative keywords. If all keywords fail, escalate to Meta developer support. |
-| Category results also return `data: []` | API access for commercial SG ads may be the broader issue. Investigate token app approval status before any other fetch strategy. |
+### Conclusion
 
-This diagnostic can be run manually against the API (no script changes required)
-or via a lightweight extension to `scripts/diagnose-meta-fetch.ts` if a script
-is preferred.
+**Option 2 (category keyword fetch + post-filter) is ruled out.**
+The target competitors' ads do not appear in category keyword results, making
+post-filtering by `page_id` impossible. Options 1 and 2 from the revised fetch
+strategy are both eliminated by these findings.
 
 ---
 
@@ -224,20 +227,26 @@ is preferred.
 
 ## Recommended Next Steps
 
-1. **Run the category keyword diagnostic** (read-only, manual or scripted) to
-   determine whether Castlery and Wellaholic ads appear in broad keyword results.
-
-2. **Check Meta app approval status** at `developers.facebook.com` for the app
+1. **Check Meta app approval status** at `developers.facebook.com` for the app
    associated with the current token. Confirm whether the app has been approved
-   for Ad Library API access for commercial (non-political) ad queries.
+   for Ad Library API access for commercial (non-political) ad queries. This
+   remains the most likely root cause and the lowest-cost investigation step.
 
-3. **Hold all live ingestion for affected competitors** until either the API
-   access issue is resolved or an alternative collection path is validated
-   end-to-end on a single test competitor before scaling.
+2. **Evaluate Option 3 (manual advertiser verification)** as the interim path
+   for high-priority competitors while the API issue is investigated. This
+   produces no dirty data and keeps the pipeline honest.
 
-4. **No schema, scoring, or ingestion code changes** until the fetch strategy
-   is confirmed and a validated test proves end-to-end data retrieval works
-   correctly for at least one real competitor.
+3. **Evaluate Option 4 (browser-assisted collection)** as a bridge for
+   high-priority competitors. The existing `MetaAdRecord` type and ingestion
+   pipeline accept this data without schema changes.
+
+4. **Hold all live API ingestion** until the API access issue is resolved or an
+   alternative collection path is validated end-to-end on a single test
+   competitor before scaling.
+
+5. **No schema, scoring, or ingestion code changes** until the fetch strategy
+   is confirmed and a validated end-to-end test proves correct data retrieval
+   for at least one real competitor.
 
 ---
 
