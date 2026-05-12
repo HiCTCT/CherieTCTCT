@@ -18,7 +18,8 @@
     "meta:batch:scheduled": "tsx scripts/meta-batch-scheduled.ts",
     "import:clients": "tsx scripts/import-client-competitors.ts",
     "import:check": "tsx scripts/check-import-readiness.ts",
-    "import:audit": "tsx scripts/audit-raw-competitors.ts"
+    "import:audit": "tsx scripts/audit-raw-competitors.ts",
+    "import:select-batch": "tsx scripts/select-import-batch.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
