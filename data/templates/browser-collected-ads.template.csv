@@ -1,0 +1,2 @@
+collection_status,competitor_name,meta_page_id,ad_id,ad_library_url,media_type,publisher_platforms,ad_delivery_start_time,ad_copy,headline,description,landing_page_url,notes
+READY,Castlery,374586035998186,1234567890123456,https://www.facebook.com/ads/library/?id=1234567890123456,IMAGE,"facebook,instagram",2026-01-01,Example ad copy placeholder,Example headline placeholder,Example description placeholder,https://www.example.com,Example row only. Replace with real browser-collected ad data.
