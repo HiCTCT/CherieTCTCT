@@ -21,7 +21,8 @@
     "import:audit": "tsx scripts/audit-raw-competitors.ts",
     "import:select-batch": "tsx scripts/select-import-batch.ts",
     "meta:diagnose": "tsx scripts/diagnose-meta-fetch.ts",
-    "meta:diagnose-params": "tsx scripts/diagnose-meta-params.ts"
+    "meta:diagnose-params": "tsx scripts/diagnose-meta-params.ts",
+    "browser:validate": "tsx scripts/validate-browser-collected-ads.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
