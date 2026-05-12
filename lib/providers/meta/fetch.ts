@@ -123,6 +123,8 @@ function buildBaseParams(config: MetaFetchConfig, pageSize: number): URLSearchPa
     params.set('media_type', config.mediaType);
   }
 
+  params.set('ad_type', config.adType);
+
   return params;
 }
 
@@ -130,7 +132,7 @@ function buildBaseParams(config: MetaFetchConfig, pageSize: number): URLSearchPa
 
 async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
   const pageSize = Math.min(config.limit, META_API_MAX_PAGE_SIZE);
-  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&media_type=${config.mediaType ?? ''}&ad_reached_countries=...&fields=...&limit=${pageSize}&access_token=REDACTED`;
+  const safeDisplayUrl = `${META_API_BASE}?search_terms=${encodeURIComponent(config.searchTerms)}&search_page_ids=${config.searchPageIds ? serialisePageIdsForGraphApi(config.searchPageIds) : ''}&ad_type=${config.adType}&media_type=${config.mediaType ?? ''}&ad_reached_countries=...&fields=...&limit=${pageSize}&access_token=REDACTED`;
 
   console.log('\n  Fetching from Meta Ad Library API...');
   console.log(`  Search terms:  ${config.searchTerms || '(empty)'}`);
@@ -138,6 +140,7 @@ async function fetchFromApi(config: MetaFetchConfig): Promise<MetaAdRecord[]> {
   console.log(`  Media type:    ${config.mediaType ?? '(not set)'}`);
   console.log(`  Countries:     ${config.countries.join(', ')}`);
   console.log(`  Active status: ${config.adActiveStatus}`);
+  console.log(`  Ad type:       ${config.adType}`);
   console.log(`  Total limit:   ${config.limit}`);
   console.log(`  Page size:     ${pageSize}`);
   console.log(`  URL:           ${safeDisplayUrl}`);
@@ -255,6 +258,7 @@ export function buildConfigFromEnv(): MetaFetchConfig {
     searchPageIds: searchPageIds.length > 0 ? searchPageIds : undefined,
     countries,
     adActiveStatus: 'ALL',
+    adType: process.env.META_AD_TYPE ?? 'ALL',
     limit,
     format,
     simulationMode,

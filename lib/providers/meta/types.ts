@@ -58,6 +58,8 @@ export type MetaFetchConfig = {
   countries: string[];
   /** ad_active_status — 'ALL' | 'ACTIVE' | 'INACTIVE' */
   adActiveStatus: 'ALL' | 'ACTIVE' | 'INACTIVE';
+  /** ad_type passed to the API — defaults to 'ALL'. Set META_AD_TYPE to override. */
+  adType: string;
   /** Number of ads to fetch per request */
   limit: number;
   /** Format used for analysis and storage. In ingestion this is set per media-type pass. */
