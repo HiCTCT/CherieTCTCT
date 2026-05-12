@@ -15,7 +15,11 @@
  * Expected header:
  *   collection_status,competitor_name,meta_page_id,ad_id,ad_library_url,
  *   media_type,publisher_platforms,ad_delivery_start_time,ad_copy,headline,
- *   description,landing_page_url,notes
+ *   description,landing_page_url,notes,visual_description,creative_notes
+ *
+ * Optional analyst-context columns (warn if blank, never error):
+ *   visual_description  — maps to Creative Analysis in analyseAdRow()
+ *   creative_notes      — maps to Analysis in analyseAdRow()
  */
 
 import { parse } from 'csv-parse/sync';
@@ -43,6 +47,9 @@ type BrowserAdRow = {
   description: string;
   landing_page_url: string;
   notes: string;
+  // Optional analyst-context columns (added Phase 7.5)
+  visual_description: string;
+  creative_notes: string;
 };
 
 /**
@@ -101,6 +108,8 @@ const EXPECTED_HEADER = [
   'description',
   'landing_page_url',
   'notes',
+  'visual_description',
+  'creative_notes',
 ] as const;
 
 const VALID_MEDIA_TYPES: BrowserMediaType[] = ['IMAGE', 'VIDEO', 'CAROUSEL', 'UNKNOWN'];
@@ -229,6 +238,20 @@ function validateReadyRow(
     );
   }
 
+  // visual_description — optional but recommended (maps to Creative Analysis in scorer)
+  if (!row.visual_description?.trim()) {
+    issues.push(
+      warn('visual_description', 'Empty — scorer will use baseline creativeScore (~2.0). Add a brief visual description for meaningful scoring.'),
+    );
+  }
+
+  // creative_notes — optional but recommended (maps to Analysis in scorer)
+  if (!row.creative_notes?.trim()) {
+    issues.push(
+      warn('creative_notes', 'Empty — scorer will miss funnel stage, triggers, and AIDA signals. Add brief analyst notes for meaningful scoring.'),
+    );
+  }
+
   return issues;
 }
 
@@ -312,7 +335,8 @@ function main(): void {
     process.exit(1);
   }
   if (extraCols.length > 0) {
-    console.log(`\n  ⚠  Extra columns (ignored): ${extraCols.join(', ')}`);
+    // visual_description and creative_notes are now expected — only flag truly unknown extras
+    console.log(`\n  ⚠  Unknown extra columns (ignored): ${extraCols.join(', ')}`);
   }
 
   // ── Bucket rows by status ────────────────────────────────────────────────────
@@ -404,6 +428,8 @@ function main(): void {
     console.log(`    headline:      ${truncate(record.ad_creative_link_titles[0] ?? '', 80)}`);
     console.log(`    description:   ${truncate(record.ad_creative_link_descriptions[0] ?? '', 80)}`);
     console.log(`    landing page:  ${domain || '(none)'}`);
+    console.log(`    visual_desc:   ${truncate(v.raw.visual_description ?? '', 80)}`);
+    console.log(`    creative_notes:${truncate(v.raw.creative_notes ?? '', 80)}`);
 
     if (errors.length > 0) {
       for (const e of errors) {

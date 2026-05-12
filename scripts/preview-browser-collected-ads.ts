@@ -40,6 +40,8 @@ const EXPECTED_HEADER = [
   'description',
   'landing_page_url',
   'notes',
+  'visual_description',
+  'creative_notes',
 ] as const;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -58,6 +60,9 @@ type BrowserAdRow = {
   description: string;
   landing_page_url: string;
   notes: string;
+  // Optional analyst-context columns (added Phase 7.5)
+  visual_description: string;
+  creative_notes: string;
 };
 
 type ScoredRow = {
@@ -67,6 +72,8 @@ type ScoredRow = {
   format: AdFormat;
   analysis: AnalysisOutput;
   copyPreview: string;
+  visualDescPreview: string;
+  creativeNotesPreview: string;
   error: null;
 };
 
@@ -110,9 +117,12 @@ function toExampleRow(row: BrowserAdRow): ExampleRow {
     Headline:     row.headline.trim()        || undefined,
     Description:  row.description.trim()     || undefined,
     'Active Since': row.ad_delivery_start_time.trim() || undefined,
-    Analysis:            undefined,
+    // Analyst-context columns: visual_description → Creative Analysis,
+    // creative_notes → Analysis. Both undefined when blank so scorer
+    // behaviour is unchanged for rows without analyst input.
+    Analysis:           row.creative_notes?.trim()      || undefined,
+    'Creative Analysis': row.visual_description?.trim() || undefined,
     Improvement:         undefined,
-    'Creative Analysis':      undefined,
     'Creative Improvements':  undefined,
     'Other Feedbacks':        undefined,
   };
@@ -243,7 +253,9 @@ function main(): void {
         mediaType: row.media_type.trim().toUpperCase(),
         format,
         analysis,
-        copyPreview: truncate(row.ad_copy.trim() || row.headline.trim(), 80),
+        copyPreview:          truncate(row.ad_copy.trim() || row.headline.trim(), 80),
+        visualDescPreview:    truncate(row.visual_description?.trim(), 80),
+        creativeNotesPreview: truncate(row.creative_notes?.trim(), 80),
         error: null,
       });
     } catch (err: unknown) {
@@ -279,12 +291,14 @@ function main(): void {
       continue;
     }
 
-    const { rowNumber, adId, mediaType, format, analysis, copyPreview } = result;
+    const { rowNumber, adId, mediaType, format, analysis, copyPreview, visualDescPreview, creativeNotesPreview } = result;
     const qualIcon = analysis.qualified ? '✓' : '○';
 
     console.log(`\n  ${qualIcon} Row ${rowNumber}  ad_id=${adId}`);
-    console.log(`    media_type:    ${mediaType}  →  format: ${format}`);
-    console.log(`    Copy preview:  ${copyPreview}`);
+    console.log(`    media_type:     ${mediaType}  →  format: ${format}`);
+    console.log(`    Copy preview:   ${copyPreview}`);
+    console.log(`    Visual desc:    ${visualDescPreview}`);
+    console.log(`    Creative notes: ${creativeNotesPreview}`);
     console.log('');
     console.log(`    Overall score: ${scoreBar(analysis.overallScore)}`);
     console.log(`    Qualified:     ${analysis.qualified ? `YES ✓  (≥ ${SCORE_THRESHOLD})` : `NO    (below ${SCORE_THRESHOLD})`}`);
