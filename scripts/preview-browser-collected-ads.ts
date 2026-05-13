@@ -74,6 +74,12 @@ type ScoredRow = {
   copyPreview: string;
   visualDescPreview: string;
   creativeNotesPreview: string;
+  // Debug fields — exact values passed into analyseAdRow()
+  exampleRowAnalysis: string;
+  exampleRowCreativeAnalysis: string;
+  exampleRowCopy: string;
+  exampleRowHeadline: string;
+  exampleRowDescription: string;
   error: null;
 };
 
@@ -256,6 +262,12 @@ function main(): void {
         copyPreview:          truncate(row.ad_copy.trim() || row.headline.trim(), 80),
         visualDescPreview:    truncate(row.visual_description?.trim(), 80),
         creativeNotesPreview: truncate(row.creative_notes?.trim(), 80),
+        // Capture the exact ExampleRow values sent to the scorer for debugging
+        exampleRowAnalysis:           exampleRow.Analysis              ?? '(empty)',
+        exampleRowCreativeAnalysis:   exampleRow['Creative Analysis']  ?? '(empty)',
+        exampleRowCopy:               exampleRow.Copy                  ?? '(empty)',
+        exampleRowHeadline:           exampleRow.Headline              ?? '(empty)',
+        exampleRowDescription:        exampleRow.Description           ?? '(empty)',
         error: null,
       });
     } catch (err: unknown) {
@@ -291,7 +303,12 @@ function main(): void {
       continue;
     }
 
-    const { rowNumber, adId, mediaType, format, analysis, copyPreview, visualDescPreview, creativeNotesPreview } = result;
+    const {
+      rowNumber, adId, mediaType, format, analysis,
+      copyPreview, visualDescPreview, creativeNotesPreview,
+      exampleRowAnalysis, exampleRowCreativeAnalysis,
+      exampleRowCopy, exampleRowHeadline, exampleRowDescription,
+    } = result;
     const qualIcon = analysis.qualified ? '✓' : '○';
 
     console.log(`\n  ${qualIcon} Row ${rowNumber}  ad_id=${adId}`);
@@ -299,6 +316,14 @@ function main(): void {
     console.log(`    Copy preview:   ${copyPreview}`);
     console.log(`    Visual desc:    ${visualDescPreview}`);
     console.log(`    Creative notes: ${creativeNotesPreview}`);
+    console.log('');
+    console.log('    ── [ExampleRow sent to analyseAdRow] ──────────────────');
+    console.log(`      Analysis:          ${truncate(exampleRowAnalysis, 120)}`);
+    console.log(`      Creative Analysis: ${truncate(exampleRowCreativeAnalysis, 120)}`);
+    console.log(`      Copy:              ${truncate(exampleRowCopy, 120)}`);
+    console.log(`      Headline:          ${truncate(exampleRowHeadline, 120)}`);
+    console.log(`      Description:       ${truncate(exampleRowDescription, 120)}`);
+    console.log('    ───────────────────────────────────────────────────────');
     console.log('');
     console.log(`    Overall score: ${scoreBar(analysis.overallScore)}`);
     console.log(`    Qualified:     ${analysis.qualified ? `YES ✓  (≥ ${SCORE_THRESHOLD})` : `NO    (below ${SCORE_THRESHOLD})`}`);
