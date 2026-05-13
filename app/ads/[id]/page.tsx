@@ -48,6 +48,148 @@ const TRUST_FUNNEL_LABELS: Record<string, string> = {
   READY_TO_BUY: 'Ready to Buy — audience needs a nudge, not more information',
 };
 
+// ------------------------------------------------------------------ rec helpers
+
+/**
+ * Parses a stored recommendation string into structured blocks.
+ *
+ * Each block may have:
+ *   - an optional title  (short heading line, no trailing punctuation)
+ *   - body paragraphs   (normal sentence text)
+ *   - list items        (lines starting with quote/emoji/bullet/number)
+ *   - script entries    (Hook: / Body: / Offer: / CTA: prefixed lines)
+ *
+ * No sentence-level splitting is performed — structure must exist in the
+ * stored text (via newlines). Single paragraphs remain as paragraphs.
+ */
+
+// Matches "Hook (0-3s):", "Body:", "CTA:", etc.
+const SCRIPT_RE = /^(Hook|Body|Offer|CTA|Opening|Closing)\s*(?:\([^)]*\))?\s*:\s*/i;
+// Matches lines that are real list items: quotes, emoji, bullets, numbers
+const LIST_RE = /^["✅•\-\*]|^\d+[.)]\s/;
+
+function looksLikeTitle(line: string): boolean {
+  if (SCRIPT_RE.test(line)) return false;  // script labels are content, not titles
+  if (line.length > 80) return false;       // too long to be a heading
+  if (/[.!?,]$/.test(line)) return false;  // sentence endings are not headings
+  return true;
+}
+
+type RecGroup =
+  | { type: 'body'; texts: string[] }
+  | { type: 'list'; items: string[] }
+  | { type: 'script'; entries: { label: string; text: string }[] };
+
+type RecBlock = { title: string | null; groups: RecGroup[] };
+
+function parseRecBlocks(text: string): RecBlock[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  // No newlines — plain paragraph, nothing to structure
+  if (!trimmed.includes('\n')) {
+    return [{ title: null, groups: [{ type: 'body', texts: [trimmed] }] }];
+  }
+
+  // Split on blank lines into raw blocks, then parse each
+  const rawBlocks = trimmed.split(/\n[ \t]*\n/);
+  const result: RecBlock[] = [];
+
+  for (const raw of rawBlocks) {
+    const lines = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!lines.length) continue;
+
+    let title: string | null = null;
+    let bodyLines = lines;
+
+    if (lines.length > 1 && looksLikeTitle(lines[0])) {
+      title = lines[0];
+      bodyLines = lines.slice(1);
+    }
+
+    // Classify each line, then group consecutive same-type lines
+    const groups: RecGroup[] = [];
+    for (const line of bodyLines) {
+      const scriptMatch = line.match(SCRIPT_RE);
+      if (scriptMatch) {
+        const entry = { label: scriptMatch[1], text: line.slice(scriptMatch[0].length).trim() };
+        const last = groups[groups.length - 1];
+        if (last?.type === 'script') { last.entries.push(entry); }
+        else { groups.push({ type: 'script', entries: [entry] }); }
+        continue;
+      }
+      if (LIST_RE.test(line)) {
+        const item = line.replace(/^["✅•\-\*]\s*/, '').replace(/^\d+[.)]\s+/, '').trim();
+        const last = groups[groups.length - 1];
+        if (last?.type === 'list') { last.items.push(item); }
+        else { groups.push({ type: 'list', items: [item] }); }
+        continue;
+      }
+      // Normal body line
+      const last = groups[groups.length - 1];
+      if (last?.type === 'body') { last.texts.push(line); }
+      else { groups.push({ type: 'body', texts: [line] }); }
+    }
+
+    result.push({ title, groups });
+  }
+
+  return result.length ? result : [{ title: null, groups: [{ type: 'body', texts: [trimmed] }] }];
+}
+
+// ------------------------------------------------------------------ rec component
+
+function RecText({ text }: { text: string }) {
+  const blocks = parseRecBlocks(text);
+
+  // Single unstructured block with no title — render as a plain paragraph
+  if (
+    blocks.length === 1 &&
+    blocks[0].title === null &&
+    blocks[0].groups.length === 1 &&
+    blocks[0].groups[0].type === 'body'
+  ) {
+    return <p>{(blocks[0].groups[0] as { type: 'body'; texts: string[] }).texts.join(' ')}</p>;
+  }
+
+  return (
+    <div className="rec-blocks">
+      {blocks.map((block, bi) => (
+        <div key={bi} className="rec-block">
+          {block.title && <p className="rec-block-title">{block.title}</p>}
+          {block.groups.map((group, gi) => {
+            if (group.type === 'body') {
+              return (
+                <p key={gi} className="rec-block-body">
+                  {group.texts.join(' ')}
+                </p>
+              );
+            }
+            if (group.type === 'list') {
+              return (
+                <ul key={gi} className="rec-bullets">
+                  {group.items.map((item, i) => <li key={i}>{item}</li>)}
+                </ul>
+              );
+            }
+            // script
+            return (
+              <dl key={gi} className="rec-script">
+                {group.entries.map((entry, i) => (
+                  <div key={i} className="rec-script-row">
+                    <dt>{entry.label}</dt>
+                    <dd>{entry.text}</dd>
+                  </div>
+                ))}
+              </dl>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ types
 type Trigger = { name: string; strength: string };
 type AidaExplanations = { attention: string; interest: string; desire: string; action: string };
@@ -415,7 +557,7 @@ export default async function AdDetailPage({
         )}
       </div>
 
-      {/* ── 12. Recommendations ── */}
+            {/* ── 12. Recommendations ── */}
       <div className="card">
         <h2>Recommendations for Improvement</h2>
         {recommendations ? (
@@ -423,31 +565,31 @@ export default async function AdDetailPage({
             {recommendations.copy && (
               <div className="rec-item">
                 <span className="rec-label">Copy</span>
-                <p>{recommendations.copy}</p>
+                <RecText text={recommendations.copy} />
               </div>
             )}
             {recommendations.headline && (
               <div className="rec-item">
                 <span className="rec-label">Headline</span>
-                <p>{recommendations.headline}</p>
+                <RecText text={recommendations.headline} />
               </div>
             )}
             {recommendations.description && (
               <div className="rec-item">
                 <span className="rec-label">Description</span>
-                <p>{recommendations.description}</p>
+                <RecText text={recommendations.description} />
               </div>
             )}
             {recommendations.creative && (
               <div className="rec-item">
                 <span className="rec-label">Creative</span>
-                <p>{recommendations.creative}</p>
+                <RecText text={recommendations.creative} />
               </div>
             )}
             {recommendations.conversionStrength && (
               <div className="rec-item">
                 <span className="rec-label">Conversion Strength</span>
-                <p>{recommendations.conversionStrength}</p>
+                <RecText text={recommendations.conversionStrength} />
               </div>
             )}
           </div>
