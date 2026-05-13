@@ -681,9 +681,10 @@ async function main(): Promise<void> {
   }
 
   // ── Summary ──────────────────────────────────────────────────────────────────
-  // processedRows: all scored rows. isErrored checks outcome === 'SKIPPED_ERROR'
-  // (pre-scoring errors only). WRITE_ERROR rows are ProcessedRow and are included.
-  const processedRows   = results.filter((r): r is ProcessedRow => !isErrored(r));
+  // processedRows: all scored rows (includes duplicates, excludes pre-scoring errors).
+  // Score stats are computed from ALL processedRows so duplicate-only runs still show
+  // correct qualified / avg / distribution figures instead of "0 of 0 / N/A".
+  const processedRows    = results.filter((r): r is ProcessedRow => !isErrored(r));
   const insertCandidates = processedRows.filter((r) =>
     liveWrite ? r.outcome === 'INSERTED' : r.outcome === 'WOULD_INSERT',
   );
@@ -692,43 +693,53 @@ async function main(): Promise<void> {
       ? r.outcome === 'SKIPPED_EXISTING' || r.outcome === 'SKIPPED_DUPLICATE'
       : r.outcome === 'SKIPPED_EXISTING',
   );
-  const qualifiedRows   = insertCandidates.filter((r) => r.analysis.qualified);
-  const unqualifiedRows = insertCandidates.filter((r) => !r.analysis.qualified);
-  const avgScore        = insertCandidates.length > 0
-    ? insertCandidates.reduce((sum, r) => sum + r.analysis.overallScore, 0) / insertCandidates.length
-    : 0;
-  const totalErrored    = preErrors.length + (liveWrite ? writeErrCount : 0);
+
+  // Score stats: always from ALL processedRows regardless of duplicate status
+  const qualifiedAll   = processedRows.filter((r) => r.analysis.qualified);
+  const unqualifiedAll = processedRows.filter((r) => !r.analysis.qualified);
+  const avgScore       = processedRows.length > 0
+    ? processedRows.reduce((sum, r) => sum + r.analysis.overallScore, 0) / processedRows.length
+    : null;
+  const totalErrored   = preErrors.length + (liveWrite ? writeErrCount : 0);
+
+  // Qualify counts scoped to insert-only (used in verdict messaging)
+  const qualifiedInserted   = insertCandidates.filter((r) => r.analysis.qualified);
+  const unqualifiedInserted = insertCandidates.filter((r) => !r.analysis.qualified);
 
   console.log(`\n${LINE}`);
   console.log(`  ${liveWrite ? 'WRITE SUMMARY' : 'SUMMARY'}`);
   console.log(LINE);
-  console.log(`  READY rows processed:    ${readyRows.length}`);
-  console.log(`  Successfully scored:     ${processedRows.length}`);
-  console.log(`  Errored (skipped):       ${totalErrored}`);
+
+  // ── READY row analysis (all scored rows, regardless of duplicate status) ──────
+  console.log(`  READY rows analysed:              ${readyRows.length}`);
+  console.log(`  Successfully scored:              ${processedRows.length}`);
+  console.log(`  Qualified among READY rows:       ${qualifiedAll.length} of ${processedRows.length}`);
+  console.log(`  Non-qualified among READY rows:   ${unqualifiedAll.length} of ${processedRows.length}`);
+  console.log(`  Average score among READY rows:   ${avgScore !== null ? avgScore.toFixed(2) : 'N/A'}`);
+  if (totalErrored > 0) {
+    console.log(`  Errored (skipped):               ${totalErrored}`);
+  }
   console.log('');
 
+  // ── Ingestion action summary ──────────────────────────────────────────────────
   if (liveWrite) {
-    console.log(`  Inserted:                ${insertedCount}`);
-    console.log(`  Skipped (duplicate):     ${dupSkipCount}`);
+    console.log(`  Inserted:                        ${insertedCount}`);
+    console.log(`  Skipped (duplicate):             ${dupSkipCount}`);
   } else {
-    console.log(`  Would INSERT:            ${insertCandidates.length}`);
-    console.log(`  Would SKIP (duplicate):  ${skipCandidates.length}`);
+    console.log(`  Would INSERT:                    ${insertCandidates.length}`);
+    console.log(`  Would SKIP duplicate:            ${skipCandidates.length}`);
   }
 
   console.log('');
-  console.log(`  Qualified (≥ ${SCORE_THRESHOLD}):       ${qualifiedRows.length} of ${insertCandidates.length}`);
-  console.log(`  Non-qualified (< ${SCORE_THRESHOLD}):   ${unqualifiedRows.length} of ${insertCandidates.length}`);
-  console.log(`  Average score:           ${insertCandidates.length > 0 ? avgScore.toFixed(2) : 'N/A'}`);
-  console.log('');
-  console.log('  Score distribution:');
+  console.log('  Score distribution (all READY rows):');
 
   const band = (lo: number, hi: number) =>
-    insertCandidates.filter((r) => r.analysis.overallScore >= lo && r.analysis.overallScore < hi).length;
+    processedRows.filter((r) => r.analysis.overallScore >= lo && r.analysis.overallScore < hi).length;
 
-  console.log(`    ≥ 9.0       :  ${insertCandidates.filter((r) => r.analysis.overallScore >= 9.0).length}`);
+  console.log(`    ≥ 9.0       :  ${processedRows.filter((r) => r.analysis.overallScore >= 9.0).length}`);
   console.log(`    7.0 – 8.9   :  ${band(7.0, 9.0)}`);
   console.log(`    5.0 – 6.9   :  ${band(5.0, 7.0)}`);
-  console.log(`    below 5.0   :  ${insertCandidates.filter((r) => r.analysis.overallScore < 5.0).length}`);
+  console.log(`    below 5.0   :  ${processedRows.filter((r) => r.analysis.overallScore < 5.0).length}`);
 
   // ── Verdict ───────────────────────────────────────────────────────────────────
   console.log(`\n${LINE}`);
@@ -745,13 +756,13 @@ async function main(): Promise<void> {
     console.log('');
     console.log('    No existing records were updated or deleted.');
     console.log(`    adSource='${AD_SOURCE}' stored on all inserted ads.`);
-    console.log(`    qualified=true: ${qualifiedRows.length}  |  qualified=false: ${unqualifiedRows.length}`);
+    console.log(`    qualified=true: ${qualifiedInserted.length}  |  qualified=false: ${unqualifiedInserted.length}`);
     console.log('    Winning-ad views can filter qualified=true at query time.');
   } else if (preErrors.length === 0) {
     console.log(`\n  ✓ READY — ${insertCandidates.length} row(s) can be ingested with 0 scoring errors.`);
     if (insertCandidates.length > 0) {
       console.log(`    All ${insertCandidates.length} would be stored as adSource='${AD_SOURCE}'.`);
-      console.log(`    qualified=true:  ${qualifiedRows.length}  |  qualified=false: ${unqualifiedRows.length}`);
+      console.log(`    qualified=true:  ${qualifiedInserted.length}  |  qualified=false: ${unqualifiedInserted.length}`);
       console.log('    Non-qualified ads are stored as competitor reference data.');
       console.log('    Winning-ad views can filter qualified=true at query time.');
     }
