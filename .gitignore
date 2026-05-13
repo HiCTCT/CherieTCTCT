@@ -5,3 +5,6 @@ dev.db
 prisma/dev.db
 tsconfig.tsbuildinfo
 data/imports/*.csv
+# Local database backups
+prisma/dev.db.backup*
+*.db.backup*
