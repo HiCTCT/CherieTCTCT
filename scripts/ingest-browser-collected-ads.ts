@@ -91,7 +91,7 @@ type FormatDerivation =
   | { ok: true;  format: AdFormat }
   | { ok: false; reason: string  };
 
-type RowOutcome = 'WOULD_INSERT' | 'SKIPPED_EXISTING' | 'SKIPPED_ERROR';
+type RowOutcome = 'WOULD_INSERT' | 'INSERTED' | 'SKIPPED_EXISTING' | 'SKIPPED_DUPLICATE' | 'WRITE_ERROR' | 'SKIPPED_ERROR';
 
 type ProcessedRow = {
   rowNumber: number;
@@ -290,27 +290,40 @@ async function main(): Promise<void> {
   const DIV  = '─'.repeat(63);
 
   // ── Mode and file resolution ─────────────────────────────────────────────────
-  const dryRun   = process.env.BROWSER_DRY_RUN !== 'false';
-  const filePath = path.resolve(process.env.BROWSER_ADS_FILE ?? DEFAULT_FILE);
+  const dryRun      = process.env.BROWSER_DRY_RUN !== 'false';
+  const writeFlag   = process.env.BROWSER_INGEST_WRITE === 'true';
+  const confirmFlag = process.env.BROWSER_INGEST_CONFIRM_DB_WRITES;
+  const liveWrite   = !dryRun && writeFlag && confirmFlag === 'I_UNDERSTAND';
+  const filePath    = path.resolve(process.env.BROWSER_ADS_FILE ?? DEFAULT_FILE);
 
   console.log(`\n${LINE}`);
   console.log('  Browser-Collected Ads — Ingestion');
   console.log(LINE);
-  console.log(`  Mode:          ${dryRun ? 'DRY RUN — no DB writes' : '⚠  LIVE WRITE MODE'}`);
-  console.log(`  File:          ${filePath}`);
-  console.log(`  Score threshold: ${SCORE_THRESHOLD.toFixed(1)}`);
-  console.log(`  adSource:      ${AD_SOURCE}`);
   if (dryRun) {
-    console.log(`  DB writes:     0`);
-    console.log(`  To enable live writes: set BROWSER_DRY_RUN=false`);
+    console.log('  Mode:          DRY RUN — no DB writes');
+    console.log(`  File:          ${filePath}`);
+    console.log(`  Score threshold: ${SCORE_THRESHOLD.toFixed(1)}`);
+    console.log(`  adSource:      ${AD_SOURCE}`);
+    console.log('  DB writes:     0');
+    console.log('  To enable live writes, set all 3 flags:');
+    console.log('    BROWSER_DRY_RUN=false');
+    console.log('    BROWSER_INGEST_WRITE=true');
+    console.log('    BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND');
+  } else {
+    console.log('  Mode:          ⚠  LIVE WRITE MODE — DB writes are ACTIVE');
+    console.log(`  File:          ${filePath}`);
+    console.log(`  Score threshold: ${SCORE_THRESHOLD.toFixed(1)}`);
+    console.log(`  adSource:      ${AD_SOURCE}`);
   }
   console.log(LINE);
 
-  // ── Guard: live write mode is planned but not yet implemented ─────────────────
-  if (!dryRun) {
-    console.error('\n❌ Live write mode is not yet implemented.');
-    console.error('   This script currently supports dry-run only.');
-    console.error('   Remove BROWSER_DRY_RUN=false and re-run to see the dry-run plan.');
+  // ── Guard: all 3 flags required for live write ────────────────────────────────
+  if (!dryRun && !liveWrite) {
+    console.error('\n❌ Live write mode requires all 3 flags to be set correctly:');
+    console.error(`   BROWSER_DRY_RUN=false                         ${!dryRun ? '✓' : '✗ not set'}`);
+    console.error(`   BROWSER_INGEST_WRITE=true                     ${writeFlag ? '✓' : '✗ missing or wrong'}`);
+    console.error(`   BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND  ${confirmFlag === 'I_UNDERSTAND' ? '✓' : '✗ missing or wrong'}`);
+    console.error('\n   Re-run with all 3 flags set, or remove BROWSER_DRY_RUN=false to stay in dry-run.');
     process.exit(1);
   }
 
@@ -459,7 +472,10 @@ async function main(): Promise<void> {
   if (metaAdIds.length > 0) {
     try {
       const existing = await prisma.ad.findMany({
-        where: { metaAdId: { in: metaAdIds } },
+        where: {
+          competitorId: competitor.id,
+          metaAdId: { in: metaAdIds },
+        },
         select: { metaAdId: true },
       });
       existingSet = new Set(existing.map((a) => a.metaAdId!).filter(Boolean));
@@ -514,61 +530,242 @@ async function main(): Promise<void> {
     printDryRunRow(result, competitor, DIV);
   }
 
+  // ── Live write ───────────────────────────────────────────────────────────────
+  let insertedCount = 0;
+  let dupSkipCount  = 0;
+  let writeErrCount = 0;
+
+  if (liveWrite) {
+    const toWrite = results.filter(
+      (r): r is ProcessedRow => !isErrored(r) && r.outcome === 'WOULD_INSERT',
+    );
+    const preDetectedDups = results.filter(
+      (r): r is ProcessedRow => !isErrored(r) && r.outcome === 'SKIPPED_EXISTING',
+    ).length;
+
+    console.log(`\n${LINE}`);
+    console.log('  ⚠  LIVE WRITE MODE ACTIVE');
+    console.log(LINE);
+    console.log('  DB writes are enabled.');
+    console.log('  No updates or deletes will be performed.');
+    console.log('  Only new Ad + AdAnalysis records will be inserted.');
+    console.log('');
+    console.log(`  Rows eligible for insert:   ${toWrite.length}`);
+    console.log(`  Duplicate rows (pre-check): ${preDetectedDups}`);
+    console.log(`  Pre-write errored rows:     ${preErrors.length}`);
+    console.log(LINE);
+
+    for (const r of toWrite) {
+      const now = new Date();
+      try {
+        await prisma.$transaction(async (tx) => {
+          const ad = await tx.ad.create({
+            data: {
+              competitorId:     competitor.id,
+              clientId:         competitor.clientId,
+              industryId:       competitor.industryId,
+              productOrService: r.row.competitor_name.trim() || undefined,
+              adFormat:         r.format,
+              adLink:           r.row.ad_library_url.trim() || '',
+              activeSince:      r.activeSince ?? undefined,
+              primaryCopy:      r.row.ad_copy.trim()      || undefined,
+              headline:         r.row.headline.trim()     || undefined,
+              description:      r.row.description.trim()  || undefined,
+              metaAdId:         r.adId,
+              adSource:         AD_SOURCE,
+              reviewStatus:     'PENDING',
+              score:            r.analysis.overallScore,
+              qualified:        r.analysis.qualified,
+              firstSeenAt:      now,
+              lastSeenAt:       now,
+              adStatus:         'ACTIVE',
+            },
+          });
+
+          await tx.adAnalysis.create({
+            data: {
+              adId:                    ad.id,
+              creativeAnalysis:        r.analysis.creativeAnalysis,
+              copyAnalysis:            r.analysis.copyAnalysis,
+              headlineAnalysis:        r.analysis.headlineAnalysis,
+              descriptionAnalysis:     r.analysis.descriptionAnalysis,
+              overallScore:            r.analysis.overallScore,
+
+              // Shared sub-scores
+              hookStopScrollScore:     r.analysis.subScores.hookStopScroll,
+              audienceRelevanceScore:  r.analysis.subScores.audienceRelevance,
+              valueClarityScore:       r.analysis.subScores.valueClarity,
+              trustProofStrengthScore: r.analysis.subScores.trustProofStrength,
+              ctaClarityScore:         r.analysis.subScores.ctaClarity,
+
+              // Static-specific sub-scores (undefined → null for video)
+              visualHierarchyScore:       r.analysis.subScores.visualHierarchy,
+              productClarityScore:        r.analysis.subScores.productClarity,
+              offerClarityScore:          r.analysis.subScores.offerClarity,
+              headlineStrengthScore:      r.analysis.subScores.headlineStrength,
+              descriptionUsefulnessScore: r.analysis.subScores.descriptionUsefulness,
+              ctaVisibilityScore:         r.analysis.subScores.ctaVisibility,
+              trustSignalsScore:          r.analysis.subScores.trustSignals,
+
+              // Video-specific sub-scores (undefined → null for static)
+              firstThreeSecondsScore:  r.analysis.subScores.firstThreeSeconds,
+              soundOffDesignScore:     r.analysis.subScores.soundOffDesign,
+              soundOnEnhancementScore: r.analysis.subScores.soundOnEnhancement,
+              onScreenTextScore:       r.analysis.subScores.onScreenText,
+              storyFlowScore:          r.analysis.subScores.storyFlow,
+              authenticityScore:       r.analysis.subScores.authenticity,
+              platformNativeFeelScore: r.analysis.subScores.platformNativeFeel,
+
+              // Framework mapping
+              aidaJson:    JSON.stringify(r.analysis.aida),
+              funnelStage: r.analysis.funnelStage,
+              raceStage:   r.analysis.raceStage,
+
+              strengthsJson:    JSON.stringify(r.analysis.strengths),
+              weaknessesJson:   JSON.stringify(r.analysis.weaknesses),
+              improvementsJson: JSON.stringify(r.analysis.improvements),
+              rubricScoresJson: JSON.stringify(r.analysis.subScores),
+
+              // Phase 3.5: Conversion-focused scoring fields
+              copyScore:               r.analysis.copyScore,
+              headlineScore:           r.analysis.headlineScore,
+              descriptionScore:        r.analysis.descriptionScore,
+              creativeScore:           r.analysis.creativeScore,
+              aidaAttentionScore:      r.analysis.aidaScores.attention,
+              aidaInterestScore:       r.analysis.aidaScores.interest,
+              aidaDesireScore:         r.analysis.aidaScores.desire,
+              aidaActionScore:         r.analysis.aidaScores.action,
+              clarityScore:            r.analysis.clarityScore,
+              connectionScore:         r.analysis.connectionScore,
+              convictionScore:         r.analysis.convictionScore,
+              trustFunnelStage:        r.analysis.trustFunnelStage,
+              behaviouralTriggersJson: JSON.stringify(r.analysis.behaviouralTriggers),
+              recommendationsJson:     JSON.stringify(r.analysis.recommendations),
+              rewriteDirectionJson:    r.analysis.rewriteDirection
+                ? JSON.stringify(r.analysis.rewriteDirection)
+                : null,
+              finalVerdict: r.analysis.finalVerdict,
+            },
+          });
+        });
+
+        r.outcome = 'INSERTED';
+        insertedCount++;
+        console.log(`  ✓ Inserted  row ${r.rowNumber}  ad_id=${r.adId}  score=${r.analysis.overallScore.toFixed(2)}  qualified=${r.analysis.qualified}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.toLowerCase().includes('unique constraint')) {
+          r.outcome = 'SKIPPED_DUPLICATE';
+          dupSkipCount++;
+          console.log(`  ○ Skipped   row ${r.rowNumber}  ad_id=${r.adId}  [duplicate — metaAdId already in DB]`);
+        } else {
+          r.outcome = 'WRITE_ERROR';
+          writeErrCount++;
+          console.error(`  ✗ Error     row ${r.rowNumber}  ad_id=${r.adId}  ❌ ${msg}`);
+        }
+      }
+    }
+
+    // Add pre-detected duplicates to the total skip count
+    dupSkipCount += preDetectedDups;
+
+    console.log(`\n${LINE}`);
+    console.log('  ✓ LIVE WRITE COMPLETE');
+    console.log(LINE);
+    console.log(`  Inserted:                ${insertedCount}`);
+    console.log(`  Skipped (duplicate):     ${dupSkipCount}`);
+    console.log(`  Errored:                 ${preErrors.length + writeErrCount}`);
+    console.log('');
+    console.log('  No existing records were updated or deleted.');
+    console.log(LINE);
+  }
+
   // ── Summary ──────────────────────────────────────────────────────────────────
+  // processedRows: all scored rows. isErrored checks outcome === 'SKIPPED_ERROR'
+  // (pre-scoring errors only). WRITE_ERROR rows are ProcessedRow and are included.
   const processedRows   = results.filter((r): r is ProcessedRow => !isErrored(r));
-  const wouldInsert     = processedRows.filter((r) => r.outcome === 'WOULD_INSERT');
-  const wouldSkip       = processedRows.filter((r) => r.outcome === 'SKIPPED_EXISTING');
-  const qualifiedRows   = wouldInsert.filter((r) => r.analysis.qualified);
-  const unqualifiedRows = wouldInsert.filter((r) => !r.analysis.qualified);
-  const avgScore        = wouldInsert.length > 0
-    ? wouldInsert.reduce((sum, r) => sum + r.analysis.overallScore, 0) / wouldInsert.length
+  const insertCandidates = processedRows.filter((r) =>
+    liveWrite ? r.outcome === 'INSERTED' : r.outcome === 'WOULD_INSERT',
+  );
+  const skipCandidates = processedRows.filter((r) =>
+    liveWrite
+      ? r.outcome === 'SKIPPED_EXISTING' || r.outcome === 'SKIPPED_DUPLICATE'
+      : r.outcome === 'SKIPPED_EXISTING',
+  );
+  const qualifiedRows   = insertCandidates.filter((r) => r.analysis.qualified);
+  const unqualifiedRows = insertCandidates.filter((r) => !r.analysis.qualified);
+  const avgScore        = insertCandidates.length > 0
+    ? insertCandidates.reduce((sum, r) => sum + r.analysis.overallScore, 0) / insertCandidates.length
     : 0;
+  const totalErrored    = preErrors.length + (liveWrite ? writeErrCount : 0);
 
   console.log(`\n${LINE}`);
-  console.log('  SUMMARY');
+  console.log(`  ${liveWrite ? 'WRITE SUMMARY' : 'SUMMARY'}`);
   console.log(LINE);
   console.log(`  READY rows processed:    ${readyRows.length}`);
   console.log(`  Successfully scored:     ${processedRows.length}`);
-  console.log(`  Errored (skipped):       ${preErrors.length}`);
+  console.log(`  Errored (skipped):       ${totalErrored}`);
   console.log('');
-  console.log(`  Would INSERT:            ${wouldInsert.length}`);
-  console.log(`  Would SKIP (duplicate):  ${wouldSkip.length}`);
+
+  if (liveWrite) {
+    console.log(`  Inserted:                ${insertedCount}`);
+    console.log(`  Skipped (duplicate):     ${dupSkipCount}`);
+  } else {
+    console.log(`  Would INSERT:            ${insertCandidates.length}`);
+    console.log(`  Would SKIP (duplicate):  ${skipCandidates.length}`);
+  }
+
   console.log('');
-  console.log(`  Qualified (≥ ${SCORE_THRESHOLD}):       ${qualifiedRows.length} of ${wouldInsert.length}`);
-  console.log(`  Non-qualified (< ${SCORE_THRESHOLD}):   ${unqualifiedRows.length} of ${wouldInsert.length}`);
-  console.log(`  Average score:           ${wouldInsert.length > 0 ? avgScore.toFixed(2) : 'N/A'}`);
+  console.log(`  Qualified (≥ ${SCORE_THRESHOLD}):       ${qualifiedRows.length} of ${insertCandidates.length}`);
+  console.log(`  Non-qualified (< ${SCORE_THRESHOLD}):   ${unqualifiedRows.length} of ${insertCandidates.length}`);
+  console.log(`  Average score:           ${insertCandidates.length > 0 ? avgScore.toFixed(2) : 'N/A'}`);
   console.log('');
-  console.log('  Score distribution (insert candidates):');
+  console.log('  Score distribution:');
 
   const band = (lo: number, hi: number) =>
-    wouldInsert.filter((r) => r.analysis.overallScore >= lo && r.analysis.overallScore < hi).length;
+    insertCandidates.filter((r) => r.analysis.overallScore >= lo && r.analysis.overallScore < hi).length;
 
-  console.log(`    ≥ 9.0       :  ${wouldInsert.filter((r) => r.analysis.overallScore >= 9.0).length}`);
+  console.log(`    ≥ 9.0       :  ${insertCandidates.filter((r) => r.analysis.overallScore >= 9.0).length}`);
   console.log(`    7.0 – 8.9   :  ${band(7.0, 9.0)}`);
   console.log(`    5.0 – 6.9   :  ${band(5.0, 7.0)}`);
-  console.log(`    below 5.0   :  ${wouldInsert.filter((r) => r.analysis.overallScore < 5.0).length}`);
+  console.log(`    below 5.0   :  ${insertCandidates.filter((r) => r.analysis.overallScore < 5.0).length}`);
 
-  // ── Final verdict ────────────────────────────────────────────────────────────
+  // ── Verdict ───────────────────────────────────────────────────────────────────
   console.log(`\n${LINE}`);
-  console.log('  DRY RUN VERDICT');
+  console.log(`  ${liveWrite ? 'POST-WRITE CONFIRMATION' : 'DRY RUN VERDICT'}`);
   console.log(LINE);
 
-  if (preErrors.length === 0) {
-    console.log(`\n  ✓ READY — ${wouldInsert.length} row(s) can be ingested with 0 scoring errors.`);
-    if (wouldInsert.length > 0) {
-      console.log(`    All ${wouldInsert.length} would be stored as adSource='${AD_SOURCE}'.`);
+  if (liveWrite) {
+    console.log(`\n  ✓ Live write complete.`);
+    console.log(`    Inserted:  ${insertedCount} Ad + AdAnalysis record(s).`);
+    console.log(`    Skipped:   ${dupSkipCount} duplicate(s) — competitorId + metaAdId already in DB.`);
+    if (writeErrCount > 0) {
+      console.log(`    Errors:    ${writeErrCount} row(s) failed — review errors above.`);
+    }
+    console.log('');
+    console.log('    No existing records were updated or deleted.');
+    console.log(`    adSource='${AD_SOURCE}' stored on all inserted ads.`);
+    console.log(`    qualified=true: ${qualifiedRows.length}  |  qualified=false: ${unqualifiedRows.length}`);
+    console.log('    Winning-ad views can filter qualified=true at query time.');
+  } else if (preErrors.length === 0) {
+    console.log(`\n  ✓ READY — ${insertCandidates.length} row(s) can be ingested with 0 scoring errors.`);
+    if (insertCandidates.length > 0) {
+      console.log(`    All ${insertCandidates.length} would be stored as adSource='${AD_SOURCE}'.`);
       console.log(`    qualified=true:  ${qualifiedRows.length}  |  qualified=false: ${unqualifiedRows.length}`);
       console.log('    Non-qualified ads are stored as competitor reference data.');
       console.log('    Winning-ad views can filter qualified=true at query time.');
     }
-    if (wouldSkip.length > 0) {
-      console.log(`    ${wouldSkip.length} duplicate(s) would be skipped (metaAdId already in DB).`);
+    if (skipCandidates.length > 0) {
+      console.log(`    ${skipCandidates.length} duplicate(s) would be skipped (competitorId + metaAdId already in DB).`);
     }
     console.log('');
     console.log('  Next steps before live write:');
     console.log('  1. Back up the database:');
     console.log('       copy prisma\\dev.db prisma\\dev.db.backup-pre-browser-ingestion');
-    console.log('  2. Re-run with BROWSER_DRY_RUN=false when live write is implemented.');
+    console.log('  2. Re-run with all 3 flags:');
+    console.log('       BROWSER_DRY_RUN=false');
+    console.log('       BROWSER_INGEST_WRITE=true');
+    console.log('       BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND');
   } else {
     console.log(`\n  ⚠  ${preErrors.length} row(s) errored and would be skipped.`);
     console.log('    Review errors above before proceeding to live ingestion.');
@@ -587,6 +784,9 @@ function printSafetyFooter(LINE: string, dryRun: boolean): void {
   if (dryRun) {
     console.log('  No database writes were performed.');
     console.log('  No records were inserted, updated, or deleted.');
+  } else {
+    console.log('  No existing records were updated or deleted.');
+    console.log('  Only new Ad + AdAnalysis records were inserted (if any).');
   }
   console.log('  No scoring changes were made.');
   console.log('  No schema changes were made.');
