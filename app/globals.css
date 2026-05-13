@@ -295,23 +295,28 @@ a {
 .rec-blocks {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 0;
 }
 
+/* No border — only spacing separates blocks */
 .rec-block {
-  border-left: 2px solid #e2e8f0;
-  padding-left: 12px;
+  margin-top: 16px;
 }
 
+.rec-block:first-child {
+  margin-top: 0;
+}
+
+/* Bold subheading, not a bordered row */
 .rec-block-title {
-  margin: 0 0 5px 0;
-  font-size: 13px;
+  margin: 0 0 6px 0;
+  font-size: 14px;
   font-weight: 700;
-  color: #1e293b;
+  color: #0f172a;
 }
 
 .rec-block-body {
-  margin: 0 0 6px 0;
+  margin: 0 0 5px 0;
   font-size: 14px;
   line-height: 1.65;
   color: #374151;
@@ -323,30 +328,23 @@ a {
 
 /* ── Script format (Hook / Body / Offer / CTA) ────────────────── */
 
+/* Container — no border, just spacing above */
 .rec-script {
   margin: 4px 0 0 0;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
 }
 
-.rec-script-row {
-  display: contents;
-}
-
-.rec-script-row dt {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #64748b;
-  padding-top: 2px;
-  white-space: nowrap;
-}
-
-.rec-script-row dd {
-  margin: 0;
+/* Each line is a plain paragraph; the label is bolded inline */
+.rec-script-line {
+  margin: 0 0 5px 0;
   font-size: 14px;
   line-height: 1.6;
   color: #374151;
+}
+
+.rec-script-line:last-child {
+  margin-bottom: 0;
+}
+
+.rec-script-line strong {
+  color: #1e293b;
 }

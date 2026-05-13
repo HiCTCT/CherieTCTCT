@@ -174,14 +174,13 @@ function RecText({ text }: { text: string }) {
             }
             // script
             return (
-              <dl key={gi} className="rec-script">
+              <div key={gi} className="rec-script">
                 {group.entries.map((entry, i) => (
-                  <div key={i} className="rec-script-row">
-                    <dt>{entry.label}</dt>
-                    <dd>{entry.text}</dd>
-                  </div>
+                  <p key={i} className="rec-script-line">
+                    <strong>{entry.label}:</strong>{' '}{entry.text}
+                  </p>
                 ))}
-              </dl>
+              </div>
             );
           })}
         </div>
