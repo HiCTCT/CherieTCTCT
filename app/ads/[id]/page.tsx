@@ -116,148 +116,283 @@ export default async function AdDetailPage({
         <Link href="/competitors">Competitors</Link>
       </p>
 
-      {/* ── Overview ── */}
+      {/* ── 1. Top Summary Card ── */}
       <div className="card">
-        <h1>Ad detail</h1>
+        <div className="summary-header">
+          <div className="summary-score-block">
+            <div className="summary-score">{ad.score.toFixed(1)}</div>
+            <div className="summary-score-label">/ 10 overall</div>
+            <span className={`badge ${ad.qualified ? 'badge-qualified' : 'badge-unqualified'}`}>
+              {ad.qualified ? 'Qualified' : 'Not qualified'}
+            </span>
+          </div>
+          <div className="summary-verdict">
+            <div className="summary-verdict-heading">Final Verdict</div>
+            <div className="summary-verdict-value">
+              {a?.finalVerdict
+                ? VERDICT_LABELS[a.finalVerdict] ?? a.finalVerdict
+                : 'Not yet assessed'}
+            </div>
+          </div>
+        </div>
+        <div className="tag-row">
+          <span className="tag"><strong>Format:</strong> {ad.adFormat}</span>
+          {a?.funnelStage && (
+            <span className="tag"><strong>Funnel:</strong> {a.funnelStage}</span>
+          )}
+          {a?.raceStage && (
+            <span className="tag"><strong>RACE:</strong> {a.raceStage}</span>
+          )}
+          {a?.trustFunnelStage && (
+            <span className="tag">
+              <strong>Trust Funnel:</strong> {a.trustFunnelStage.replace(/_/g, ' ')}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ── 2. Ad Details ── */}
+      <div className="card">
+        <h2>Ad Details</h2>
         <p><strong>Industry:</strong> {ad.industry.name}</p>
         <p><strong>Client:</strong> {ad.client.name}</p>
         <p><strong>Competitor:</strong> {ad.competitor.name}</p>
-        <p><strong>Product / service:</strong> {ad.productOrService ?? 'Not specified'}</p>
-        <p><strong>Format:</strong> {ad.adFormat}</p>
-        <p><strong>Overall conversion score:</strong> {ad.score.toFixed(1)} / 10</p>
+        {ad.productOrService && (
+          <p><strong>Product / Service:</strong> {ad.productOrService}</p>
+        )}
         <p>
-          <strong>Facebook ad link:</strong>{' '}
-          <a href={ad.adLink} target="_blank" rel="noreferrer">Open ad</a>
+          <strong>Ad Link:</strong>{' '}
+          <a href={ad.adLink} target="_blank" rel="noreferrer">Open in Meta Ad Library ↗</a>
         </p>
-      </div>
-
-      {/* ── 1. Copy ── */}
-      <div className="card">
-        <h2>1. Copy</h2>
-        <p>
-          <strong>
-            {copyScore !== null
-              ? `Copy Score: ${copyScore.toFixed(1)} / 10`
-              : 'Copy Score: not yet scored'}
-          </strong>
-        </p>
-        {ad.primaryCopy && <p><em>&ldquo;{ad.primaryCopy}&rdquo;</em></p>}
-        <p>{a?.copyAnalysis ?? 'No copy analysis available.'}</p>
-        {strengths.length > 0 && (
-          <>
-            <p><strong>What is working:</strong></p>
-            <ul>{strengths.map((s, i) => <li key={i}>{s}</li>)}</ul>
-          </>
-        )}
-        {weaknesses.length > 0 && (
-          <>
-            <p><strong>What is missing:</strong></p>
-            <ul>{weaknesses.map((w, i) => <li key={i}>{w}</li>)}</ul>
-          </>
+        {ad.activeSince && (
+          <p>
+            <strong>Active Since:</strong>{' '}
+            {new Date(ad.activeSince).toLocaleDateString('en-GB')}
+          </p>
         )}
       </div>
 
-      {/* ── 2. Headline ── */}
-      <div className="card">
-        <h2>2. Headline</h2>
-        {ad.headline ? (
-          <>
-            <p>
-              <strong>
-                {headlineScore !== null
-                  ? `Headline Score: ${headlineScore.toFixed(1)} / 10`
-                  : 'Headline Score: not yet scored'}
-              </strong>
-            </p>
-            <p><em>&ldquo;{ad.headline}&rdquo;</em></p>
-            <p>{a?.headlineAnalysis ?? 'No headline analysis available.'}</p>
-          </>
-        ) : (
-          <p>Headline not provided. No score assigned.</p>
-        )}
-      </div>
+      {/* ── 3. Original Ad Content ── */}
+      {(ad.primaryCopy || ad.headline || ad.description) && (
+        <div className="card">
+          <h2>Original Ad Content</h2>
+          {ad.primaryCopy && (
+            <>
+              <p className="section-label">Copy</p>
+              <div className="copy-block">{ad.primaryCopy}</div>
+            </>
+          )}
+          {ad.headline && (
+            <>
+              <p className="section-label">Headline</p>
+              <div className="copy-block">{ad.headline}</div>
+            </>
+          )}
+          {ad.description && (
+            <>
+              <p className="section-label">Description</p>
+              <div className="copy-block">{ad.description}</div>
+            </>
+          )}
+        </div>
+      )}
 
-      {/* ── 3. Description ── */}
+      {/* ── 4. Score Grid ── */}
       <div className="card">
-        <h2>3. Description</h2>
-        {ad.description ? (
-          <>
-            <p>
-              <strong>
-                {descriptionScore !== null
-                  ? `Description Score: ${descriptionScore.toFixed(1)} / 10`
-                  : 'Description Score: not yet scored'}
-              </strong>
-            </p>
-            <p><em>&ldquo;{ad.description}&rdquo;</em></p>
-            <p>{a?.descriptionAnalysis ?? 'No description analysis available.'}</p>
-          </>
-        ) : (
-          <p>Description not provided. No score assigned.</p>
+        <h2>Score Breakdown</h2>
+        <div className="score-grid">
+          <div className="score-cell">
+            <div className="score-label">Copy</div>
+            <div className="score-value">
+              {fmt(copyScore)}<span className="score-denom"> /10</span>
+            </div>
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Headline</div>
+            <div className="score-value">
+              {ad.headline ? fmt(headlineScore) : '—'}<span className="score-denom">{ad.headline ? ' /10' : ''}</span>
+            </div>
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Description</div>
+            <div className="score-value">
+              {ad.description ? fmt(descriptionScore) : '—'}<span className="score-denom">{ad.description ? ' /10' : ''}</span>
+            </div>
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Creative</div>
+            <div className="score-value">
+              {fmt(creativeScore)}<span className="score-denom"> /10</span>
+            </div>
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Clarity</div>
+            <div className="score-value">
+              {fmt(clarityScore)}<span className="score-denom"> /10</span>
+            </div>
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Connection</div>
+            <div className="score-value">
+              {fmt(connectionScore)}<span className="score-denom"> /10</span>
+            </div>
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Conviction</div>
+            <div className="score-value">
+              {fmt(convictionScore)}<span className="score-denom"> /10</span>
+            </div>
+          </div>
+          <div className="score-cell">
+            <div className="score-label">AIDA Avg</div>
+            <div className="score-value">
+              {aidaAvg !== null ? aidaAvg.toFixed(1) : 'N/A'}<span className="score-denom">{aidaAvg !== null ? ' /10' : ''}</span>
+            </div>
+          </div>
+        </div>
+        {combined !== null && (
+          <p style={{ marginTop: '12px', fontSize: '13px', color: '#64748b' }}>
+            <strong>Clarity + Connection + Conviction:</strong> {combined.toFixed(1)} / 30
+            {' — '}
+            {combined >= 21
+              ? 'Strong across all three dimensions.'
+              : combined >= 15
+                ? 'Moderate — at least one dimension is limiting conversion.'
+                : 'Weak across one or more dimensions. Significant room to improve.'}
+          </p>
         )}
-      </div>
-
-      {/* ── 4. Creative ── */}
-      <div className="card">
-        <h2>4. Creative</h2>
-        <p>
-          <strong>
-            {creativeScore !== null
-              ? `Creative Score: ${creativeScore.toFixed(1)} / 10`
-              : 'Creative Score: not yet scored'}
-          </strong>
-        </p>
-        <p>{a?.creativeAnalysis ?? 'No creative analysis available.'}</p>
       </div>
 
       {/* ── 5. AIDA Breakdown ── */}
       <div className="card">
-        <h2>5. AIDA Breakdown</h2>
-        <p>
-          <strong>Attention:</strong> {fmt(a?.aidaAttentionScore)} / 10
-          {aidaText?.attention ? ` — ${aidaText.attention}` : ''}
-        </p>
-        <p>
-          <strong>Interest:</strong> {fmt(a?.aidaInterestScore)} / 10
-          {aidaText?.interest ? ` — ${aidaText.interest}` : ''}
-        </p>
-        <p>
-          <strong>Desire:</strong> {fmt(a?.aidaDesireScore)} / 10
-          {aidaText?.desire ? ` — ${aidaText.desire}` : ''}
-        </p>
-        <p>
-          <strong>Action:</strong> {fmt(a?.aidaActionScore)} / 10
-          {aidaText?.action ? ` — ${aidaText.action}` : ''}
-        </p>
+        <h2>AIDA Breakdown</h2>
+        <div className="score-grid">
+          <div className="score-cell">
+            <div className="score-label">Attention</div>
+            <div className="score-value">
+              {fmt(a?.aidaAttentionScore)}<span className="score-denom"> /10</span>
+            </div>
+            {aidaText?.attention && (
+              <div className="score-note">{aidaText.attention}</div>
+            )}
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Interest</div>
+            <div className="score-value">
+              {fmt(a?.aidaInterestScore)}<span className="score-denom"> /10</span>
+            </div>
+            {aidaText?.interest && (
+              <div className="score-note">{aidaText.interest}</div>
+            )}
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Desire</div>
+            <div className="score-value">
+              {fmt(a?.aidaDesireScore)}<span className="score-denom"> /10</span>
+            </div>
+            {aidaText?.desire && (
+              <div className="score-note">{aidaText.desire}</div>
+            )}
+          </div>
+          <div className="score-cell">
+            <div className="score-label">Action</div>
+            <div className="score-value">
+              {fmt(a?.aidaActionScore)}<span className="score-denom"> /10</span>
+            </div>
+            {aidaText?.action && (
+              <div className="score-note">{aidaText.action}</div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* ── 6. Clarity, Connection, Conviction ── */}
+      {/* ── 6. Behavioural Triggers ── */}
       <div className="card">
-        <h2>6. Clarity, Connection, Conviction</h2>
-        <p><strong>Clarity Score:</strong> {fmt(clarityScore)} / 10</p>
-        <p><strong>Connection Score:</strong> {fmt(connectionScore)} / 10</p>
-        <p><strong>Conviction Score:</strong> {fmt(convictionScore)} / 10</p>
-        <p>
-          <strong>Combined Score:</strong>{' '}
-          {combined !== null ? `${combined.toFixed(1)} / 30` : 'Not scored'}
-        </p>
-        <p>
-          {combined !== null
-            ? combined >= 21
-              ? 'Strong across all three dimensions. Ad shows clear conversion readiness.'
-              : combined >= 15
-                ? 'Moderate overall. At least one dimension is limiting conversion effectiveness.'
-                : 'Weak across one or more dimensions. Significant room to improve before testing.'
-            : 'Scores not yet available.'}
-        </p>
+        <h2>Behavioural Triggers</h2>
+        {triggers.filter((t) => t.strength !== 'MISSING').length > 0 ? (
+          <div className="trigger-list">
+            {triggers
+              .filter((t) => t.strength !== 'MISSING')
+              .map((t, i) => (
+                <span
+                  key={i}
+                  className={`trigger-badge trigger-${t.strength.toLowerCase()}`}
+                >
+                  {t.name} — {t.strength.charAt(0) + t.strength.slice(1).toLowerCase()}
+                </span>
+              ))}
+          </div>
+        ) : (
+          <p className="muted">None detected</p>
+        )}
+        {triggers.filter((t) => t.strength === 'MISSING').length > 0 && (
+          <div className="analysis-subsection">
+            <p className="section-label">Not present</p>
+            <ul className="compact-list">
+              {triggers
+                .filter((t) => t.strength === 'MISSING')
+                .map((t, i) => <li key={i}>{t.name}</li>)}
+            </ul>
+          </div>
+        )}
       </div>
 
-      {/* ── 7. Funnel and Framework Mapping ── */}
+      {/* ── 7. Copy Analysis ── */}
       <div className="card">
-        <h2>7. Funnel and Framework Mapping</h2>
+        <h2>Copy Analysis</h2>
+        <div className="analysis-text">{a?.copyAnalysis ?? 'No copy analysis available.'}</div>
+        {strengths.length > 0 && (
+          <div className="analysis-subsection">
+            <p className="section-label">What is working</p>
+            <ul className="compact-list">
+              {strengths.map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          </div>
+        )}
+        {weaknesses.length > 0 && (
+          <div className="analysis-subsection">
+            <p className="section-label">What is missing</p>
+            <ul className="compact-list">
+              {weaknesses.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* ── 8. Headline Analysis ── */}
+      {ad.headline && (
+        <div className="card">
+          <h2>Headline Analysis</h2>
+          <div className="analysis-text">
+            {a?.headlineAnalysis ?? 'No headline analysis available.'}
+          </div>
+        </div>
+      )}
+
+      {/* ── 9. Description Analysis ── */}
+      {ad.description && (
+        <div className="card">
+          <h2>Description Analysis</h2>
+          <div className="analysis-text">
+            {a?.descriptionAnalysis ?? 'No description analysis available.'}
+          </div>
+        </div>
+      )}
+
+      {/* ── 10. Creative Analysis ── */}
+      <div className="card">
+        <h2>Creative Analysis</h2>
+        <div className="analysis-text">
+          {a?.creativeAnalysis ?? 'No creative analysis available.'}
+        </div>
+      </div>
+
+      {/* ── 11. Funnel and Framework Mapping ── */}
+      <div className="card">
+        <h2>Funnel &amp; Framework Mapping</h2>
         {a?.funnelStage && (
           <p>
-            <strong>Funnel stage:</strong> {a.funnelStage}
+            <strong>Funnel Stage:</strong> {a.funnelStage}
             {a.funnelStage === 'TOFU' && ' — Awareness stage. Reaching cold audiences who may not yet know the brand.'}
             {a.funnelStage === 'MOFU' && ' — Consideration stage. Targeting audiences comparing options or exploring solutions.'}
             {a.funnelStage === 'BOFU' && ' — Conversion stage. Pushing warm audiences toward a direct action.'}
@@ -265,7 +400,7 @@ export default async function AdDetailPage({
         )}
         {a?.raceStage && (
           <p>
-            <strong>RACE stage:</strong> {a.raceStage}
+            <strong>RACE Stage:</strong> {a.raceStage}
             {a.raceStage === 'REACH' && ' — Building awareness with new audiences.'}
             {a.raceStage === 'ACT' && ' — Encouraging interaction and consideration.'}
             {a.raceStage === 'CONVERT' && ' — Driving direct conversion actions.'}
@@ -274,120 +409,77 @@ export default async function AdDetailPage({
         )}
         {a?.trustFunnelStage && (
           <p>
-            <strong>Trust Funnel stage:</strong>{' '}
+            <strong>Trust Funnel Stage:</strong>{' '}
             {TRUST_FUNNEL_LABELS[a.trustFunnelStage] ?? a.trustFunnelStage}
           </p>
         )}
       </div>
 
-      {/* ── 8. Behavioural Trigger Analysis ── */}
+      {/* ── 12. Recommendations ── */}
       <div className="card">
-        <h2>8. Behavioural Trigger Analysis</h2>
-        {triggers.filter((t) => t.strength !== 'MISSING').length > 0 ? (
-          <>
-            <p><strong>Triggers detected:</strong></p>
-            <ul>
-              {triggers
-                .filter((t) => t.strength !== 'MISSING')
-                .map((t, i) => (
-                  <li key={i}>
-                    <strong>{t.name}:</strong> {triggerBadge(t.strength)}
-                  </li>
-                ))}
-            </ul>
-          </>
-        ) : (
-          <p>No behavioural triggers detected from available signals.</p>
-        )}
-        {triggers.filter((t) => t.strength === 'MISSING').length > 0 && (
-          <>
-            <p><strong>Triggers not present:</strong></p>
-            <ul>
-              {triggers
-                .filter((t) => t.strength === 'MISSING')
-                .map((t, i) => <li key={i}>{t.name}</li>)}
-            </ul>
-          </>
-        )}
-      </div>
-
-      {/* ── 9. Recommendations for Improvement ── */}
-      <div className="card">
-        <h2>9. Recommendations for Improvement</h2>
+        <h2>Recommendations for Improvement</h2>
         {recommendations ? (
-          <>
-            <p><strong>To improve copy to 10/10:</strong></p>
-            <p>{recommendations.copy}</p>
-            <p><strong>To improve headline to 10/10:</strong></p>
-            <p>{recommendations.headline}</p>
-            <p><strong>To improve description to 10/10:</strong></p>
-            <p>{recommendations.description}</p>
-            <p><strong>To improve creative to 10/10:</strong></p>
-            <p>{recommendations.creative}</p>
-            <p><strong>To improve conversion strength to 10/10:</strong></p>
-            <p>{recommendations.conversionStrength}</p>
-          </>
+          <div className="rec-list">
+            {recommendations.copy && (
+              <div className="rec-item">
+                <span className="rec-label">Copy</span>
+                <p>{recommendations.copy}</p>
+              </div>
+            )}
+            {recommendations.headline && (
+              <div className="rec-item">
+                <span className="rec-label">Headline</span>
+                <p>{recommendations.headline}</p>
+              </div>
+            )}
+            {recommendations.description && (
+              <div className="rec-item">
+                <span className="rec-label">Description</span>
+                <p>{recommendations.description}</p>
+              </div>
+            )}
+            {recommendations.creative && (
+              <div className="rec-item">
+                <span className="rec-label">Creative</span>
+                <p>{recommendations.creative}</p>
+              </div>
+            )}
+            {recommendations.conversionStrength && (
+              <div className="rec-item">
+                <span className="rec-label">Conversion Strength</span>
+                <p>{recommendations.conversionStrength}</p>
+              </div>
+            )}
+          </div>
         ) : (
-          <p>Recommendations not yet available. Re-run seed to populate.</p>
+          <p className="muted">Recommendations not yet available.</p>
         )}
       </div>
 
-      {/* ── 10. Rewrite Direction (only shown if any score < 7) ── */}
+      {/* ── 13. Rewrite Direction (only shown if any score below 7) ── */}
       {rewriteDirection && (
         <div className="card">
-          <h2>10. Rewrite Direction</h2>
-          <p><strong>Hook:</strong> {rewriteDirection.hook}</p>
-          <p><strong>Body copy direction:</strong> {rewriteDirection.body}</p>
-          <p><strong>CTA:</strong> {rewriteDirection.cta}</p>
-          <p><strong>Creative direction:</strong> {rewriteDirection.creativeDirection}</p>
+          <h2>Rewrite Direction</h2>
+          <div className="rec-list">
+            <div className="rec-item">
+              <span className="rec-label">Hook</span>
+              <p>{rewriteDirection.hook}</p>
+            </div>
+            <div className="rec-item">
+              <span className="rec-label">Body Copy</span>
+              <p>{rewriteDirection.body}</p>
+            </div>
+            <div className="rec-item">
+              <span className="rec-label">CTA</span>
+              <p>{rewriteDirection.cta}</p>
+            </div>
+            <div className="rec-item">
+              <span className="rec-label">Creative Direction</span>
+              <p>{rewriteDirection.creativeDirection}</p>
+            </div>
+          </div>
         </div>
       )}
-
-      {/* ── 11. Final Scoring Summary ── */}
-      <div className="card">
-        <h2>11. Final Scoring Summary</h2>
-        <p>
-          <strong>Copy Score:</strong>{' '}
-          {copyScore !== null ? `${copyScore.toFixed(1)} / 10` : 'Not scored'}
-        </p>
-        <p>
-          <strong>Headline Score:</strong>{' '}
-          {ad.headline
-            ? headlineScore !== null
-              ? `${headlineScore.toFixed(1)} / 10`
-              : 'Not scored'
-            : 'Not provided'}
-        </p>
-        <p>
-          <strong>Description Score:</strong>{' '}
-          {ad.description
-            ? descriptionScore !== null
-              ? `${descriptionScore.toFixed(1)} / 10`
-              : 'Not scored'
-            : 'Not provided'}
-        </p>
-        <p>
-          <strong>Creative Score:</strong>{' '}
-          {creativeScore !== null ? `${creativeScore.toFixed(1)} / 10` : 'Not scored'}
-        </p>
-        <p>
-          <strong>AIDA Average:</strong>{' '}
-          {aidaAvg !== null ? `${aidaAvg.toFixed(1)} / 10` : 'Not scored'}
-        </p>
-        <p>
-          <strong>Clarity + Connection + Conviction:</strong>{' '}
-          {combined !== null ? `${combined.toFixed(1)} / 30` : 'Not scored'}
-        </p>
-        <p>
-          <strong>Overall Conversion Potential:</strong> {ad.score.toFixed(1)} / 10
-        </p>
-        <p>
-          <strong>Final verdict:</strong>{' '}
-          {a?.finalVerdict
-            ? VERDICT_LABELS[a.finalVerdict] ?? a.finalVerdict
-            : 'Not yet assessed'}
-        </p>
-      </div>
     </section>
   );
 }
