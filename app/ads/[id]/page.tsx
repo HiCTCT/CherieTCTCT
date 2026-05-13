@@ -222,7 +222,7 @@ export default async function AdDetailPage({
 }) {
   const ad = await getAdById(params.id);
 
-  if (!ad || !ad.qualified) {
+  if (!ad) {
     notFound();
   }
 
