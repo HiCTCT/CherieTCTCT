@@ -86,9 +86,21 @@ function parseRecBlocks(text: string): RecBlock[] {
   const trimmed = text.trim();
   if (!trimmed) return [];
 
-  // No newlines — plain paragraph, nothing to structure
+  // No newlines — check for inline numbered patterns like "(1) Do X. (2) Do Y."
   if (!trimmed.includes('\n')) {
-    return [{ title: null, groups: [{ type: 'body', texts: [trimmed] }] }];
+    if (/\(\d+\)/.test(trimmed)) {
+      const parts = trimmed
+        .split(/\s*(?=\(\d+\)\s)/)
+        .map((s) => s.replace(/^\(\d+\)\s*/, '').trim())
+        .filter(Boolean);
+      if (parts.length > 1) {
+        return parts.map((p) => ({
+          title: null,
+          groups: [{ type: 'body' as const, texts: [p] }],
+        }));
+      }
+    }
+    return [{ title: null, groups: [{ type: 'body' as const, texts: [trimmed] }] }];
   }
 
   // Split on blank lines into raw blocks, then parse each
