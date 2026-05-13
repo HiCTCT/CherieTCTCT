@@ -140,6 +140,39 @@ function deriveFormat(mediaType: BrowserMediaType): AnalysisFormat {
   return 'NEEDS_REVIEW';
 }
 
+/**
+ * Detects comment-contaminated ad_copy (e.g. UGC comment dumps captured by the browser).
+ * Conservative patterns only — false negatives are preferred over false positives.
+ *
+ * Flags as contaminated when:
+ *  1. Copy starts with a separator character: ; | ,
+ *  2. Copy contains 3+ semicolon-separated segments that are all short (avg < 120 chars)
+ *
+ * Returns cleanedCopy (undefined if entire content is contaminated) and a wasContaminated flag.
+ * Does NOT modify or truncate partial contamination — if flagged, the whole field is discarded.
+ */
+function cleanAdCopy(raw: string): { cleanedCopy: string | undefined; wasContaminated: boolean } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { cleanedCopy: undefined, wasContaminated: false };
+
+  // Pattern 1: leading separator character (; | ,)
+  if (/^[;|,]/.test(trimmed)) {
+    return { cleanedCopy: undefined, wasContaminated: true };
+  }
+
+  // Pattern 2: multiple semicolons with short segments — UGC comment concatenation
+  const parts = trimmed.split(';');
+  if (parts.length >= 3) {
+    const avgLen =
+      parts.map((p) => p.trim().length).reduce((a, b) => a + b, 0) / parts.length;
+    if (avgLen < 120) {
+      return { cleanedCopy: undefined, wasContaminated: true };
+    }
+  }
+
+  return { cleanedCopy: trimmed, wasContaminated: false };
+}
+
 // ─── Validation ───────────────────────────────────────────────────────────────
 
 function validateReadyRow(
@@ -228,6 +261,21 @@ function validateReadyRow(
   // ad_copy OR headline must be non-empty
   if (!row.ad_copy.trim() && !row.headline.trim()) {
     issues.push(err('ad_copy/headline', 'At least one of ad_copy or headline must be non-empty'));
+  }
+
+  // Warn when ad_copy appears comment-contaminated (leading separator or short semicolon-separated segments)
+  if (row.ad_copy.trim()) {
+    const { wasContaminated } = cleanAdCopy(row.ad_copy);
+    if (wasContaminated) {
+      issues.push(
+        warn(
+          'ad_copy',
+          `ad_copy appears comment-contaminated — starts with a separator character or contains multiple short semicolon-separated segments. ` +
+            `Raw: "${truncate(row.ad_copy.trim(), 60)}". ` +
+            `Copy field will be excluded from scorer input during preview and ingestion.`,
+        ),
+      );
+    }
   }
 
   // landing_page_url — optional but if present must be http/https
@@ -466,7 +514,7 @@ function main(): void {
     }
   }
 
-  // ── Final verdict ─────────────────────────────────────────────────────────────
+  // ── Final verdict ────────────────────────────────────────────────────────────────────────────────────
   console.log(`\n${LINE}`);
   console.log('  FINAL VERDICT');
   console.log(LINE);

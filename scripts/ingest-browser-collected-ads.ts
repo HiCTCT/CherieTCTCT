@@ -102,6 +102,7 @@ type ProcessedRow = {
   outcome: RowOutcome;
   activeSince: Date | null;
   row: BrowserAdRow;
+  copyWasContaminated: boolean;
 };
 
 type ErroredRow = {
@@ -146,6 +147,39 @@ function parseActiveSince(dateStr: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * Detects comment-contaminated ad_copy (e.g. UGC comment dumps captured by the browser).
+ * Conservative patterns only — false negatives are preferred over false positives.
+ *
+ * Flags as contaminated when:
+ *  1. Copy starts with a separator character: ; | ,
+ *  2. Copy contains 3+ semicolon-separated segments that are all short (avg < 120 chars)
+ *
+ * Returns cleanedCopy (undefined if entire content is contaminated) and a wasContaminated flag.
+ * When contaminated, primaryCopy in the DB write will be undefined (stored as null).
+ */
+function cleanAdCopy(raw: string): { cleanedCopy: string | undefined; wasContaminated: boolean } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { cleanedCopy: undefined, wasContaminated: false };
+
+  // Pattern 1: leading separator character (; | ,)
+  if (/^[;|,]/.test(trimmed)) {
+    return { cleanedCopy: undefined, wasContaminated: true };
+  }
+
+  // Pattern 2: multiple semicolons with short segments — UGC comment concatenation
+  const parts = trimmed.split(';');
+  if (parts.length >= 3) {
+    const avgLen =
+      parts.map((p) => p.trim().length).reduce((a, b) => a + b, 0) / parts.length;
+    if (avgLen < 120) {
+      return { cleanedCopy: undefined, wasContaminated: true };
+    }
+  }
+
+  return { cleanedCopy: trimmed, wasContaminated: false };
+}
+
 // ─── ExampleRow mapping ───────────────────────────────────────────────────────
 //
 // Identical mapping to preview-browser-collected-ads.ts toExampleRow().
@@ -153,10 +187,13 @@ function parseActiveSince(dateStr: string): Date | null {
 // creative_notes     → Analysis          (analysisNotes in scorer)
 
 function toExampleRow(row: BrowserAdRow): ExampleRow {
+  // Strip comment-contaminated ad_copy before passing to scorer.
+  // cleanedCopy is undefined when the entire field is contaminated — scorer falls back to headline.
+  const { cleanedCopy } = cleanAdCopy(row.ad_copy);
   return {
     Product:             row.competitor_name.trim() || 'Unknown Advertiser',
     'Ad Link':           row.ad_library_url.trim()  || undefined,
-    Copy:                row.ad_copy.trim()          || undefined,
+    Copy:                cleanedCopy                 || undefined,
     Headline:            row.headline.trim()         || undefined,
     Description:         row.description.trim()      || undefined,
     'Active Since':      row.ad_delivery_start_time.trim() || undefined,
@@ -228,7 +265,7 @@ function printDryRunRow(
   competitor: CompetitorRecord,
   DIV: string,
 ): void {
-  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row } = r;
+  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated } = r;
   const outcomeIcon = outcome === 'WOULD_INSERT' ? '✓' : '○';
   const outcomeLabel = outcome === 'WOULD_INSERT'
     ? '[WOULD INSERT]'
@@ -236,6 +273,17 @@ function printDryRunRow(
 
   console.log(`\n  ${outcomeIcon} Row ${rowNumber}  ad_id=${adId}  ${outcomeLabel}`);
   console.log(`  ${DIV}`);
+
+  if (copyWasContaminated) {
+    console.log(`  ⚠  WARN [ad_copy]: ad_copy appears comment-contaminated`);
+    console.log(`    metaAdId:        ${adId}`);
+    console.log(`    Raw copy:        ${truncate(row.ad_copy, 80)}`);
+    console.log(`    Cleaned copy:    (empty — entire field excluded; primaryCopy will be null in DB)`);
+    console.log(`    Scorer Copy:     (empty — scorer used Headline instead)`);
+    console.log('');
+  }
+
+  const { cleanedCopy } = cleanAdCopy(row.ad_copy);
 
   console.log('  Ad record:');
   console.log(`    competitorId:    ${competitor.id}`);
@@ -249,7 +297,7 @@ function printDryRunRow(
   console.log(`    reviewStatus:    PENDING`);
   console.log(`    adStatus:        ACTIVE`);
   console.log(`    activeSince:     ${activeSince ? activeSince.toISOString().slice(0, 10) : '(empty)'}`);
-  console.log(`    primaryCopy:     ${truncate(row.ad_copy, 80)}`);
+  console.log(`    primaryCopy:     ${cleanedCopy ? truncate(cleanedCopy, 80) : '(null — contaminated)'}`);
   console.log(`    headline:        ${truncate(row.headline, 80)}`);
   console.log(`    description:     ${truncate(row.description, 80)}`);
   console.log(`    adLink:          ${truncate(row.ad_library_url, 80)}`);
@@ -420,6 +468,7 @@ async function main(): Promise<void> {
     analysis: AnalysisOutput;
     activeSince: Date | null;
     row: BrowserAdRow;
+    copyWasContaminated: boolean;
   };
 
   type PreErrorRow = {
@@ -450,6 +499,7 @@ async function main(): Promise<void> {
     try {
       const exampleRow = toExampleRow(row);
       const analysis   = analyseAdRow(exampleRow, format);
+      const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
       scored.push({
         rowNumber,
         adId,
@@ -458,6 +508,7 @@ async function main(): Promise<void> {
         analysis,
         activeSince: parseActiveSince(row.ad_delivery_start_time),
         row,
+        copyWasContaminated,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -568,7 +619,7 @@ async function main(): Promise<void> {
               adFormat:         r.format,
               adLink:           r.row.ad_library_url.trim() || '',
               activeSince:      r.activeSince ?? undefined,
-              primaryCopy:      r.row.ad_copy.trim()      || undefined,
+              primaryCopy:      cleanAdCopy(r.row.ad_copy).cleanedCopy || undefined,
               headline:         r.row.headline.trim()     || undefined,
               description:      r.row.description.trim()  || undefined,
               metaAdId:         r.adId,

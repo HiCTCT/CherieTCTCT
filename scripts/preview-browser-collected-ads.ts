@@ -80,6 +80,8 @@ type ScoredRow = {
   exampleRowCopy: string;
   exampleRowHeadline: string;
   exampleRowDescription: string;
+  copyWasContaminated: boolean;
+  rawAdCopy: string;
   error: null;
 };
 
@@ -94,6 +96,40 @@ type RowResult = ScoredRow | ErroredRow;
 
 function isErrored(r: RowResult): r is ErroredRow {
   return r.error !== null;
+}
+
+// ─── Copy cleaning ────────────────────────────────────────────────────────────
+
+/**
+ * Detects comment-contaminated ad_copy (e.g. UGC comment dumps captured by the browser).
+ * Conservative patterns only — false negatives are preferred over false positives.
+ *
+ * Flags as contaminated when:
+ *  1. Copy starts with a separator character: ; | ,
+ *  2. Copy contains 3+ semicolon-separated segments that are all short (avg < 120 chars)
+ *
+ * Returns cleanedCopy (undefined if entire content is contaminated) and a wasContaminated flag.
+ */
+function cleanAdCopy(raw: string): { cleanedCopy: string | undefined; wasContaminated: boolean } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { cleanedCopy: undefined, wasContaminated: false };
+
+  // Pattern 1: leading separator character (; | ,)
+  if (/^[;|,]/.test(trimmed)) {
+    return { cleanedCopy: undefined, wasContaminated: true };
+  }
+
+  // Pattern 2: multiple semicolons with short segments — UGC comment concatenation
+  const parts = trimmed.split(';');
+  if (parts.length >= 3) {
+    const avgLen =
+      parts.map((p) => p.trim().length).reduce((a, b) => a + b, 0) / parts.length;
+    if (avgLen < 120) {
+      return { cleanedCopy: undefined, wasContaminated: true };
+    }
+  }
+
+  return { cleanedCopy: trimmed, wasContaminated: false };
 }
 
 // ─── Format derivation ────────────────────────────────────────────────────────
@@ -116,10 +152,13 @@ function deriveFormat(mediaType: string): FormatDerivation {
 // importing that DB-coupled module.
 
 function toExampleRow(row: BrowserAdRow): ExampleRow {
+  // Strip comment-contaminated ad_copy before passing to scorer.
+  // cleanedCopy is undefined when the entire field is contaminated — scorer falls back to headline.
+  const { cleanedCopy } = cleanAdCopy(row.ad_copy);
   return {
     Product:      row.competitor_name.trim() || 'Unknown Advertiser',
     'Ad Link':    row.ad_library_url.trim()  || undefined,
-    Copy:         row.ad_copy.trim()         || undefined,
+    Copy:         cleanedCopy                || undefined,
     Headline:     row.headline.trim()        || undefined,
     Description:  row.description.trim()     || undefined,
     'Active Since': row.ad_delivery_start_time.trim() || undefined,
@@ -253,6 +292,7 @@ function main(): void {
     try {
       const exampleRow = toExampleRow(row);
       const analysis   = analyseAdRow(exampleRow, format);
+      const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
       results.push({
         rowNumber,
         adId,
@@ -268,6 +308,8 @@ function main(): void {
         exampleRowCopy:               exampleRow.Copy                  ?? '(empty)',
         exampleRowHeadline:           exampleRow.Headline              ?? '(empty)',
         exampleRowDescription:        exampleRow.Description           ?? '(empty)',
+        copyWasContaminated,
+        rawAdCopy:            row.ad_copy.trim(),
         error: null,
       });
     } catch (err: unknown) {
@@ -308,12 +350,19 @@ function main(): void {
       copyPreview, visualDescPreview, creativeNotesPreview,
       exampleRowAnalysis, exampleRowCreativeAnalysis,
       exampleRowCopy, exampleRowHeadline, exampleRowDescription,
+      copyWasContaminated, rawAdCopy,
     } = result;
     const qualIcon = analysis.qualified ? '✓' : '○';
 
     console.log(`\n  ${qualIcon} Row ${rowNumber}  ad_id=${adId}`);
     console.log(`    media_type:     ${mediaType}  →  format: ${format}`);
-    console.log(`    Copy preview:   ${copyPreview}`);
+    if (copyWasContaminated) {
+      console.log(`    ⚠  WARN [ad_copy]: comment-contaminated — excluded from scorer Copy field`);
+      console.log(`    Raw copy:       ${truncate(rawAdCopy, 80)}`);
+      console.log(`    Scorer Copy:    (empty — scorer will use Headline instead)`);
+    } else {
+      console.log(`    Copy preview:   ${copyPreview}`);
+    }
     console.log(`    Visual desc:    ${visualDescPreview}`);
     console.log(`    Creative notes: ${creativeNotesPreview}`);
     console.log('');
