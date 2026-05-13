@@ -79,6 +79,60 @@ export function getQualifiedAds(filter: QualifiedAdsFilter = {}) {
   });
 }
 
+export type AllAdsFilter = {
+  industrySlug?: string;
+  qualified?: boolean;          // undefined = all ads
+  adSource?: string;            // e.g. 'browser_collected'
+  format?: string;              // 'STATIC' | 'VIDEO'
+  scoreMin?: number;            // score >= scoreMin
+  scoreMax?: number;            // score <  scoreMax
+  search?: string;
+  limit?: number;
+};
+
+export function getAllAds(filter: AllAdsFilter = {}) {
+  const where: Prisma.AdWhereInput = {};
+
+  if (filter.industrySlug) {
+    where.industry = { slug: filter.industrySlug };
+  }
+  if (filter.qualified !== undefined) {
+    where.qualified = filter.qualified;
+  }
+  if (filter.adSource) {
+    where.adSource = filter.adSource;
+  }
+  if (filter.format) {
+    where.adFormat = filter.format;
+  }
+  if (filter.scoreMin !== undefined || filter.scoreMax !== undefined) {
+    where.score = {
+      ...(filter.scoreMin !== undefined && { gte: filter.scoreMin }),
+      ...(filter.scoreMax !== undefined && { lt: filter.scoreMax }),
+    };
+  }
+  if (filter.search) {
+    const term = filter.search;
+    where.OR = [
+      { competitor: { name: { contains: term } } },
+      { productOrService: { contains: term } },
+      { headline: { contains: term } },
+      { primaryCopy: { contains: term } },
+    ];
+  }
+
+  return db.ad.findMany({
+    where,
+    include: {
+      competitor: true,
+      industry: true,
+      analysis: true,
+    },
+    orderBy: { score: 'desc' },
+    take: filter.limit ?? 24,
+  });
+}
+
 export function getDashboardCounts() {
   return Promise.all([
     db.industry.count(),
