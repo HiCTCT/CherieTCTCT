@@ -23,7 +23,8 @@
     "meta:diagnose": "tsx scripts/diagnose-meta-fetch.ts",
     "meta:diagnose-params": "tsx scripts/diagnose-meta-params.ts",
     "browser:validate": "tsx scripts/validate-browser-collected-ads.ts",
-    "browser:preview": "tsx scripts/preview-browser-collected-ads.ts"
+    "browser:preview": "tsx scripts/preview-browser-collected-ads.ts",
+    "browser:ingest": "tsx scripts/ingest-browser-collected-ads.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
