@@ -331,6 +331,53 @@ function printDryRunRow(
   }
 }
 
+// ─── Mixed-competitor guard ───────────────────────────────────────────────────
+
+/**
+ * Asserts that all READY rows in the CSV share the same meta_page_id.
+ * NEEDS_REVIEW and SKIP rows are ignored — they are not processed.
+ *
+ * Throws with a descriptive error if more than one distinct meta_page_id is
+ * found among READY rows. The error lists each page ID, its row count, and
+ * an example competitor_name so the operator knows how to split the file.
+ *
+ * Why: resolveCompetitor() resolves a single competitor. If READY rows belong
+ * to multiple competitors, rows after the first competitor would be silently
+ * attributed to the wrong competitor. This guard prevents that data corruption.
+ */
+function assertSingleCompetitor(
+  readyRows: Array<{ row: BrowserAdRow; rowNumber: number }>,
+  filePath: string,
+): void {
+  const pageIdMap = new Map<string, { count: number; exampleName: string }>();
+
+  for (const { row } of readyRows) {
+    const pid  = row.meta_page_id.trim();
+    const name = row.competitor_name.trim() || '(unknown)';
+    const existing = pageIdMap.get(pid);
+    if (existing) {
+      existing.count++;
+    } else {
+      pageIdMap.set(pid, { count: 1, exampleName: name });
+    }
+  }
+
+  if (pageIdMap.size <= 1) return;
+
+  const detail = Array.from(pageIdMap.entries())
+    .map(([pid, { count, exampleName }]) =>
+      `  • meta_page_id: ${pid}  (${count} READY row(s), competitor_name: "${exampleName}")`,
+    )
+    .join('\n');
+
+  throw new Error(
+    `CSV contains READY rows from ${pageIdMap.size} different competitors (${filePath}):\n\n` +
+    `${detail}\n\n` +
+    'Each CSV file must contain READY rows for one competitor only.\n' +
+    'Split the file into separate CSVs — one per competitor — then re-run.',
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -434,6 +481,11 @@ async function main(): Promise<void> {
     printSafetyFooter(LINE, dryRun);
     return;
   }
+
+  // ── Mixed-competitor guard ───────────────────────────────────────────────────
+  // Must run before resolveCompetitor() — throws if READY rows span more than one
+  // meta_page_id. NEEDS_REVIEW and SKIP rows are excluded from the check.
+  assertSingleCompetitor(readyRows, filePath);
 
   // ── Resolve competitor ───────────────────────────────────────────────────────
   // Use meta_page_id from the first READY row as the lookup key.
@@ -810,7 +862,7 @@ async function main(): Promise<void> {
     console.log(`    qualified=true: ${qualifiedInserted.length}  |  qualified=false: ${unqualifiedInserted.length}`);
     console.log('    Winning-ad views can filter qualified=true at query time.');
   } else if (preErrors.length === 0) {
-    console.log(`\n  ✓ READY — ${insertCandidates.length} row(s) can be ingested with 0 scoring errors.`);
+    console.log(`\n  \u2713 READY \u2014 ${insertCandidates.length} row(s) can be ingested with 0 scoring errors.`);
     if (insertCandidates.length > 0) {
       console.log(`    All ${insertCandidates.length} would be stored as adSource='${AD_SOURCE}'.`);
       console.log(`    qualified=true:  ${qualifiedInserted.length}  |  qualified=false: ${unqualifiedInserted.length}`);
@@ -829,7 +881,7 @@ async function main(): Promise<void> {
     console.log('       BROWSER_INGEST_WRITE=true');
     console.log('       BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND');
   } else {
-    console.log(`\n  ⚠  ${preErrors.length} row(s) errored and would be skipped.`);
+    console.log(`\n  \u26a0  ${preErrors.length} row(s) errored and would be skipped.`);
     console.log('    Review errors above before proceeding to live ingestion.');
   }
 
@@ -859,6 +911,6 @@ function printSafetyFooter(LINE: string, dryRun: boolean): void {
 
 main().catch((err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
-  console.error('\n❌ Fatal error:', message);
+  console.error('\n\u274c Fatal error:', message);
   process.exit(1);
 });
