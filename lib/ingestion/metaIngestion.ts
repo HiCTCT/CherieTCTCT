@@ -223,10 +223,10 @@ async function ingestPass(
     await prisma.adAnalysis.create({
       data: {
         adId: ad.id,
-        creativeAnalysis: '',
-        copyAnalysis: '',
-        headlineAnalysis: '',
-        descriptionAnalysis: '',
+        creativeAnalysis: analysis.creativeAnalysis,
+        copyAnalysis: analysis.copyAnalysis,
+        headlineAnalysis: analysis.headlineAnalysis,
+        descriptionAnalysis: analysis.descriptionAnalysis,
         strengthsJson: JSON.stringify(analysis.strengths),
         weaknessesJson: JSON.stringify(analysis.weaknesses),
         improvementsJson: JSON.stringify(analysis.improvements),
