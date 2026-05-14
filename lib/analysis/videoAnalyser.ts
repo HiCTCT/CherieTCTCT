@@ -121,25 +121,109 @@ export function analyseVideoAd(row: ExampleRow): AnalysisOutput {
   };
 
   // --- Narrative analysis fields ---
+  // If analyst notes are present, pass them through unchanged — seed ads are unaffected.
+  // If absent, build a structured multi-line fallback from already-computed signal data.
+  // This is presentation only — no numeric scores change.
+
   const copyAnalysisText = analysisNotes && analysisNotes.trim().length > 5
     ? analysisNotes
-    : `Copy scored ${copyScore.toFixed(1)}/10. ${
-        copyScore >= 7
-          ? 'Strong conversion signals detected. Hook, benefit, and CTA are present.'
-          : copyScore >= 5
-            ? 'Moderate signals. Some conversion elements are present but not fully sharpened.'
-            : 'Weak conversion signals. Hook, proof, and CTA need significant strengthening.'
-      }`;
+    : [
+        'AIDA Scores (machine-scored from copy and creative signals)',
+        '',
+        `Attention:  ${aidaScores.attention.toFixed(1)}/10 — ${
+          aidaScores.attention >= 7
+            ? 'Strong opening hook and visual stopping power.'
+            : aidaScores.attention >= 5
+              ? 'Opening hook and first-frame impact need sharpening.'
+              : 'Opening hook and first-frame impact need significant work.'
+        }`,
+        `Interest:   ${aidaScores.interest.toFixed(1)}/10 — ${
+          aidaScores.interest >= 7
+            ? 'Story flow and audience relevance maintain interest.'
+            : aidaScores.interest >= 5
+              ? 'Story flow and audience specificity need improvement.'
+              : 'Audience connection and story flow signals are weak.'
+        }`,
+        `Desire:     ${aidaScores.desire.toFixed(1)}/10 — ${
+          aidaScores.desire >= 7
+            ? 'Benefit clarity and proof cues drive desire.'
+            : aidaScores.desire >= 5
+              ? 'Benefit and proof signals need strengthening.'
+              : 'Benefit clarity and proof are largely absent.'
+        }`,
+        `Action:     ${aidaScores.action.toFixed(1)}/10 — ${
+          aidaScores.action >= 7
+            ? 'CTA is clear and action-oriented.'
+            : aidaScores.action >= 5
+              ? 'CTA and urgency need improvement.'
+              : 'CTA and urgency signals are weak or absent.'
+        }`,
+        '',
+        `Copy Score:      ${copyScore.toFixed(1)}/10 — ${
+          copyScore >= 7
+            ? 'Strong conversion signals detected. Hook, benefit, and CTA are present.'
+            : copyScore >= 5
+              ? 'Moderate signals. Some conversion elements are present but not fully sharpened.'
+              : 'Weak conversion signals. Hook, proof, and CTA need significant strengthening.'
+        }`,
+        `Creative Score:  ${creativeScore.toFixed(1)}/10 — ${
+          creativeScore >= 7
+            ? 'Strong video creative signals. Opening hook, sound-off design, and CTA are well-executed.'
+            : creativeScore >= 5
+              ? 'Some video creative signals present. First-frame impact and sound-off readability can be improved.'
+              : 'Video creative signals are weak. Opening hook, caption design, and CTA need work.'
+        }`,
+        '',
+        `Funnel Stage:        ${funnelStage}`,
+        `Trust Funnel Stage:  ${trustFunnelStage.replace(/_/g, ' ')}`,
+        '',
+        'Note: No analyst notes were provided. This analysis is based on automated signal detection only.',
+      ].join('\n');
 
   const creativeAnalysisOutput = creativeAnalysisText && creativeAnalysisText.trim().length > 5
     ? creativeAnalysisText
     : analysisNotes && analysisNotes.trim().length > 5
       ? analysisNotes
-      : `Creative scored ${creativeScore.toFixed(1)}/10. ${
-          creativeScore >= 7
-            ? 'Video creative shows strong conversion signals. Opening hook, sound-off design, and CTA are well-executed.'
-            : 'Video creative analysis not provided. Score reflects available signals only. Assess first 3 seconds, sound-off readability, and CTA visibility.'
-        }`;
+      : [
+          'Creative Analysis (machine-scored — VIDEO format)',
+          '',
+          `Creative Score:  ${creativeScore.toFixed(1)}/10 — ${
+            creativeScore >= 7
+              ? 'Strong video creative signals. Opening hook, sound-off design, and CTA are well-executed.'
+              : creativeScore >= 5
+                ? 'Some conversion signals present. First-frame impact and sound-off readability need sharpening.'
+                : 'Weak video creative signals. Opening hook, caption design, and CTA need significant work.'
+          }`,
+          '',
+          'Format: VIDEO',
+          '',
+          'AIDA Contribution:',
+          `  Attention:  ${aidaScores.attention.toFixed(1)}/10 — ${
+            aidaScores.attention >= 7
+              ? 'Opening hook stops the scroll. Strong first-frame impact.'
+              : 'Opening hook and pattern interrupt need strengthening.'
+          }`,
+          `  Desire:     ${aidaScores.desire.toFixed(1)}/10 — ${
+            aidaScores.desire >= 7
+              ? 'Benefit and proof are clearly communicated in the video.'
+              : 'Benefit and proof need to be more prominent in the video narrative.'
+          }`,
+          '',
+          'Sound-off design: No creative description provided — verify that captions or on-screen text are present.',
+          '',
+          ...(
+            behaviouralTriggers.filter((t) => t.strength !== 'MISSING').length > 0
+              ? [
+                  'Behavioural Triggers Detected:',
+                  ...behaviouralTriggers
+                    .filter((t) => t.strength !== 'MISSING')
+                    .map((t) => `  ${t.name}: ${t.strength.charAt(0) + t.strength.slice(1).toLowerCase()}`),
+                  '',
+                ]
+              : ['Behavioural Triggers: None detected from available signals.', '']
+          ),
+          'Note: No creative description was provided. This analysis is based on automated signal detection only.',
+        ].join('\n');
 
   const headlineAnalysisText = headline
     ? `Headline scored ${(headlineScore ?? 0).toFixed(1)}/10. "${headline}" — ${

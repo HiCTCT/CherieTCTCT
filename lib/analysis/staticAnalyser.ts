@@ -120,25 +120,107 @@ export function analyseStaticAd(row: ExampleRow): AnalysisOutput {
   };
 
   // --- Narrative analysis fields ---
+  // If analyst notes are present, pass them through unchanged — seed ads are unaffected.
+  // If absent, build a structured multi-line fallback from already-computed signal data.
+  // This is presentation only — no numeric scores change.
+
   const copyAnalysisText = analysisNotes && analysisNotes.trim().length > 5
     ? analysisNotes
-    : `Copy scored ${copyScore.toFixed(1)}/10. ${
-        copyScore >= 7
-          ? 'Strong conversion signals detected. Hook, benefit, and CTA are present.'
-          : copyScore >= 5
-            ? 'Moderate signals. Some conversion elements are present but not fully sharpened.'
-            : 'Weak conversion signals. Hook, proof, and CTA need significant strengthening.'
-      }`;
+    : [
+        'AIDA Scores (machine-scored from copy and creative signals)',
+        '',
+        `Attention:  ${aidaScores.attention.toFixed(1)}/10 — ${
+          aidaScores.attention >= 7
+            ? 'Strong hook and visual stopping power.'
+            : aidaScores.attention >= 5
+              ? 'Hook and first impression need sharpening.'
+              : 'Hook and first impression need significant work.'
+        }`,
+        `Interest:   ${aidaScores.interest.toFixed(1)}/10 — ${
+          aidaScores.interest >= 7
+            ? 'Audience relevance and problem fit are clear.'
+            : aidaScores.interest >= 5
+              ? 'Audience specificity and problem clarity need work.'
+              : 'Audience connection and relevance signals are weak.'
+        }`,
+        `Desire:     ${aidaScores.desire.toFixed(1)}/10 — ${
+          aidaScores.desire >= 7
+            ? 'Benefit, proof, and offer are motivating.'
+            : aidaScores.desire >= 5
+              ? 'Benefit and proof signals need strengthening.'
+              : 'Benefit clarity and proof are largely absent.'
+        }`,
+        `Action:     ${aidaScores.action.toFixed(1)}/10 — ${
+          aidaScores.action >= 7
+            ? 'CTA is clear and actionable.'
+            : aidaScores.action >= 5
+              ? 'CTA and urgency need improvement.'
+              : 'CTA and urgency signals are weak or absent.'
+        }`,
+        '',
+        `Copy Score:      ${copyScore.toFixed(1)}/10 — ${
+          copyScore >= 7
+            ? 'Strong conversion signals detected. Hook, benefit, and CTA are present.'
+            : copyScore >= 5
+              ? 'Moderate signals. Some conversion elements are present but not fully sharpened.'
+              : 'Weak conversion signals. Hook, proof, and CTA need significant strengthening.'
+        }`,
+        `Creative Score:  ${creativeScore.toFixed(1)}/10 — ${
+          creativeScore >= 7
+            ? 'Strong creative conversion signals. Visual hierarchy and offer prominence are well-executed.'
+            : creativeScore >= 5
+              ? 'Some creative conversion signals present. Offer prominence and visual hierarchy can be improved.'
+              : 'Creative signals are weak. Offer visibility and visual hierarchy need work.'
+        }`,
+        '',
+        `Funnel Stage:        ${funnelStage}`,
+        `Trust Funnel Stage:  ${trustFunnelStage.replace(/_/g, ' ')}`,
+        '',
+        'Note: No analyst notes were provided. This analysis is based on automated signal detection only.',
+      ].join('\n');
 
   const creativeAnalysisOutput = creativeAnalysisText && creativeAnalysisText.trim().length > 5
     ? creativeAnalysisText
     : analysisNotes && analysisNotes.trim().length > 5
       ? analysisNotes
-      : `Creative scored ${creativeScore.toFixed(1)}/10. ${
-          creativeScore >= 7
-            ? 'Creative shows strong conversion signals including visual clarity and offer visibility.'
-            : 'Creative analysis not provided. Score reflects available signals only. Full review recommended.'
-        }`;
+      : [
+          'Creative Analysis (machine-scored — STATIC format)',
+          '',
+          `Creative Score:  ${creativeScore.toFixed(1)}/10 — ${
+            creativeScore >= 7
+              ? 'Strong visual conversion signals. Visual hierarchy, offer prominence, and CTA are well-executed.'
+              : creativeScore >= 5
+                ? 'Some conversion signals present. Offer prominence and visual hierarchy need sharpening.'
+                : 'Weak creative signals. Offer visibility, visual hierarchy, and CTA need significant work.'
+          }`,
+          '',
+          'Format: STATIC (image or carousel)',
+          '',
+          'AIDA Contribution:',
+          `  Attention:  ${aidaScores.attention.toFixed(1)}/10 — ${
+            aidaScores.attention >= 7
+              ? 'Visual stops the scroll. Strong first-frame impact.'
+              : 'Visual stopping power and pattern interrupt need strengthening.'
+          }`,
+          `  Desire:     ${aidaScores.desire.toFixed(1)}/10 — ${
+            aidaScores.desire >= 7
+              ? 'Offer and benefit are visually prominent.'
+              : 'Benefit and offer need to be more prominent visually.'
+          }`,
+          '',
+          ...(
+            behaviouralTriggers.filter((t) => t.strength !== 'MISSING').length > 0
+              ? [
+                  'Behavioural Triggers Detected:',
+                  ...behaviouralTriggers
+                    .filter((t) => t.strength !== 'MISSING')
+                    .map((t) => `  ${t.name}: ${t.strength.charAt(0) + t.strength.slice(1).toLowerCase()}`),
+                  '',
+                ]
+              : ['Behavioural Triggers: None detected from available signals.', '']
+          ),
+          'Note: No creative description was provided. This analysis is based on automated signal detection only.',
+        ].join('\n');
 
   const headlineAnalysisText = headline
     ? `Headline scored ${(headlineScore ?? 0).toFixed(1)}/10. "${headline}" — ${
