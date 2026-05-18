@@ -50,6 +50,8 @@ type BrowserAdRow = {
   // Optional analyst-context columns (added Phase 7.5)
   visual_description: string;
   creative_notes: string;
+  // Optional creative asset column (Phase 8 — vision analysis)
+  creative_asset_path?: string;
 };
 
 /**
@@ -111,6 +113,9 @@ const EXPECTED_HEADER = [
   'visual_description',
   'creative_notes',
 ] as const;
+
+// Known optional columns: present in new CSVs, absent in old — never flagged as unknown extras.
+const KNOWN_OPTIONAL_COLUMNS = ['creative_asset_path'] as const;
 
 const VALID_MEDIA_TYPES: BrowserMediaType[] = ['IMAGE', 'VIDEO', 'CAROUSEL', 'UNKNOWN'];
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -300,6 +305,22 @@ function validateReadyRow(
     );
   }
 
+  // creative_asset_path — optional; if present and non-empty, path must exist on disk
+  const assetPath = row.creative_asset_path?.trim();
+  if (assetPath) {
+    const resolvedPath = path.resolve(assetPath);
+    if (!fs.existsSync(resolvedPath)) {
+      issues.push(err('creative_asset_path', `Path not found: ${resolvedPath}`));
+    } else if (fs.statSync(resolvedPath).isDirectory()) {
+      const supportedExts = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+      const imageFiles = fs.readdirSync(resolvedPath)
+        .filter((f) => supportedExts.has(path.extname(f).toLowerCase()));
+      if (imageFiles.length === 0) {
+        issues.push(warn('creative_asset_path', `Folder exists but contains no image files (.png/.jpg/.jpeg/.webp): ${resolvedPath}`));
+      }
+    }
+  }
+
   return issues;
 }
 
@@ -376,7 +397,11 @@ function main(): void {
   // ── Validate header ──────────────────────────────────────────────────────────
   const actualCols = Object.keys(rawRows[0]!);
   const missingCols = EXPECTED_HEADER.filter((c) => !actualCols.includes(c));
-  const extraCols   = actualCols.filter((c) => !(EXPECTED_HEADER as readonly string[]).includes(c));
+  const extraCols   = actualCols.filter(
+    (c) =>
+      !(EXPECTED_HEADER        as readonly string[]).includes(c) &&
+      !(KNOWN_OPTIONAL_COLUMNS as readonly string[]).includes(c),
+  );
 
   if (missingCols.length > 0) {
     console.error(`\n❌ Missing required columns: ${missingCols.join(', ')}`);
@@ -478,6 +503,7 @@ function main(): void {
     console.log(`    landing page:  ${domain || '(none)'}`);
     console.log(`    visual_desc:   ${truncate(v.raw.visual_description ?? '', 80)}`);
     console.log(`    creative_notes:${truncate(v.raw.creative_notes ?? '', 80)}`);
+    console.log(`    asset_path:    ${v.raw.creative_asset_path?.trim() ? truncate(v.raw.creative_asset_path.trim(), 80) : '(not set)'}`);
 
     if (errors.length > 0) {
       for (const e of errors) {

@@ -20,6 +20,8 @@ import * as path from 'path';
 
 import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
+import { resolveCreativeContext } from '@/lib/analysis/creativeAssetAnalyser';
+import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -63,6 +65,8 @@ type BrowserAdRow = {
   // Optional analyst-context columns (added Phase 7.5)
   visual_description: string;
   creative_notes: string;
+  // Optional creative asset column (Phase 8 — vision analysis)
+  creative_asset_path?: string;
 };
 
 type ScoredRow = {
@@ -82,6 +86,7 @@ type ScoredRow = {
   exampleRowDescription: string;
   copyWasContaminated: boolean;
   rawAdCopy: string;
+  creativeSource: CreativeSource;
   error: null;
 };
 
@@ -151,7 +156,10 @@ function deriveFormat(mediaType: string): FormatDerivation {
 // expects. Mirrors the mapping in metaIngestion.ts normaliseRecord() without
 // importing that DB-coupled module.
 
-function toExampleRow(row: BrowserAdRow): ExampleRow {
+// creative context is resolved before this call (ASSET / MANUAL / FALLBACK).
+// visual_description → 'Creative Analysis' → creativeAnalysisText in scorer
+// creative_notes     → 'Analysis'          → analysisNotes in scorer
+function toExampleRow(row: BrowserAdRow, creative: CreativeContext): ExampleRow {
   // Strip comment-contaminated ad_copy before passing to scorer.
   // cleanedCopy is undefined when the entire field is contaminated — scorer falls back to headline.
   const { cleanedCopy } = cleanAdCopy(row.ad_copy);
@@ -162,12 +170,9 @@ function toExampleRow(row: BrowserAdRow): ExampleRow {
     Headline:     row.headline.trim()        || undefined,
     Description:  row.description.trim()     || undefined,
     'Active Since': row.ad_delivery_start_time.trim() || undefined,
-    // Analyst-context columns: visual_description → Creative Analysis,
-    // creative_notes → Analysis. Both undefined when blank so scorer
-    // behaviour is unchanged for rows without analyst input.
-    Analysis:           row.creative_notes?.trim()      || undefined,
-    'Creative Analysis': row.visual_description?.trim() || undefined,
-    Improvement:         undefined,
+    Analysis:            creative.creative_notes      || undefined,
+    'Creative Analysis': creative.visual_description  || undefined,
+    Improvement:              undefined,
     'Creative Improvements':  undefined,
     'Other Feedbacks':        undefined,
   };
@@ -189,9 +194,31 @@ function fmt(n: number | null): string {
   return n === null ? 'N/A (not provided)' : n.toFixed(1);
 }
 
+// ─── API key guard ────────────────────────────────────────────────────────────
+
+/**
+ * Aborts if any READY row has creative_asset_path set but ANTHROPIC_API_KEY
+ * is absent. Called after bucketing rows, before any API call or DB access.
+ */
+function assertApiKeyIfAssets(
+  readyRows: Array<{ row: BrowserAdRow; rowNumber: number }>,
+): void {
+  const rowsWithAssets = readyRows.filter(({ row }) => row.creative_asset_path?.trim());
+  if (rowsWithAssets.length === 0) return;
+
+  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+    const rowNums = rowsWithAssets.map((r) => r.rowNumber).join(', ');
+    console.error('\n❌ ANTHROPIC_API_KEY is required.');
+    console.error(`   ${rowsWithAssets.length} READY row(s) have creative_asset_path set (row(s): ${rowNums}).`);
+    console.error('   Set ANTHROPIC_API_KEY=<key> before re-running,');
+    console.error('   or remove creative_asset_path from those rows to run without vision analysis.');
+    process.exit(1);
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-function main(): void {
+async function main(): Promise<void> {
   const LINE = '═'.repeat(63);
   const DIV  = '─'.repeat(63);
 
@@ -269,6 +296,9 @@ function main(): void {
     return;
   }
 
+  // ── API key guard ────────────────────────────────────────────────────────────
+  assertApiKeyIfAssets(readyRows);
+
   // ── Score each READY row ─────────────────────────────────────────────────────
   const results: RowResult[] = [];
   let staticCount  = 0;
@@ -290,7 +320,10 @@ function main(): void {
     else                     videoCount++;
 
     try {
-      const exampleRow = toExampleRow(row);
+      // Resolve creative context: ASSET (vision API) → MANUAL (CSV text) → FALLBACK
+      const creative = await resolveCreativeContext(row, row.media_type);
+
+      const exampleRow = toExampleRow(row, creative);
       const analysis   = analyseAdRow(exampleRow, format);
       const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
       results.push({
@@ -300,8 +333,8 @@ function main(): void {
         format,
         analysis,
         copyPreview:          truncate(row.ad_copy.trim() || row.headline.trim(), 80),
-        visualDescPreview:    truncate(row.visual_description?.trim(), 80),
-        creativeNotesPreview: truncate(row.creative_notes?.trim(), 80),
+        visualDescPreview:    truncate(creative.visual_description, 80),
+        creativeNotesPreview: truncate(creative.creative_notes, 80),
         // Capture the exact ExampleRow values sent to the scorer for debugging
         exampleRowAnalysis:           exampleRow.Analysis              ?? '(empty)',
         exampleRowCreativeAnalysis:   exampleRow['Creative Analysis']  ?? '(empty)',
@@ -310,6 +343,7 @@ function main(): void {
         exampleRowDescription:        exampleRow.Description           ?? '(empty)',
         copyWasContaminated,
         rawAdCopy:            row.ad_copy.trim(),
+        creativeSource:       creative.source,
         error: null,
       });
     } catch (err: unknown) {
@@ -350,12 +384,18 @@ function main(): void {
       copyPreview, visualDescPreview, creativeNotesPreview,
       exampleRowAnalysis, exampleRowCreativeAnalysis,
       exampleRowCopy, exampleRowHeadline, exampleRowDescription,
-      copyWasContaminated, rawAdCopy,
+      copyWasContaminated, rawAdCopy, creativeSource,
     } = result;
+
+    const sourceLabel =
+      creativeSource === 'ASSET'    ? '[ASSET]    — vision analysis from creative_asset_path' :
+      creativeSource === 'MANUAL'   ? '[MANUAL]   — from CSV visual_description / creative_notes' :
+                                      '[FALLBACK] — machine-scored baseline (no asset or manual text)';
     const qualIcon = analysis.qualified ? '✓' : '○';
 
     console.log(`\n  ${qualIcon} Row ${rowNumber}  ad_id=${adId}`);
     console.log(`    media_type:     ${mediaType}  →  format: ${format}`);
+    console.log(`    Creative source:${sourceLabel}`);
     if (copyWasContaminated) {
       console.log(`    ⚠  WARN [ad_copy]: comment-contaminated — excluded from scorer Copy field`);
       console.log(`    Raw copy:       ${truncate(rawAdCopy, 80)}`);
@@ -486,4 +526,8 @@ function printSafetyFooter(LINE: string): void {
   console.log('');
 }
 
-main();
+main().catch((err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error('\n❌ Fatal error:', message);
+  process.exit(1);
+});

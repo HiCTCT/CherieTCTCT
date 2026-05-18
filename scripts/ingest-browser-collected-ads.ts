@@ -33,6 +33,8 @@ import { PrismaClient } from '@prisma/client';
 
 import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
+import { resolveCreativeContext } from '@/lib/analysis/creativeAssetAnalyser';
+import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -76,6 +78,8 @@ type BrowserAdRow = {
   notes: string;
   visual_description: string;
   creative_notes: string;
+  // Optional creative asset column (Phase 8 — vision analysis)
+  creative_asset_path?: string;
 };
 
 type CompetitorRecord = {
@@ -103,6 +107,7 @@ type ProcessedRow = {
   activeSince: Date | null;
   row: BrowserAdRow;
   copyWasContaminated: boolean;
+  creativeSource: CreativeSource;
 };
 
 type ErroredRow = {
@@ -182,11 +187,11 @@ function cleanAdCopy(raw: string): { cleanedCopy: string | undefined; wasContami
 
 // ─── ExampleRow mapping ───────────────────────────────────────────────────────
 //
-// Identical mapping to preview-browser-collected-ads.ts toExampleRow().
-// visual_description → Creative Analysis (creativeAnalysisText in scorer)
-// creative_notes     → Analysis          (analysisNotes in scorer)
+// creative context is resolved before this call (ASSET / MANUAL / FALLBACK).
+// visual_description → 'Creative Analysis' → creativeAnalysisText in scorer
+// creative_notes     → 'Analysis'          → analysisNotes in scorer
 
-function toExampleRow(row: BrowserAdRow): ExampleRow {
+function toExampleRow(row: BrowserAdRow, creative: CreativeContext): ExampleRow {
   // Strip comment-contaminated ad_copy before passing to scorer.
   // cleanedCopy is undefined when the entire field is contaminated — scorer falls back to headline.
   const { cleanedCopy } = cleanAdCopy(row.ad_copy);
@@ -197,8 +202,8 @@ function toExampleRow(row: BrowserAdRow): ExampleRow {
     Headline:            row.headline.trim()         || undefined,
     Description:         row.description.trim()      || undefined,
     'Active Since':      row.ad_delivery_start_time.trim() || undefined,
-    Analysis:            row.creative_notes?.trim()        || undefined,
-    'Creative Analysis': row.visual_description?.trim()    || undefined,
+    Analysis:            creative.creative_notes      || undefined,
+    'Creative Analysis': creative.visual_description  || undefined,
     Improvement:              undefined,
     'Creative Improvements':  undefined,
     'Other Feedbacks':        undefined,
@@ -265,11 +270,16 @@ function printDryRunRow(
   competitor: CompetitorRecord,
   DIV: string,
 ): void {
-  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated } = r;
+  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated, creativeSource } = r;
   const outcomeIcon = outcome === 'WOULD_INSERT' ? '✓' : '○';
   const outcomeLabel = outcome === 'WOULD_INSERT'
     ? '[WOULD INSERT]'
     : '[SKIPPED — duplicate metaAdId already in DB]';
+
+  const sourceLabel =
+    creativeSource === 'ASSET'    ? '[ASSET]    — vision analysis from creative_asset_path' :
+    creativeSource === 'MANUAL'   ? '[MANUAL]   — from CSV visual_description / creative_notes' :
+                                    '[FALLBACK] — machine-scored baseline (no asset or manual text)';
 
   console.log(`\n  ${outcomeIcon} Row ${rowNumber}  ad_id=${adId}  ${outcomeLabel}`);
   console.log(`  ${DIV}`);
@@ -285,6 +295,7 @@ function printDryRunRow(
 
   const { cleanedCopy } = cleanAdCopy(row.ad_copy);
 
+  console.log(`  Creative source: ${sourceLabel}`);
   console.log('  Ad record:');
   console.log(`    competitorId:    ${competitor.id}`);
   console.log(`    clientId:        ${competitor.clientId}`);
@@ -328,6 +339,29 @@ function printDryRunRow(
     console.log(`    behaviouralTriggers: ${triggerStr}`);
   } else {
     console.log(`    behaviouralTriggers: none detected`);
+  }
+}
+
+// ─── API key guard ────────────────────────────────────────────────────────────
+
+/**
+ * Aborts if any READY row has creative_asset_path set but ANTHROPIC_API_KEY
+ * is absent. Called after bucketing rows, before competitor resolution or any
+ * DB access.
+ */
+function assertApiKeyIfAssets(
+  readyRows: Array<{ row: BrowserAdRow; rowNumber: number }>,
+): void {
+  const rowsWithAssets = readyRows.filter(({ row }) => row.creative_asset_path?.trim());
+  if (rowsWithAssets.length === 0) return;
+
+  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+    const rowNums = rowsWithAssets.map((r) => r.rowNumber).join(', ');
+    console.error('\n❌ ANTHROPIC_API_KEY is required.');
+    console.error(`   ${rowsWithAssets.length} READY row(s) have creative_asset_path set (row(s): ${rowNums}).`);
+    console.error('   Set ANTHROPIC_API_KEY=<key> before re-running,');
+    console.error('   or remove creative_asset_path from those rows to run without vision analysis.');
+    process.exit(1);
   }
 }
 
@@ -482,6 +516,10 @@ async function main(): Promise<void> {
     return;
   }
 
+  // ── API key guard ────────────────────────────────────────────────────────────
+  // Abort early if creative_asset_path is present on any READY row but the key is absent.
+  assertApiKeyIfAssets(readyRows);
+
   // ── Mixed-competitor guard ───────────────────────────────────────────────────
   // Must run before resolveCompetitor() — throws if READY rows span more than one
   // meta_page_id. NEEDS_REVIEW and SKIP rows are excluded from the check.
@@ -521,6 +559,7 @@ async function main(): Promise<void> {
     activeSince: Date | null;
     row: BrowserAdRow;
     copyWasContaminated: boolean;
+    creativeSource: CreativeSource;
   };
 
   type PreErrorRow = {
@@ -549,7 +588,10 @@ async function main(): Promise<void> {
     else                     videoCount++;
 
     try {
-      const exampleRow = toExampleRow(row);
+      // Resolve creative context: ASSET (vision API) → MANUAL (CSV text) → FALLBACK
+      const creative = await resolveCreativeContext(row, row.media_type);
+
+      const exampleRow = toExampleRow(row, creative);
       const analysis   = analyseAdRow(exampleRow, format);
       const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
       scored.push({
@@ -561,6 +603,7 @@ async function main(): Promise<void> {
         activeSince: parseActiveSince(row.ad_delivery_start_time),
         row,
         copyWasContaminated,
+        creativeSource: creative.source,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

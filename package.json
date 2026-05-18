@@ -27,6 +27,7 @@
     "browser:ingest": "tsx scripts/ingest-browser-collected-ads.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "@prisma/client": "^5.22.0",
     "csv-parse": "^5.5.6",
     "next": "14.2.18",
