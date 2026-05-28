@@ -198,6 +198,13 @@ async function dismissOverlays(page: Page): Promise<void> {
 
 type BBox = { x: number; y: number; width: number; height: number };
 
+type ContainerHints = {
+  competitorName?: string;
+  headline?:       string;
+  adCopy?:         string;
+  description?:    string;
+};
+
 /**
  * Use the ad_id to locate the specific ad card container on the page.
  *
@@ -208,71 +215,199 @@ type BBox = { x: number; y: number; width: number; height: number };
  *
  * Returns null if the container cannot be reliably identified.
  */
-async function findAdContainer(page: Page, adId: string): Promise<BBox | null> {
-  const result = await page.evaluate((id) => {
-    // ── Candidate sources for the ad_id in the DOM ────────────────────────
+async function findAdContainer(
+  page:     Page,
+  adId:     string,
+  hints:    ContainerHints = {},
+  debugOut: string[] = [],
+): Promise<BBox | null> {
+
+  // ── S1: ad_id in href or leaf text ────────────────────────────────────────
+  debugOut.push('S1: searching ad_id in hrefs and leaf text');
+  const s1 = await page.evaluate((id) => {
+    const MEDIA_SEL = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video';
     const sources: Element[] = [
-      // Links whose href contains the ad ID
       ...Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
            .filter((a) => a.href.includes(id)),
-      // Leaf text nodes whose trimmed content equals the ad ID (Library ID label)
       ...Array.from(document.querySelectorAll<HTMLElement>('span, div, p'))
-           .filter((el) => el.childElementCount === 0 &&
-                           (el.textContent ?? '').trim() === id),
+           .filter((el) => {
+             if (el.childElementCount > 0) return false;
+             const t = (el.textContent ?? '').trim();
+             return t === id || (t.includes(id) && t.length <= id.length + 25);
+           }),
     ];
-
     for (const start of sources) {
       let el: HTMLElement | null = start as HTMLElement;
       let depth = 0;
       while (el && depth < 25) {
-        el = el.parentElement;
-        depth++;
+        el = el.parentElement; depth++;
         if (!el) break;
         const rect = el.getBoundingClientRect();
-        // Must be wide enough, tall enough, and not the full body
-        if (rect.width < 280 || rect.height < 200) continue;
-        if (rect.width > 1100) continue; // probably the whole-page wrapper
-        const media = el.querySelectorAll(
-          'img[src*="scontent"], img[src*="fbcdn.net"], video',
-        );
-        if (media.length > 0) {
-          return { found: true, x: rect.x, y: rect.y, width: rect.width, height: rect.height, strategy: 'adId' };
-        }
+        if (rect.width < 280 || rect.height < 200 || rect.width > 1100) continue;
+        if (el.querySelectorAll(MEDIA_SEL).length > 0)
+          return { found: true as const, x: rect.x, y: rect.y, width: rect.width, height: rect.height, sources: sources.length };
       }
     }
-    return { found: false as const };
+    return { found: false as const, sources: sources.length };
   }, adId);
 
-  if (result.found) {
-    return { x: result.x, y: result.y, width: result.width, height: result.height };
+  if (s1.found) {
+    debugOut.push('S1 success');
+    return { x: s1.x, y: s1.y, width: s1.width, height: s1.height };
+  }
+  debugOut.push(`S1 failed: ${s1.sources} source(s) found, none led to a media container`);
+
+  // ── S2: Walk up from "Library ID" label ──────────────────────────────────
+  debugOut.push('S2: searching Library ID label');
+  const s2 = await page.evaluate(() => {
+    const MEDIA_SEL = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video';
+    const labels = Array.from(document.querySelectorAll<HTMLElement>('span, div, p'))
+      .filter((el) => (el.textContent ?? '').trim().toLowerCase().startsWith('library id'));
+    for (const label of labels) {
+      let el: HTMLElement | null = label as HTMLElement;
+      let depth = 0;
+      while (el && depth < 20) {
+        el = el.parentElement; depth++;
+        if (!el) break;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 280 || rect.height < 200 || rect.width > 1100) continue;
+        if (el.querySelectorAll(MEDIA_SEL).length > 0)
+          return { found: true as const, x: rect.x, y: rect.y, width: rect.width, height: rect.height, labels: labels.length };
+      }
+    }
+    return { found: false as const, labels: labels.length };
+  });
+
+  if (s2.found) {
+    debugOut.push('S2 success');
+    return { x: s2.x, y: s2.y, width: s2.width, height: s2.height };
+  }
+  debugOut.push(`S2 failed: ${s2.labels} Library ID label(s), none led to a media container`);
+
+  // ── S3: CSV text hints (headline / ad_copy / competitor_name) ────────────
+  const hintPhrases: string[] = [];
+  for (const raw of [hints.headline, hints.adCopy, hints.competitorName, hints.description]) {
+    if (!raw?.trim()) continue;
+    const phrase = raw.trim().split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+    if (phrase.length > 4) hintPhrases.push(phrase);
   }
 
-  // ── Heuristic fallback ───────────────────────────────────────────────────
-  // Pick the largest CDN media element that is in a plausible screen region
-  // (not at the very edges, reasonably large).
-  const fallback = await page.evaluate(() => {
-    const mediaEls = Array.from(document.querySelectorAll<HTMLElement>(
-      'img[src*="scontent"], img[src*="fbcdn.net"], video',
+  if (hintPhrases.length > 0) {
+    debugOut.push(`S3: hint phrases: ${hintPhrases.join(' | ')}`);
+    const s3 = await page.evaluate((phrases) => {
+      const MEDIA_SEL = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video, img';
+      const matches = Array.from(document.querySelectorAll<HTMLElement>('span, div, p, h1, h2, h3'))
+        .filter((el) => {
+          const t = (el.textContent ?? '').trim().toLowerCase();
+          return t.length < 500 && phrases.some((ph) => t.includes(ph));
+        });
+      for (const start of matches) {
+        let el: HTMLElement | null = start as HTMLElement;
+        let depth = 0;
+        while (el && depth < 20) {
+          el = el.parentElement; depth++;
+          if (!el) break;
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 300 || rect.height < 250 || rect.width > 1000) continue;
+          if (rect.x < 150 || rect.y < 40) continue;
+          if (el.querySelectorAll(MEDIA_SEL).length > 0)
+            return { found: true as const, x: rect.x, y: rect.y, width: rect.width, height: rect.height, matches: matches.length };
+        }
+      }
+      return { found: false as const, matches: matches.length };
+    }, hintPhrases);
+
+    if (s3.found) {
+      debugOut.push('S3 success');
+      return { x: s3.x, y: s3.y, width: s3.width, height: s3.height };
+    }
+    debugOut.push(`S3 failed: ${s3.matches} text match(es), none led to a media container`);
+  } else {
+    debugOut.push('S3 skipped: no usable hint phrases');
+  }
+
+  // ── S4: Scored card scan — main ad card heuristic ────────────────────────
+  // URL is already scoped to ?id=<adId>, so ANY card-like element on the
+  // page is the right ad.  Score each candidate; return the best.
+  debugOut.push('S4: scored card scan');
+  const s4 = await page.evaluate(() => {
+    type Cand = { score: number; x: number; y: number; width: number; height: number };
+    const MEDIA_SEL = 'img, video, canvas';
+    const CDN_SEL   = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]';
+    const candidates: Cand[] = [];
+
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>('div, section, article'))) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width  < 280  || rect.width  > 1000) continue;
+      if (rect.height < 250) continue;
+      if (rect.x      < 150) continue;
+      if (rect.y      <  40) continue;
+      if (rect.y      > 850) continue;
+
+      const text      = (el.textContent ?? '').toLowerCase();
+      const mediaCnt  = el.querySelectorAll(MEDIA_SEL).length;
+      const cdnCnt    = el.querySelectorAll(CDN_SEL).length;
+      const hasVideo  = !!el.querySelector('video');
+
+      // Must have media OR substantial text
+      if (mediaCnt === 0 && text.length < 80) continue;
+
+      let score = 0;
+      if (mediaCnt > 0) score += 3;
+      if (cdnCnt   > 0) score += 3;
+      if (hasVideo)     score += 2;
+      if (text.includes('library id'))  score += 5;
+      if (text.includes('active'))      score += 2;
+      if (text.includes('sponsored'))   score += 1;
+      // Centered on a 1280px viewport
+      if (rect.x >= 250 && rect.x + rect.width <= 1050) score += 2;
+      // Typical ad card width 300–700
+      if (rect.width >= 300 && rect.width <= 700) score += 2;
+      if (rect.height >= 400) score += 1;
+      if (rect.width  >  800) score -= 3; // penalise wide wrappers
+
+      candidates.push({ score, x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    }
+
+    if (candidates.length === 0) return { found: false as const, candidates: 0, bestScore: 0 };
+    candidates.sort((a, b) => b.score - a.score);
+    const best = candidates[0]!;
+    return { found: true as const, ...best, candidates: candidates.length };
+  });
+
+  if (s4.found && s4.score >= 3) {
+    debugOut.push(`S4 success: score=${s4.score}, candidates=${s4.candidates}`);
+    return { x: s4.x, y: s4.y, width: s4.width, height: s4.height };
+  }
+  const s4cands = (s4 as any).candidates ?? 0;
+  const s4score = (s4 as any).bestScore ?? (s4.found ? s4.score : 0);
+  debugOut.push(`S4 failed: ${s4cands} candidate(s), best score=${s4score} (min 3)`);
+
+  // ── S5: Broadest fallback — largest CDN media in plausible position ───────
+  debugOut.push('S5: broad CDN media scan');
+  const s5 = await page.evaluate(() => {
+    const els = Array.from(document.querySelectorAll<HTMLElement>(
+      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video',
     ));
     let best: { x: number; y: number; width: number; height: number } | null = null;
     let bestArea = 0;
-    for (const el of mediaEls) {
+    for (const el of els) {
       const rect = el.getBoundingClientRect();
-      if (rect.width < 250 || rect.height < 200) continue;      // too small
-      if (rect.x < 50) continue;                                 // far left edge
-      if (rect.y > 750) continue;                                // below the fold
+      if (rect.width < 150 || rect.height < 100) continue;
+      if (rect.x < 100 || rect.y < 40 || rect.y > 900) continue;
       const area = rect.width * rect.height;
-      if (area > bestArea) {
-        bestArea = area;
-        best = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-      }
+      if (area > bestArea) { bestArea = area; best = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }; }
     }
-    return best;
+    return best ? { found: true as const, ...best } : { found: false as const };
   });
 
-  return fallback;
+  if (s5.found) {
+    debugOut.push('S5 success');
+    return { x: s5.x, y: s5.y, width: s5.width, height: s5.height };
+  }
+  debugOut.push('S5 failed: no CDN media in plausible position');
+  return null;
 }
-
 /**
  * Find the best creative media element within an optional container BBox.
  * When containerBBox is given, only elements whose centre falls inside it
@@ -356,6 +491,7 @@ async function saveDebugInfo(
   outDir:        string,
   strategy:      string,
   rejected:      string[],
+  debugLines:    string[] = [],
 ): Promise<void> {
   if (!DEBUG_CAPTURE_GLOBAL) return;
   fs.mkdirSync(outDir, { recursive: true });
@@ -375,6 +511,9 @@ async function saveDebugInfo(
     `strategy: ${strategy}`,
     `container: ${containerBBox ? JSON.stringify(containerBBox) : 'null'}`,
     `rejected: ${rejected.join('; ') || 'none'}`,
+    '',
+    '── Container search log ──',
+    ...debugLines,
   ].join('\n');
   fs.writeFileSync(path.join(outDir, `debug-container-info-${adId}.txt`), info, 'utf-8');
 }
@@ -813,6 +952,26 @@ async function main(): Promise<void> {
       await dismissOverlays(page);
       await page.waitForTimeout(PAGE_SETTLE);
 
+      // Scroll slightly to trigger lazy-load of the creative image, then scroll back
+      await page.evaluate(() => window.scrollTo(0, 250));
+      await page.waitForTimeout(1200);
+      await page.evaluate(() => window.scrollTo(0, 0));
+
+      // Wait up to 6 s for a reasonably-sized CDN image to load
+      try {
+        await page.waitForFunction(
+          () => {
+            const imgs = Array.from(
+              document.querySelectorAll<HTMLImageElement>(
+                'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]',
+              ),
+            );
+            return imgs.some((img) => img.naturalWidth > 200);
+          },
+          { timeout: 6000 },
+        );
+      } catch { /* proceed anyway — video-only or slow page */ }
+
       // ── Active-ad check ──────────────────────────────────────────────────
       const activeCheck = await checkAdActive(page);
       console.log(`    active status: ${activeCheck.active ? 'ACTIVE' : 'INACTIVE'} — ${activeCheck.reason}`);
@@ -825,7 +984,13 @@ async function main(): Promise<void> {
       }
 
       // ── Locate correct ad container ──────────────────────────────────────
-      const containerBBox = await findAdContainer(page, adId);
+      const containerDebug: string[] = [];
+      const containerBBox = await findAdContainer(page, adId, {
+        competitorName: name,
+        headline:       row.headline,
+        adCopy:         row.ad_copy,
+        description:    row.description,
+      }, containerDebug);
       const rejected: string[] = [];
 
       if (containerBBox) {
@@ -840,9 +1005,8 @@ async function main(): Promise<void> {
 
       await saveDebugInfo(
         page, adId, containerBBox, outDir,
-        containerBBox ? 'adId-dom-search' : 'page-heuristic', rejected,
+        containerBBox ? 'found' : 'not-found', rejected, containerDebug,
       );
-
       if (!containerBBox) {
         console.log('    SKIPPED — could not identify correct creative container');
         noContainer++;
@@ -850,7 +1014,7 @@ async function main(): Promise<void> {
         continue;
       }
 
-      // ── Dispatch ─────────────────────────────────────────────────────────
+      // ── Dispatch ────────────────────────────────────────────────────────────────────
       let savedFiles: string[] = [];
 
       if (mt === 'CAROUSEL') {
