@@ -19,7 +19,6 @@
  * is present in any READY row. Scripts enforce this before calling here.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -61,7 +60,7 @@ type ContentBlock = ImageBlock | TextBlock;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MODEL = 'claude-3-5-sonnet-20241022';
+const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5';
 const MAX_TOKENS = 1024;
 const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
@@ -148,9 +147,8 @@ export async function analyseCreativeAsset(
   assetPath: string,
   mediaType: string,
 ): Promise<{ visual_description: string; creative_notes: string }> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const mt     = mediaType.trim().toUpperCase();
-  const stat   = fs.statSync(assetPath);
+  const mt   = mediaType.trim().toUpperCase();
+  const stat = fs.statSync(assetPath);
 
   let content: ContentBlock[];
 
@@ -173,19 +171,32 @@ export async function analyseCreativeAsset(
     content = [buildImageBlock(assetPath), { type: 'text', text: IMAGE_PROMPT }];
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const response = await client.messages.create({
-    model:      MODEL,
-    max_tokens: MAX_TOKENS,
-    // Local ContentBlock is structurally identical to the SDK's internal union.
-    // Cast to any to avoid importing private SDK type names.
-    messages:   [{ role: 'user' as const, content: content as any }], // eslint-disable-line @typescript-eslint/no-explicit-any
+  const apiResponse = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type':    'application/json',
+      'x-api-key':       process.env.ANTHROPIC_API_KEY ?? '',
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model:      MODEL,
+      max_tokens: MAX_TOKENS,
+      temperature: 0,
+      messages: [{ role: 'user', content }],
+    }),
   });
 
-  const firstBlock   = response.content[0];
-  const responseText = (firstBlock && 'text' in firstBlock)
-    ? String((firstBlock as Record<string, unknown>)['text'] ?? '')
-    : '';
+  if (!apiResponse.ok) {
+    const errorText = await apiResponse.text();
+    throw new Error(`Anthropic API error ${apiResponse.status}: ${errorText}`);
+  }
+
+  const data = await apiResponse.json() as {
+    content: Array<{ type: string; text?: string }>;
+  };
+
+  const textBlock   = data.content.find((b) => b.type === 'text');
+  const responseText = textBlock?.text ?? '';
 
   return parseResponse(responseText);
 }
@@ -200,7 +211,7 @@ export async function analyseCreativeAsset(
  *
  * If creative_asset_path is set but the file is missing, logs a warning
  * and falls through to MANUAL. If the API call fails for any other reason
- * (network, rate limit), logs a warning and falls through to MANUAL.
+ * (network, rate limit), the error is re-thrown — callers must abort.
  *
  * Note: scripts enforce ANTHROPIC_API_KEY presence BEFORE calling this
  * function when any READY row has creative_asset_path set.
@@ -218,14 +229,9 @@ export async function resolveCreativeContext(
       console.warn(`  ⚠  creative_asset_path not found: ${resolvedPath}`);
       console.warn('     Falling back to manual CSV text.');
     } else {
-      try {
-        const result = await analyseCreativeAsset(resolvedPath, mediaType);
-        return { ...result, source: 'ASSET' };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn(`  ⚠  Creative asset analysis failed: ${message}`);
-        console.warn('     Falling back to manual CSV text.');
-      }
+      // If analysis fails, re-throw — callers must abort, not fall back to manual text.
+      const result = await analyseCreativeAsset(resolvedPath, mediaType);
+      return { ...result, source: 'ASSET' };
     }
  
   }
