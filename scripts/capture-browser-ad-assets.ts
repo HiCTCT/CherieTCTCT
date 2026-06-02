@@ -31,7 +31,7 @@ import { parse } from 'csv-parse/sync';
 import * as fs   from 'fs';
 import * as path from 'path';
 import { chromium } from 'playwright';
-import type { Browser, BrowserContext, Page, ElementHandle } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -198,662 +198,372 @@ async function dismissOverlays(page: Page): Promise<void> {
 
 type BBox = { x: number; y: number; width: number; height: number };
 
-type ContainerHints = {
-  competitorName?: string;
-  headline?:       string;
-  adCopy?:         string;
-  description?:    string;
+// ─── Debug state ──────────────────────────────────────────────────────────────
+
+type DebugState = {
+  modalBBox:       BBox | null;
+  adCardBBox:      BBox | null;
+  creativeBBox:    BBox | null;
+  mediaType:       string;
+  playClicked:     boolean;
+  framesChanged:   boolean;
+  carouselNextBtn: string;
+  stopReason:      string;
+  notes:           string[];
 };
 
+function newDebugState(mt: string): DebugState {
+  return {
+    modalBBox: null, adCardBBox: null, creativeBBox: null,
+    mediaType: mt, playClicked: false, framesChanged: false,
+    carouselNextBtn: 'not attempted', stopReason: '', notes: [],
+  };
+}
+
+// ─── Modal detection ──────────────────────────────────────────────────────────
+
 /**
- * Use the ad_id to locate the specific ad card container on the page.
- *
- * Meta Ad Library places the ad_id in link hrefs and/or visible "Library ID"
- * text. We find those references, walk up the DOM, and return the bounding box
- * of the smallest ancestor that (a) has a reasonable size and (b) contains
- * media elements.
- *
- * Returns null if the container cannot be reliably identified.
+ * Waits up to 4 s for a [role="dialog"] to appear after navigation.
+ * Returns its BBox if found; null when the ad is rendered as page content.
  */
-async function findAdContainer(
-  page:     Page,
-  adId:     string,
-  hints:    ContainerHints = {},
-  debugOut: string[] = [],
+async function waitForModal(page: Page): Promise<BBox | null> {
+  try { await page.waitForSelector('[role="dialog"]', { timeout: 4000 }); }
+  catch { /* no dialog — ad may be main page content */ }
+  const r = await page.evaluate(() => {
+    for (const sel of ['[role="dialog"]', '[aria-modal="true"]']) {
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>(sel))) {
+        const b = el.getBoundingClientRect();
+        if (b.width > 200 && b.height > 200)
+          return { found: true as const, x: b.x, y: b.y, width: b.width, height: b.height };
+      }
+    }
+    return { found: false as const };
+  });
+  return r.found ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
+}
+
+// ─── Ad card detection ────────────────────────────────────────────────────────
+
+/**
+ * Finds the ad preview card (creative + Library ID + Active badge).
+ * Searches inside modal if present; otherwise searches full page.
+ */
+async function findAdCard(page: Page, modalBBox: BBox | null): Promise<BBox | null> {
+  const r = await page.evaluate((modal) => {
+    const M = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video';
+    const P = 30;
+    function inB(b: DOMRect): boolean {
+      if (!modal) return b.x > 100 && b.y > 40 && b.width < 900;
+      return b.x >= modal.x - P && b.y >= modal.y - P &&
+             b.x + b.width  <= modal.x + modal.width  + P &&
+             b.y + b.height <= modal.y + modal.height + P;
+    }
+    type C = { score: number; x: number; y: number; width: number; height: number };
+    const cands: C[] = [];
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>('div,section,article'))) {
+      const b = el.getBoundingClientRect();
+      if (!inB(b) || b.width < 200 || b.height < 200 || b.width > 900 || b.y < 40) continue;
+      const txt = (el.textContent ?? '').toLowerCase();
+      const mc  = el.querySelectorAll(M).length;
+      if (mc === 0 && txt.length < 80) continue;
+      let s = 0;
+      if (mc > 0) s += 5;
+      if (el.querySelector('img[src*="scontent"], img[src*="fbcdn.net"]')) s += 3;
+      if (el.querySelector('video')) s += 3;
+      if (txt.includes('library id')) s += 5;
+      if (txt.includes('active'))     s += 2;
+      if (b.width >= 300 && b.width <= 700) s += 2;
+      if (b.height >= 300) s += 1;
+      if (b.width > 700)   s -= 2;
+      if (s >= 3) cands.push({ score: s, x: b.x, y: b.y, width: b.width, height: b.height });
+    }
+    if (!cands.length) return { found: false as const };
+    cands.sort((a, b) => b.score - a.score);
+    return { found: true as const, ...cands[0]! };
+  }, modalBBox);
+  return r.found ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
+}
+
+// ─── Creative area detection ──────────────────────────────────────────────────
+
+/**
+ * Within the ad card, finds the specific creative element:
+ *   VIDEO    — <video> element, walking up to player wrapper
+ *   IMAGE    — largest CDN <img>
+ *   CAROUSEL — largest CDN <img> (first card)
+ * Falls back to adCardBBox when no specific element is found.
+ */
+async function findCreativeArea(
+  page: Page, adCardBBox: BBox, mediaType: string,
 ): Promise<BBox | null> {
-
-  // ── S1: ad_id in href or leaf text ────────────────────────────────────────
-  debugOut.push('S1: searching ad_id in hrefs and leaf text');
-  const s1 = await page.evaluate((id) => {
-    const MEDIA_SEL = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video';
-    const sources: Element[] = [
-      ...Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
-           .filter((a) => a.href.includes(id)),
-      ...Array.from(document.querySelectorAll<HTMLElement>('span, div, p'))
-           .filter((el) => {
-             if (el.childElementCount > 0) return false;
-             const t = (el.textContent ?? '').trim();
-             return t === id || (t.includes(id) && t.length <= id.length + 25);
-           }),
-    ];
-    for (const start of sources) {
-      let el: HTMLElement | null = start as HTMLElement;
-      let depth = 0;
-      while (el && depth < 25) {
-        el = el.parentElement; depth++;
-        if (!el) break;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 280 || rect.height < 200 || rect.width > 1100) continue;
-        if (el.querySelectorAll(MEDIA_SEL).length > 0)
-          return { found: true as const, x: rect.x, y: rect.y, width: rect.width, height: rect.height, sources: sources.length };
-      }
+  const isVid = mediaType.trim().toUpperCase() === 'VIDEO';
+  const r = await page.evaluate(({ card, vid }: { card: BBox; vid: boolean }) => {
+    const P = 15;
+    function inCard(b: DOMRect): boolean {
+      return b.x >= card.x - P && b.y >= card.y - P &&
+             b.x + b.width  <= card.x + card.width  + P &&
+             b.y + b.height <= card.y + card.height + P;
     }
-    return { found: false as const, sources: sources.length };
-  }, adId);
-
-  if (s1.found) {
-    debugOut.push('S1 success');
-    return { x: s1.x, y: s1.y, width: s1.width, height: s1.height };
-  }
-  debugOut.push(`S1 failed: ${s1.sources} source(s) found, none led to a media container`);
-
-  // ── S2: Walk up from "Library ID" label ──────────────────────────────────
-  debugOut.push('S2: searching Library ID label');
-  const s2 = await page.evaluate(() => {
-    const MEDIA_SEL = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video';
-    const labels = Array.from(document.querySelectorAll<HTMLElement>('span, div, p'))
-      .filter((el) => (el.textContent ?? '').trim().toLowerCase().startsWith('library id'));
-    for (const label of labels) {
-      let el: HTMLElement | null = label as HTMLElement;
-      let depth = 0;
-      while (el && depth < 20) {
-        el = el.parentElement; depth++;
-        if (!el) break;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 280 || rect.height < 200 || rect.width > 1100) continue;
-        if (el.querySelectorAll(MEDIA_SEL).length > 0)
-          return { found: true as const, x: rect.x, y: rect.y, width: rect.width, height: rect.height, labels: labels.length };
-      }
-    }
-    return { found: false as const, labels: labels.length };
-  });
-
-  if (s2.found) {
-    debugOut.push('S2 success');
-    return { x: s2.x, y: s2.y, width: s2.width, height: s2.height };
-  }
-  debugOut.push(`S2 failed: ${s2.labels} Library ID label(s), none led to a media container`);
-
-  // ── S3: CSV text hints (headline / ad_copy / competitor_name) ────────────
-  const hintPhrases: string[] = [];
-  for (const raw of [hints.headline, hints.adCopy, hints.competitorName, hints.description]) {
-    if (!raw?.trim()) continue;
-    const phrase = raw.trim().split(/\s+/).slice(0, 4).join(' ').toLowerCase();
-    if (phrase.length > 4) hintPhrases.push(phrase);
-  }
-
-  if (hintPhrases.length > 0) {
-    debugOut.push(`S3: hint phrases: ${hintPhrases.join(' | ')}`);
-    const s3 = await page.evaluate((phrases) => {
-      const MEDIA_SEL = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video, img';
-      const matches = Array.from(document.querySelectorAll<HTMLElement>('span, div, p, h1, h2, h3'))
-        .filter((el) => {
-          const t = (el.textContent ?? '').trim().toLowerCase();
-          return t.length < 500 && phrases.some((ph) => t.includes(ph));
-        });
-      for (const start of matches) {
-        let el: HTMLElement | null = start as HTMLElement;
-        let depth = 0;
-        while (el && depth < 20) {
-          el = el.parentElement; depth++;
-          if (!el) break;
-          const rect = el.getBoundingClientRect();
-          if (rect.width < 300 || rect.height < 250 || rect.width > 1000) continue;
-          if (rect.x < 150 || rect.y < 40) continue;
-          if (el.querySelectorAll(MEDIA_SEL).length > 0)
-            return { found: true as const, x: rect.x, y: rect.y, width: rect.width, height: rect.height, matches: matches.length };
+    if (vid) {
+      for (const v of Array.from(document.querySelectorAll<HTMLElement>('video'))) {
+        const b = v.getBoundingClientRect();
+        if (!inCard(b) || b.width < 100 || b.height < 80) continue;
+        let el: HTMLElement = v;
+        for (let i = 0; i < 5; i++) {
+          const p = el.parentElement;
+          if (!p) break;
+          const pb = p.getBoundingClientRect();
+          if (pb.width <= b.width + 60 && pb.height <= b.height + 80 && inCard(pb)) el = p;
+          else break;
         }
+        const fb = el.getBoundingClientRect();
+        return { found: true as const, x: fb.x, y: fb.y, width: fb.width, height: fb.height };
       }
-      return { found: false as const, matches: matches.length };
-    }, hintPhrases);
-
-    if (s3.found) {
-      debugOut.push('S3 success');
-      return { x: s3.x, y: s3.y, width: s3.width, height: s3.height };
     }
-    debugOut.push(`S3 failed: ${s3.matches} text match(es), none led to a media container`);
-  } else {
-    debugOut.push('S3 skipped: no usable hint phrases');
-  }
-
-  // ── S4: Scored card scan — main ad card heuristic ────────────────────────
-  // URL is already scoped to ?id=<adId>, so ANY card-like element on the
-  // page is the right ad.  Score each candidate; return the best.
-  debugOut.push('S4: scored card scan');
-  const s4 = await page.evaluate(() => {
-    type Cand = { score: number; x: number; y: number; width: number; height: number };
-    const MEDIA_SEL = 'img, video, canvas';
-    const CDN_SEL   = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]';
-    const candidates: Cand[] = [];
-
-    for (const el of Array.from(document.querySelectorAll<HTMLElement>('div, section, article'))) {
-      const rect = el.getBoundingClientRect();
-      if (rect.width  < 280  || rect.width  > 1000) continue;
-      if (rect.height < 250) continue;
-      if (rect.x      < 150) continue;
-      if (rect.y      <  40) continue;
-      if (rect.y      > 850) continue;
-
-      const text      = (el.textContent ?? '').toLowerCase();
-      const mediaCnt  = el.querySelectorAll(MEDIA_SEL).length;
-      const cdnCnt    = el.querySelectorAll(CDN_SEL).length;
-      const hasVideo  = !!el.querySelector('video');
-
-      // Must have media OR substantial text
-      if (mediaCnt === 0 && text.length < 80) continue;
-
-      let score = 0;
-      if (mediaCnt > 0) score += 3;
-      if (cdnCnt   > 0) score += 3;
-      if (hasVideo)     score += 2;
-      if (text.includes('library id'))  score += 5;
-      if (text.includes('active'))      score += 2;
-      if (text.includes('sponsored'))   score += 1;
-      // Centered on a 1280px viewport
-      if (rect.x >= 250 && rect.x + rect.width <= 1050) score += 2;
-      // Typical ad card width 300–700
-      if (rect.width >= 300 && rect.width <= 700) score += 2;
-      if (rect.height >= 400) score += 1;
-      if (rect.width  >  800) score -= 3; // penalise wide wrappers
-
-      candidates.push({ score, x: rect.x, y: rect.y, width: rect.width, height: rect.height });
-    }
-
-    if (candidates.length === 0) return { found: false as const, candidates: 0, bestScore: 0 };
-    candidates.sort((a, b) => b.score - a.score);
-    const best = candidates[0]!;
-    return { found: true as const, ...best, candidates: candidates.length };
-  });
-
-  if (s4.found && s4.score >= 3) {
-    debugOut.push(`S4 success: score=${s4.score}, candidates=${s4.candidates}`);
-    return { x: s4.x, y: s4.y, width: s4.width, height: s4.height };
-  }
-  const s4cands = (s4 as any).candidates ?? 0;
-  const s4score = (s4 as any).bestScore ?? (s4.found ? s4.score : 0);
-  debugOut.push(`S4 failed: ${s4cands} candidate(s), best score=${s4score} (min 3)`);
-
-  // ── S5: Broadest fallback — largest CDN media in plausible position ───────
-  debugOut.push('S5: broad CDN media scan');
-  const s5 = await page.evaluate(() => {
-    const els = Array.from(document.querySelectorAll<HTMLElement>(
-      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video',
-    ));
     let best: { x: number; y: number; width: number; height: number } | null = null;
-    let bestArea = 0;
-    for (const el of els) {
-      const rect = el.getBoundingClientRect();
-      if (rect.width < 150 || rect.height < 100) continue;
-      if (rect.x < 100 || rect.y < 40 || rect.y > 900) continue;
-      const area = rect.width * rect.height;
-      if (area > bestArea) { bestArea = area; best = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }; }
+    let bestA = 0;
+    for (const img of Array.from(document.querySelectorAll<HTMLImageElement>(
+      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]',
+    ))) {
+      const b = img.getBoundingClientRect();
+      if (!inCard(b) || b.width < 150 || b.height < 100) continue;
+      const a = b.width * b.height;
+      if (a > bestA) { bestA = a; best = { x: b.x, y: b.y, width: b.width, height: b.height }; }
     }
     return best ? { found: true as const, ...best } : { found: false as const };
+  }, { card: adCardBBox, vid: isVid });
+  if (r.found) return { x: r.x, y: r.y, width: r.width, height: r.height };
+  return adCardBBox; // last resort: use the full ad card
+}
+
+// ─── Screenshot helpers ───────────────────────────────────────────────────────
+
+function bufferSig(buf: Buffer): string {
+  return `${buf.length}|${buf.subarray(0, 1024).toString('base64')}`;
+}
+
+async function screenshotCreative(page: Page, bbox: BBox, outPath: string): Promise<void> {
+  await page.screenshot({
+    path: outPath,
+    clip: {
+      x:      Math.max(0, Math.floor(bbox.x)),
+      y:      Math.max(0, Math.floor(bbox.y)),
+      width:  Math.max(1, Math.ceil(bbox.width)),
+      height: Math.max(1, Math.ceil(bbox.height)),
+    },
   });
-
-  if (s5.found) {
-    debugOut.push('S5 success');
-    return { x: s5.x, y: s5.y, width: s5.width, height: s5.height };
-  }
-  debugOut.push('S5 failed: no CDN media in plausible position');
-  return null;
-}
-/**
- * Find the best creative media element within an optional container BBox.
- * When containerBBox is given, only elements whose centre falls inside it
- * are considered.  Falls back to page-wide search if nothing is found.
- */
-async function findCreativeElement(
-  page:          Page,
-  containerBBox: BBox | null = null,
-): Promise<ElementHandle | null> {
-
-  function inBox(box: BBox): boolean {
-    if (!containerBBox) return true;
-    const cx = box.x + box.width  / 2;
-    const cy = box.y + box.height / 2;
-    return (
-      cx >= containerBBox.x - 20 &&
-      cx <= containerBBox.x + containerBBox.width  + 20 &&
-      cy >= containerBBox.y - 20 &&
-      cy <= containerBBox.y + containerBBox.height + 20
-    );
-  }
-
-  const selectors = [
-    'video',
-    'img[src*="scontent"]',
-    'img[src*="fbcdn.net"]',
-    '[role="img"]',
-  ];
-
-  for (const sel of selectors) {
-    try {
-      const els  = await page.$$(sel);
-      let best: ElementHandle | null = null;
-      let bestArea = 0;
-      for (const el of els) {
-        const box = await el.boundingBox();
-        if (!box || box.width < 100 || box.height < 80) continue;
-        if (!inBox(box)) continue;
-        const area = box.width * box.height;
-        if (area > bestArea) { bestArea = area; best = el; }
-      }
-      if (best) return best;
-    } catch { /* ignore */ }
-  }
-  return null;
 }
 
-/**
- * Screenshot a container BBox region, falling back to element.screenshot(),
- * then to a wide viewport clip.
- */
-async function screenshotRegion(
-  page:          Page,
-  containerBBox: BBox | null,
-  outPath:       string,
-): Promise<void> {
-  // Prefer clip from the container bbox (consistent region every time)
-  if (containerBBox) {
-    try {
-      await page.screenshot({
-        path: outPath,
-        clip: {
-          x:      Math.max(0, containerBBox.x - 5),
-          y:      Math.max(0, containerBBox.y - 5),
-          width:  Math.min(1280, containerBBox.width  + 10),
-          height: Math.min(900,  containerBBox.height + 10),
-        },
-      });
-      return;
-    } catch { /* fall through */ }
-  }
-  // Generic viewport fallback
-  await page.screenshot({ path: outPath, clip: { x: 150, y: 80, width: 900, height: 720 } });
-}
+// ─── Debug info ───────────────────────────────────────────────────────────────
 
-/** Save debug files when DEBUG_CAPTURE=true. */
 async function saveDebugInfo(
-  page:          Page,
-  adId:          string,
-  containerBBox: BBox | null,
-  outDir:        string,
-  strategy:      string,
-  rejected:      string[],
-  debugLines:    string[] = [],
+  page: Page, adId: string, outDir: string, state: DebugState,
 ): Promise<void> {
   if (!DEBUG_CAPTURE_GLOBAL) return;
   fs.mkdirSync(outDir, { recursive: true });
-  try {
-    await page.screenshot({ path: path.join(outDir, `debug-full-page-${adId}.png`), fullPage: true });
-  } catch { /* ignore */ }
-  if (containerBBox) {
-    try {
-      await page.screenshot({
-        path: path.join(outDir, `debug-selected-container-${adId}.png`),
-        clip: containerBBox,
-      });
-    } catch { /* ignore */ }
+  try { await page.screenshot({ path: path.join(outDir, `debug-full-page-${adId}.png`), fullPage: true }); }
+  catch { /* ignore */ }
+  if (state.modalBBox) {
+    try { await page.screenshot({ path: path.join(outDir, `debug-modal-${adId}.png`), clip: state.modalBBox }); }
+    catch { /* ignore */ }
+  }
+  if (state.adCardBBox) {
+    try { await page.screenshot({ path: path.join(outDir, `debug-ad-card-${adId}.png`), clip: state.adCardBBox }); }
+    catch { /* ignore */ }
+  }
+  if (state.creativeBBox) {
+    try { await screenshotCreative(page, state.creativeBBox, path.join(outDir, `debug-selected-creative-${adId}.png`)); }
+    catch { /* ignore */ }
   }
   const info = [
-    `ad_id: ${adId}`,
-    `strategy: ${strategy}`,
-    `container: ${containerBBox ? JSON.stringify(containerBBox) : 'null'}`,
-    `rejected: ${rejected.join('; ') || 'none'}`,
+    `ad_id:                ${adId}`,
+    `modal found:          ${state.modalBBox ? JSON.stringify(state.modalBBox) : 'no'}`,
+    `ad card found:        ${state.adCardBBox ? JSON.stringify(state.adCardBBox) : 'no'}`,
+    `creative bbox:        ${state.creativeBBox ? JSON.stringify(state.creativeBBox) : 'null'}`,
+    `media type:           ${state.mediaType}`,
+    `play clicked:         ${state.playClicked}`,
+    `video frames changed: ${state.framesChanged}`,
+    `carousel next btn:    ${state.carouselNextBtn}`,
+    `stop reason:          ${state.stopReason || 'none'}`,
     '',
-    '── Container search log ──',
-    ...debugLines,
+    '── Notes ──',
+    ...state.notes,
   ].join('\n');
   fs.writeFileSync(path.join(outDir, `debug-container-info-${adId}.txt`), info, 'utf-8');
 }
 
-// ─── Shared helpers ───────────────────────────────────────────────────────────
+// ─── Play button helper ───────────────────────────────────────────────────────
 
-/** Compute a visual signature for duplicate/change detection. */
-function bufferSig(buf: Buffer): string {
-  return `${buf.length}|${buf.subarray(0, 1024).toString('base64')}`;
+async function clickPlayButton(page: Page, creativeBBox: BBox): Promise<boolean> {
+  await page.mouse.move(
+    creativeBBox.x + creativeBBox.width  / 2,
+    creativeBBox.y + creativeBBox.height / 2,
+  );
+  await page.waitForTimeout(400);
+  const labelled = await page.evaluate((bbox) => {
+    for (const btn of Array.from(document.querySelectorAll<HTMLElement>(
+      '[aria-label*="Play" i], [aria-label*="play" i], [data-testid*="play" i]',
+    ))) {
+      const r = btn.getBoundingClientRect();
+      const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+      if (cx >= bbox.x && cx <= bbox.x + bbox.width && cy >= bbox.y && cy <= bbox.y + bbox.height) {
+        btn.click(); return true;
+      }
+    }
+    return false;
+  }, creativeBBox);
+  if (!labelled) {
+    await page.mouse.click(
+      creativeBBox.x + creativeBBox.width  / 2,
+      creativeBBox.y + creativeBBox.height / 2,
+    );
+  }
+  return labelled;
+}
+
+// ─── Carousel next-button helper ─────────────────────────────────────────────
+
+async function findCarouselNextButton(
+  page: Page, creativeBBox: BBox,
+): Promise<{ x: number; y: number } | null> {
+  // Hover right edge to reveal controls
+  await page.mouse.move(
+    creativeBBox.x + creativeBBox.width * 0.92,
+    creativeBBox.y + creativeBBox.height / 2,
+  );
+  await page.waitForTimeout(500);
+
+  // Strategy A: aria-label "next/forward/right" near creative right edge
+  const sA = await page.evaluate((bbox) => {
+    const rh = bbox.x + bbox.width * 0.5;
+    const re = bbox.x + bbox.width;
+    for (const btn of Array.from(document.querySelectorAll<HTMLElement>(
+      '[aria-label*="next" i], [aria-label*="forward" i], [aria-label*="right" i], [data-testid*="next" i]',
+    ))) {
+      const r = btn.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+      if (cx < rh || cx > re + 100) continue;
+      if (cy < bbox.y - 60 || cy > bbox.y + bbox.height + 60) continue;
+      return { x: cx, y: cy };
+    }
+    return null;
+  }, creativeBBox);
+  if (sA) return sA;
+
+  // Strategy B: any small button near the right edge (post-hover reveal)
+  return await page.evaluate((bbox) => {
+    const rh = bbox.x + bbox.width * 0.55;
+    const re = bbox.x + bbox.width;
+    for (const btn of Array.from(document.querySelectorAll<HTMLElement>(
+      'button, [role="button"], div[tabindex="0"]',
+    ))) {
+      const r = btn.getBoundingClientRect();
+      if (!r.width || !r.height || r.width > 80) continue;
+      const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+      if (cx < rh || cx > re + 80) continue;
+      if (cy < bbox.y + 20 || cy > bbox.y + bbox.height - 20) continue;
+      return { x: cx, y: cy };
+    }
+    return null;
+  }, creativeBBox);
 }
 
 // ─── Capture functions ────────────────────────────────────────────────────────
 
 async function captureImage(
-  page:          Page,
-  outDir:        string,
-  containerBBox: BBox | null,
+  page: Page, outDir: string, creativeBBox: BBox,
 ): Promise<string[]> {
   fs.mkdirSync(outDir, { recursive: true });
-  try {
-    await page.waitForSelector(
-      'img[src*="scontent"], img[src*="fbcdn.net"], video',
-      { timeout: MEDIA_WAIT },
-    );
-  } catch { /* proceed with whatever is loaded */ }
-
-  const outPath = path.join(outDir, 'image-01.png');
-  await screenshotRegion(page, containerBBox, outPath);
-  return [outPath];
-}
-
-// ─── Carousel helpers ────────────────────────────────────────────────────────
-
-type AdvanceResult =
-  | { advanced: true;  strategy: string }
-  | { advanced: false; reason: string };
-
-/**
- * Attempt to advance a carousel to the next card.
- *
- * Strategy order:
- *   1. Hover the creative area (right-middle) to reveal Meta hover-only controls
- *   2. JS DOM click — find any [aria-label*="next"] element and call .click()
- *      (most reliable on React SPAs; bypasses Playwright visibility edge-cases)
- *   3. Position-restricted Playwright click — only elements within 120 px of
- *      the creative's right edge and vertically aligned with the creative
- *   4. Keyboard ArrowRight (focused on creative)
- *   5. Coordinate click — 90% across, 50% down the creative bounding box
- */
-async function tryAdvanceCarousel(
-  page:         Page,
-  creativeBBox: BBox | null,
-  cardNum:      number,
-  outDir:       string,
-): Promise<AdvanceResult> {
-
-  // ── Step 1: hover right-middle of creative to reveal carousel controls ────
-  if (creativeBBox) {
-    try {
-      const hx = creativeBBox.x + creativeBBox.width * 0.85;
-      const hy = creativeBBox.y + creativeBBox.height * 0.50;
-      await page.mouse.move(hx, hy);
-      await page.waitForTimeout(800); // wait for hover controls to appear
-    } catch { /* ignore */ }
-  }
-
-  // ── Optional debug screenshot: before advance ─────────────────────────────
-  if (DEBUG_CAPTURE_GLOBAL) {
-    try {
-      const dbgPath = path.join(outDir, `debug-before-next-${String(cardNum).padStart(2, '0')}.png`);
-      await page.screenshot({ path: dbgPath });
-    } catch { /* ignore */ }
-  }
-
-  // ── Step 2: JS DOM click on any aria-label containing "next" ─────────────
-  // This runs inside the page context — no Playwright selector matching needed
-  const jsResult = await page.evaluate(() => {
-    const candidates = Array.from(
-      document.querySelectorAll<HTMLElement>('[aria-label]'),
-    );
-    for (const el of candidates) {
-      const label = (el.getAttribute('aria-label') ?? '').toLowerCase();
-      if (!label.includes('next')) continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) continue;
-      // Skip large elements (not carousel arrow buttons)
-      if (rect.width > 100 || rect.height > 100) continue;
-      el.click();
-      return {
-        found: true,
-        label: el.getAttribute('aria-label') ?? '',
-        x: Math.round(rect.x),
-        y: Math.round(rect.y),
-        w: Math.round(rect.width),
-        h: Math.round(rect.height),
-      };
-    }
-    return { found: false, label: '', x: 0, y: 0, w: 0, h: 0 };
-  }) as { found: boolean; label: string; x: number; y: number; w: number; h: number };
-
-  if (jsResult.found) {
-    await page.waitForTimeout(900);
-    console.log(
-      `       → JS click: aria-label="${jsResult.label}" ` +
-      `at (${jsResult.x},${jsResult.y}) ${jsResult.w}×${jsResult.h}`,
-    );
-
-    // ── Optional debug screenshot: after advance ───────────────────────────
-    if (DEBUG_CAPTURE_GLOBAL) {
-      try {
-        const dbgPath = path.join(outDir, `debug-after-next-${String(cardNum).padStart(2, '0')}.png`);
-        await page.screenshot({ path: dbgPath });
-      } catch { /* ignore */ }
-    }
-
-    return { advanced: true, strategy: `js:aria-label="${jsResult.label}"` };
-  }
-
-  // ── Step 3: position-restricted Playwright selector ───────────────────────
-  // Only consider elements within 120 px right of the creative and vertically aligned
-  if (creativeBBox) {
-    const rightBound  = creativeBBox.x + creativeBBox.width + 120;
-    const leftBound   = creativeBBox.x + creativeBBox.width * 0.5; // right half only
-    const topBound    = creativeBBox.y - 40;
-    const bottomBound = creativeBBox.y + creativeBBox.height + 40;
-
-    const restrictedSelectors = [
-      'button[aria-label*="Next" i]',
-      'div[aria-label*="Next" i]',
-      '[role="button"][aria-label*="Next" i]',
-    ];
-
-    for (const sel of restrictedSelectors) {
-      try {
-        const els = await page.$$(sel);
-        for (const el of els) {
-          if (!(await el.isVisible())) continue;
-          const box = await el.boundingBox();
-          if (!box) continue;
-          const cx = box.x + box.width  / 2;
-          const cy = box.y + box.height / 2;
-          if (cx < leftBound || cx > rightBound) continue;
-          if (cy < topBound  || cy > bottomBound) continue;
-          if (box.width > 100 || box.height > 100) continue;
-
-          console.log(
-            `       → Playwright "${sel}" ` +
-            `at (${Math.round(box.x)},${Math.round(box.y)}) ` +
-            `${Math.round(box.width)}×${Math.round(box.height)}`,
-          );
-          await el.click({ force: true });
-          await page.waitForTimeout(900);
-          return { advanced: true, strategy: `playwright:${sel}` };
-        }
-      } catch { /* ignore */ }
-    }
-  }
-
-  // ── Step 4: keyboard ArrowRight ───────────────────────────────────────────
-  try {
-    await page.keyboard.press('ArrowRight');
-    await page.waitForTimeout(800);
-    console.log('       → keyboard:ArrowRight');
-    return { advanced: true, strategy: 'keyboard:ArrowRight' };
-  } catch { /* ignore */ }
-
-  // ── Step 5: coordinate click — 90% right, 50% down the creative bbox ──────
-  if (creativeBBox) {
-    const clickX = creativeBBox.x + creativeBBox.width  * 0.90;
-    const clickY = creativeBBox.y + creativeBBox.height * 0.50;
-    console.log(`       → coordinate click at (${Math.round(clickX)},${Math.round(clickY)})`);
-    try {
-      await page.mouse.click(clickX, clickY);
-      await page.waitForTimeout(800);
-      return { advanced: true, strategy: 'coordinate:right-middle' };
-    } catch { /* ignore */ }
-  }
-
-  return { advanced: false, reason: 'no next control found via any strategy' };
-}
-
-async function captureCarousel(
-  page:          Page,
-  outDir:        string,
-  containerBBox: BBox | null,
-): Promise<string[]> {
-  fs.mkdirSync(outDir, { recursive: true });
-  const saved:    string[]    = [];
-  const seenSigs: Set<string> = new Set();
-  let noChanges = 0;
-
-  try {
-    await page.waitForSelector(
-      'img[src*="scontent"], img[src*="fbcdn.net"]',
-      { timeout: MEDIA_WAIT },
-    );
-  } catch { /* proceed with whatever loaded */ }
-
-  // If no container from ad-id detection, try to find media within any container
-  const initBox: BBox | null = containerBBox ?? (() => {
-    // Can't do async here — fall back to generic clip below
-    return null;
-  })();
-
-  console.log(
-    `       creative container: ${
-      initBox
-        ? `${Math.round(initBox.width)}×${Math.round(initBox.height)} ` +
-          `at (${Math.round(initBox.x)},${Math.round(initBox.y)})`
-        : 'not found — will use viewport clip'
-    }`,
-  );
-
-  // Fixed clip region — consistent across all card screenshots
-  const clip: BBox = initBox
-    ? {
-        x:      Math.max(0, initBox.x - 5),
-        y:      Math.max(0, initBox.y - 5),
-        width:  Math.min(1280 - Math.max(0, initBox.x - 5), initBox.width  + 10),
-        height: Math.min(900  - Math.max(0, initBox.y - 5), initBox.height + 10),
-      }
-    : { x: 150, y: 80, width: 900, height: 700 };
-
-  let nextCandidateCount = 0;
-
-  for (let cardNum = 1; cardNum <= CAROUSEL_MAX; cardNum++) {
-
-    // Capture the creative clip region
-    let buf: Buffer;
-    try {
-      buf = await page.screenshot({ clip }) as Buffer;
-    } catch {
-      buf = await page.screenshot() as Buffer;
-    }
-
-    const sig = bufferSig(buf as Buffer);
-    if (seenSigs.has(sig)) {
-      console.log(`       card ${cardNum}: duplicate — stopping. Reason: screenshot region unchanged`);
-      console.log(`       total cards captured: ${saved.length}`);
-      break;
-    }
-    seenSigs.add(sig);
-
-    const outPath = path.join(outDir, `card-${String(cardNum).padStart(2, '0')}.png`);
-    fs.writeFileSync(outPath, buf);
-    saved.push(outPath);
-    console.log(`       card ${cardNum}: saved`);
-
-    // Count visible next-button candidates for diagnostic logging
-    try {
-      nextCandidateCount = await page.evaluate(() =>
-        Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
-          .filter((el) => {
-            const label = (el.getAttribute('aria-label') ?? '').toLowerCase();
-            if (!label.includes('next')) return false;
-            const r = el.getBoundingClientRect();
-            return r.width > 0 && r.height > 0 && r.width <= 100 && r.height <= 100;
-          }).length,
-      );
-      console.log(`       next candidates visible: ${nextCandidateCount}`);
-    } catch { /* ignore */ }
-
-    // Attempt to advance
-    const result = await tryAdvanceCarousel(page, initBox, cardNum, outDir);
-
-    if (!result.advanced) {
-      console.log(`       stop reason: ${result.reason}`);
-      noChanges++;
-    } else {
-      // Verify the clip region actually changed
-      let freshBuf: Buffer;
-      try { freshBuf = await page.screenshot({ clip }) as Buffer; }
-      catch { freshBuf = await page.screenshot() as Buffer; }
-
-      if (bufferSig(freshBuf as Buffer) !== sig) {
-        console.log(`       strategy worked: ${result.strategy}`);
-        noChanges = 0;
-      } else {
-        console.log(`       strategy "${result.strategy}" — clip unchanged`);
-        noChanges++;
-      }
-    }
-
-    if (noChanges >= 2) {
-      console.log(`       carousel stopped: no card change after ${noChanges} attempts`);
-      break;
-    }
-  }
-
-  console.log(`       total cards captured: ${saved.length}`);
-  return saved;
+  const out = path.join(outDir, 'image-01.png');
+  await screenshotCreative(page, creativeBBox, out);
+  return [out];
 }
 
 async function captureVideo(
-  page:          Page,
-  outDir:        string,
-  containerBBox: BBox | null,
+  page: Page, outDir: string, creativeBBox: BBox, dbg: DebugState,
 ): Promise<string[]> {
   fs.mkdirSync(outDir, { recursive: true });
-  const saved: string[] = [];
+  const files: string[] = [];
+  const sigs:  string[] = [];
 
-  try {
-    await page.waitForSelector(
-      'video, img[src*="scontent"], img[src*="fbcdn.net"]',
-      { timeout: MEDIA_WAIT },
+  dbg.playClicked = await clickPlayButton(page, creativeBBox);
+  dbg.notes.push(`play: labelled button found=${dbg.playClicked}`);
+  await page.waitForTimeout(2500);
+
+  for (let i = 1; i <= 3; i++) {
+    if (i > 1) await page.waitForTimeout(2000);
+    const fp = path.join(outDir, `frame-0${i}.png`);
+    await screenshotCreative(page, creativeBBox, fp);
+    const sig = bufferSig(fs.readFileSync(fp));
+    if (sigs.includes(sig)) {
+      fs.unlinkSync(fp);
+      dbg.notes.push(`frame-0${i}: duplicate — not saved`);
+    } else {
+      sigs.push(sig); files.push(fp);
+      dbg.notes.push(`frame-0${i}: saved`);
+    }
+  }
+
+  dbg.framesChanged = files.length > 1;
+
+  if (files.length === 1) {
+    dbg.notes.push('warning: only one unique frame — playback may not have started');
+    fs.writeFileSync(
+      path.join(outDir, 'video-capture-notes.txt'),
+      `ad_id: ${path.basename(outDir)}\nOnly thumbnail captured. Playback may not have started.\n\n${dbg.notes.join('\n')}`,
+      'utf-8',
     );
-  } catch { /* proceed */ }
-
-  // Try to click Play within the container to start the video
-  if (containerBBox) {
-    try {
-      const el = await findCreativeElement(page, containerBBox);
-      if (el) await el.click();
-      await page.waitForTimeout(800);
-    } catch { /* ignore */ }
   }
-
-  // Frame 1
-  const frame1 = path.join(outDir, 'frame-01.png');
-  await screenshotRegion(page, containerBBox, frame1);
-  saved.push(frame1);
-
-  // Frame 2 — 2 s later; only save if visually different from frame 1
-  await page.waitForTimeout(2_000);
-  const frame2Path = path.join(outDir, 'frame-02.png');
-  await screenshotRegion(page, containerBBox, frame2Path);
-
-  const f1 = fs.readFileSync(frame1);
-  const f2 = fs.readFileSync(frame2Path);
-  if (bufferSig(f2) !== bufferSig(f1)) {
-    saved.push(frame2Path);
-  } else {
-    fs.unlinkSync(frame2Path);
-    console.log('       frame-02: identical to frame-01 — not saved');
-  }
-
-  return saved;
+  return files;
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+async function captureCarousel(
+  page: Page, outDir: string, creativeBBox: BBox, dbg: DebugState,
+): Promise<string[]> {
+  fs.mkdirSync(outDir, { recursive: true });
+  const files: string[] = [];
+  const sigs:  string[] = [];
+
+  for (let n = 1; n <= CAROUSEL_MAX; n++) {
+    await page.waitForTimeout(600);
+    const lbl  = String(n).padStart(2, '0');
+    const fp   = path.join(outDir, `card-${lbl}.png`);
+
+    await screenshotCreative(page, creativeBBox, fp);
+    const sig = bufferSig(fs.readFileSync(fp));
+
+    if (sigs.includes(sig)) {
+      fs.unlinkSync(fp);
+      dbg.notes.push(`card-${lbl}: duplicate — stopping`);
+      dbg.carouselNextBtn = `stopped at card ${n} (duplicate)`;
+      break;
+    }
+    sigs.push(sig); files.push(fp);
+    dbg.notes.push(`card-${lbl}: saved`);
+    console.log(`       card-${lbl}: saved`);
+
+    if (n === CAROUSEL_MAX) break;
+
+    const nxt = await findCarouselNextButton(page, creativeBBox);
+    if (!nxt) {
+      dbg.notes.push(`card-${lbl}: no next button — stopping`);
+      dbg.carouselNextBtn = `not found after card ${n}`;
+      break;
+    }
+    dbg.carouselNextBtn = `clicked at (${Math.round(nxt.x)},${Math.round(nxt.y)})`;
+
+    // JS DOM click — reliable for React SPAs
+    const dc = await page.evaluate((pos) => {
+      const el = document.elementFromPoint(pos.x, pos.y) as HTMLElement | null;
+      if (el) { el.click(); return true; }
+      return false;
+    }, nxt);
+    if (!dc) await page.mouse.click(nxt.x, nxt.y);
+  }
+  return files;
+}
+
 
 async function main(): Promise<void> {
   const inputFile = path.resolve(INPUT_FILE);
@@ -983,50 +693,60 @@ async function main(): Promise<void> {
         continue;
       }
 
-      // ── Locate correct ad container ──────────────────────────────────────
-      const containerDebug: string[] = [];
-      const containerBBox = await findAdContainer(page, adId, {
-        competitorName: name,
-        headline:       row.headline,
-        adCopy:         row.ad_copy,
-        description:    row.description,
-      }, containerDebug);
-      const rejected: string[] = [];
+      // ── 1. Modal detection ────────────────────────────────────────────────
+      const dbg       = newDebugState(mt);
+      const modalBBox = await waitForModal(page);
+      dbg.modalBBox   = modalBBox;
+      dbg.notes.push(modalBBox
+        ? `modal: ${Math.round(modalBBox.width)}×${Math.round(modalBBox.height)} at (${Math.round(modalBBox.x)},${Math.round(modalBBox.y)})`
+        : 'modal: not found — using page layout');
+      console.log(`    modal: ${modalBBox
+        ? `${Math.round(modalBBox.width)}×${Math.round(modalBBox.height)} at (${Math.round(modalBBox.x)},${Math.round(modalBBox.y)})`
+        : 'not found'}`);
 
-      if (containerBBox) {
-        console.log(
-          `    container: ${Math.round(containerBBox.width)}×${Math.round(containerBBox.height)} ` +
-          `at (${Math.round(containerBBox.x)},${Math.round(containerBBox.y)})`,
-        );
-      } else {
-        console.log('    ⚠  container not found by ad_id — using page heuristic');
-        rejected.push('ad_id not found in DOM');
-      }
-
-      await saveDebugInfo(
-        page, adId, containerBBox, outDir,
-        containerBBox ? 'found' : 'not-found', rejected, containerDebug,
-      );
-      if (!containerBBox) {
-        console.log('    SKIPPED — could not identify correct creative container');
+      // ── 2. Ad card detection ─────────────────────────────────────────────
+      const adCardBBox = await findAdCard(page, modalBBox);
+      dbg.adCardBBox   = adCardBBox;
+      if (!adCardBBox) {
+        dbg.stopReason = 'ad card not found';
+        await saveDebugInfo(page, adId, outDir, dbg);
+        console.log('    SKIPPED — could not identify modal creative container');
         noContainer++;
         await page.close();
         continue;
       }
+      console.log(`    ad card: ${Math.round(adCardBBox.width)}×${Math.round(adCardBBox.height)} at (${Math.round(adCardBBox.x)},${Math.round(adCardBBox.y)})`);
+      dbg.notes.push(`ad card: ${Math.round(adCardBBox.width)}×${Math.round(adCardBBox.height)} at (${Math.round(adCardBBox.x)},${Math.round(adCardBBox.y)})`);
 
-      // ── Dispatch ────────────────────────────────────────────────────────────────────
+      // ── 3. Creative area ─────────────────────────────────────────────────
+      const creativeBBox = await findCreativeArea(page, adCardBBox, mt);
+      dbg.creativeBBox   = creativeBBox;
+      if (!creativeBBox) {
+        dbg.stopReason = 'creative area not found in ad card';
+        await saveDebugInfo(page, adId, outDir, dbg);
+        console.log('    SKIPPED — could not identify modal creative container');
+        noContainer++;
+        await page.close();
+        continue;
+      }
+      console.log(`    creative: ${Math.round(creativeBBox.width)}×${Math.round(creativeBBox.height)} at (${Math.round(creativeBBox.x)},${Math.round(creativeBBox.y)})`);
+      dbg.notes.push(`creative: ${Math.round(creativeBBox.width)}×${Math.round(creativeBBox.height)} at (${Math.round(creativeBBox.x)},${Math.round(creativeBBox.y)})`);
+
+      // ── Dispatch ──────────────────────────────────────────────────────────
       let savedFiles: string[] = [];
 
       if (mt === 'CAROUSEL') {
         console.log('    capturing carousel…');
-        savedFiles = await captureCarousel(page, outDir, containerBBox);
+        savedFiles = await captureCarousel(page, outDir, creativeBBox, dbg);
       } else if (mt === 'IMAGE') {
         console.log('    capturing image…');
-        savedFiles = await captureImage(page, outDir, containerBBox);
+        savedFiles = await captureImage(page, outDir, creativeBBox);
       } else {
         console.log(`    capturing video frames (type: ${mt || 'unknown'})…`);
-        savedFiles = await captureVideo(page, outDir, containerBBox);
+        savedFiles = await captureVideo(page, outDir, creativeBBox, dbg);
       }
+
+      await saveDebugInfo(page, adId, outDir, dbg);
 
       const relPath = path.relative(process.cwd(), outDir).replace(/\\/g, '/');
       row.creative_asset_path = relPath;
