@@ -21,7 +21,7 @@
  *   data/imports/{original-name}.with-assets.csv
  *   data/creative-assets/{safeCompetitorName}/{ad_id}/
  *
- * Asset naming:
+ * Asset naming (quality-gated capture; video uses playback-confirmed frames):
  *   IMAGE    → image-01.png
  *   CAROUSEL → card-01.png, card-02.png, …
  *   VIDEO    → frame-01.png, frame-02.png
@@ -226,20 +226,58 @@ function newDebugState(mt: string): DebugState {
  * Waits up to 4 s for a [role="dialog"] to appear after navigation.
  * Returns its BBox if found; null when the ad is rendered as page content.
  */
-async function waitForModal(page: Page): Promise<BBox | null> {
+async function waitForModal(page: Page): Promise<{ bbox: BBox | null; notes: string[] }> {
   try { await page.waitForSelector('[role="dialog"]', { timeout: 4000 }); }
   catch { /* no dialog — ad may be main page content */ }
+
   const r = await page.evaluate(() => {
+    const elems: HTMLElement[] = [];
     for (const sel of ['[role="dialog"]', '[aria-modal="true"]']) {
-      for (const el of Array.from(document.querySelectorAll<HTMLElement>(sel))) {
-        const b = el.getBoundingClientRect();
-        if (b.width > 200 && b.height > 200)
-          return { found: true as const, x: b.x, y: b.y, width: b.width, height: b.height };
+      for (const e of Array.from(document.querySelectorAll<HTMLElement>(sel))) elems.push(e);
+    }
+
+    const log: string[] = [];
+    let bestScore = -1;
+    let best: { x: number; y: number; width: number; height: number; reason: string } | null = null;
+
+    for (const el of elems) {
+      const b = el.getBoundingClientRect();
+      const dims = `${Math.round(b.width)}x${Math.round(b.height)} at (${Math.round(b.x)},${Math.round(b.y)})`;
+      // Hard reject: too small or far-right narrow side panel (the old skinny-modal bug).
+      if (b.width < 350 || b.height < 300) { log.push(`reject ${dims}: too small`); continue; }
+      if (b.x > 900 && b.width < 450)      { log.push(`reject ${dims}: far-right narrow side panel`); continue; }
+
+      const txt   = (el.textContent ?? '').toLowerCase();
+      const ctrX  = b.x + b.width / 2;
+      let score   = 0;
+      let reason  = `w=${Math.round(b.width)} x=${Math.round(b.x)}`;
+
+      if (txt.includes('link to ad')) { score += 6; reason += ' [link-to-ad]'; }
+      if (txt.includes('library id')) { score += 3; reason += ' [library-id]'; }
+      if (b.width >= 450)             { score += 3; reason += ' [wide]'; }
+      if (ctrX < 900)                 { score += 2; reason += ' [centered]'; }
+      if (b.x < 500)                  { score += 1; reason += ' [left-half]'; }
+
+      log.push(`consider ${dims}: score=${score} ${reason}`);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { x: b.x, y: b.y, width: b.width, height: b.height, reason };
       }
     }
-    return { found: false as const };
+
+    if (!best) return { found: false as const, reason: 'no modal passed filters', log };
+    return { found: true as const, ...best, log };
   });
-  return r.found ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
+
+  const notes: string[] = ['── Modal detection ──', ...r.log];
+  if (r.found) {
+    console.log(`    modal accepted: ${Math.round(r.width)}x${Math.round(r.height)} [${r.reason}]`);
+    notes.push(`ACCEPTED modal: ${Math.round(r.width)}x${Math.round(r.height)} [${r.reason}]`);
+    return { bbox: { x: r.x, y: r.y, width: r.width, height: r.height }, notes };
+  }
+  console.log(`    modal: not found (${r.reason})`);
+  notes.push(`no modal accepted (${r.reason}) — using page layout`);
+  return { bbox: null, notes };
 }
 
 // ─── Ad card detection ────────────────────────────────────────────────────────
@@ -252,17 +290,16 @@ async function findAdCard(page: Page, modalBBox: BBox | null): Promise<BBox | nu
   const r = await page.evaluate((modal) => {
     const M = 'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video';
     const P = 30;
-    function inB(b: DOMRect): boolean {
-      if (!modal) return b.x > 100 && b.y > 40 && b.width < 900;
-      return b.x >= modal.x - P && b.y >= modal.y - P &&
-             b.x + b.width  <= modal.x + modal.width  + P &&
-             b.y + b.height <= modal.y + modal.height + P;
-    }
     type C = { score: number; x: number; y: number; width: number; height: number };
     const cands: C[] = [];
     for (const el of Array.from(document.querySelectorAll<HTMLElement>('div,section,article'))) {
       const b = el.getBoundingClientRect();
-      if (!inB(b) || b.width < 200 || b.height < 200 || b.width > 900 || b.y < 40) continue;
+      const insideModal = !modal
+        ? (b.x > 100 && b.y > 40 && b.width < 900)
+        : (b.x >= modal.x - P && b.y >= modal.y - P &&
+           b.x + b.width  <= modal.x + modal.width  + P &&
+           b.y + b.height <= modal.y + modal.height + P);
+      if (!insideModal || b.width < 200 || b.height < 200 || b.width > 900 || b.y < 40) continue;
       const txt = (el.textContent ?? '').toLowerCase();
       const mc  = el.querySelectorAll(M).length;
       if (mc === 0 && txt.length < 80) continue;
@@ -287,53 +324,242 @@ async function findAdCard(page: Page, modalBBox: BBox | null): Promise<BBox | nu
 // ─── Creative area detection ──────────────────────────────────────────────────
 
 /**
- * Within the ad card, finds the specific creative element:
- *   VIDEO    — <video> element, walking up to player wrapper
- *   IMAGE    — largest CDN <img>
- *   CAROUSEL — largest CDN <img> (first card)
- * Falls back to adCardBBox when no specific element is found.
+ * Finds the specific creative element inside the ad card and rejects anything
+ * that is not the real ad creative (Meta placeholder/empty-state illustrations,
+ * static UI resources, emoji, SVG, profile avatars, logos, reaction icons, and
+ * extreme-aspect banners/strips).
+ *
+ * Returns { bbox, notes }. A null bbox means "skip this row" — the caller must
+ * NOT save a misleading asset. `notes` carries a full per-candidate audit trail
+ * for debug-container-info.
+ *
+ *   VIDEO    — <video> player region (>= MIN), falls back to poster image region
+ *   IMAGE    — largest real creative <img> (>= MIN), never the modal/card itself
+ *   CAROUSEL — real-creative card viewport (>= 280x250), never a tiny image tile
+ *
+ * NOTE: every page.evaluate() body below is fully inlined — no named helper
+ * functions or `const x = () =>` assignments inside evaluate — because tsx/esbuild
+ * runs with keepNames and would inject `__name(...)` calls that crash in the
+ * browser context (ReferenceError: __name is not defined). Do not refactor the
+ * evaluate bodies into named helpers.
  */
 async function findCreativeArea(
   page: Page, adCardBBox: BBox, mediaType: string,
-): Promise<BBox | null> {
-  const isVid = mediaType.trim().toUpperCase() === 'VIDEO';
-  const r = await page.evaluate(({ card, vid }: { card: BBox; vid: boolean }) => {
-    const P = 15;
-    function inCard(b: DOMRect): boolean {
-      return b.x >= card.x - P && b.y >= card.y - P &&
-             b.x + b.width  <= card.x + card.width  + P &&
-             b.y + b.height <= card.y + card.height + P;
-    }
-    if (vid) {
-      for (const v of Array.from(document.querySelectorAll<HTMLElement>('video'))) {
-        const b = v.getBoundingClientRect();
-        if (!inCard(b) || b.width < 100 || b.height < 80) continue;
-        let el: HTMLElement = v;
-        for (let i = 0; i < 5; i++) {
-          const p = el.parentElement;
-          if (!p) break;
-          const pb = p.getBoundingClientRect();
-          if (pb.width <= b.width + 60 && pb.height <= b.height + 80 && inCard(pb)) el = p;
-          else break;
-        }
-        const fb = el.getBoundingClientRect();
-        return { found: true as const, x: fb.x, y: fb.y, width: fb.width, height: fb.height };
+): Promise<{ bbox: BBox | null; notes: string[] }> {
+  const mt = mediaType.trim().toUpperCase();
+  const r  = await page.evaluate(({ card, mtype }: { card: BBox; mtype: string }) => {
+    const P = 15;                 // inside-card slack (px)
+    const MIN_W = 280;            // minimum real-creative width
+    const MIN_H = 250;            // minimum real-creative height
+    const log: string[] = [];
+
+    // ── Pass 1: gather + classify every media candidate (inline, no helpers) ──
+    type Cand = {
+      el: HTMLElement; tag: string;
+      x: number; y: number; w: number; h: number;
+      natW: number; natH: number; ar: number;
+      src: string; alt: string;
+      inCard: boolean; inView: boolean; placeholder: boolean; reject: boolean; reason: string;
+    };
+    const cands: Cand[] = [];
+    const vw = window.innerWidth  || 1280;
+    const vh = window.innerHeight || 900;
+
+    const mediaEls = Array.from(document.querySelectorAll<HTMLElement>(
+      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video',
+    ));
+
+    for (const el of mediaEls) {
+      const b   = el.getBoundingClientRect();
+      const tag = el.tagName.toLowerCase();
+      const isImg = tag === 'img';
+      const img = el as HTMLImageElement;
+      const src = ((isImg ? (img.currentSrc || img.src) : (el.getAttribute('src') || '')) || '').toLowerCase();
+      const alt = (el.getAttribute('alt') || '').toLowerCase();
+      const natW = isImg ? (img.naturalWidth  || 0) : b.width;
+      const natH = isImg ? (img.naturalHeight || 0) : b.height;
+      const ar   = b.height > 0 ? b.width / b.height : 0;
+
+      const inCard = b.x >= card.x - P && b.y >= card.y - P &&
+        b.x + b.width  <= card.x + card.width  + P &&
+        b.y + b.height <= card.y + card.height + P;
+
+      // Visible in the current viewport (at least partially). Guards against
+      // off-screen duplicate ads further down the page (e.g. y=2094) that would
+      // produce an out-of-bounds screenshot clip.
+      const inView = b.width > 0 && b.height > 0 &&
+        b.x < vw && b.x + b.width > 0 && b.y < vh && b.y + b.height > 0;
+
+      // Placeholder / non-creative classification (most-specific first).
+      let placeholder = false; let preason = '';
+      if (src.startsWith('data:'))                              { placeholder = true; preason = 'data-uri'; }
+      else if (src.includes('.svg'))                            { placeholder = true; preason = 'svg-asset'; }
+      else if (src.includes('rsrc.php'))                        { placeholder = true; preason = 'fb-static-resource(rsrc.php)'; }
+      else if (src.includes('/emoji.php') || src.includes('/images/emoji')) { placeholder = true; preason = 'emoji'; }
+      else if (src.includes('static.') && src.includes('fbcdn')) { placeholder = true; preason = 'fb-static-host'; }
+      else if (src.includes('safe_image'))                      { placeholder = true; preason = 'safe_image-proxy'; }
+      else if (alt.includes('profile') || alt.includes('avatar') || alt.includes('logo')) { placeholder = true; preason = `alt:${alt.slice(0, 24)}`; }
+
+      // Soft reject (not placeholder, but probably not the creative): outside card,
+      // avatar/icon-sized, or extreme-aspect strip. Thresholds are deliberately
+      // loose so real creatives are kept; placeholder rejection above is the strict
+      // gate. Selection falls back to non-placeholder candidates if soft rejects
+      // would otherwise leave nothing.
+      let reject = placeholder; let reason = preason;
+      if (!reject) {
+        if (!inCard)                              { reject = true; reason = 'outside-card'; }
+        else if (!inView)                         { reject = true; reason = `off-screen y=${Math.round(b.y)}`; }
+        else if (b.width < 120 || b.height < 90)  { reject = true; reason = `too-small ${Math.round(b.width)}x${Math.round(b.height)}`; }
+        else if (isImg && natW > 0 && natW < 80)  { reject = true; reason = `icon-res natW=${natW}`; }
+        else if (tag === 'img' && (ar > 6 || ar < 0.18)) { reject = true; reason = `extreme-aspect ar=${ar.toFixed(2)}`; }
       }
+
+      cands.push({
+        el, tag, x: b.x, y: b.y, w: b.width, h: b.height,
+        natW, natH, ar, src, alt, inCard, inView, placeholder, reject, reason,
+      });
+
+      const srcSnip = src ? src.replace(/^https?:\/\//, '').slice(0, 48) : '(no src)';
+      log.push(
+        `cand ${tag} ${Math.round(b.width)}x${Math.round(b.height)} at (${Math.round(b.x)},${Math.round(b.y)}) ar=${ar.toFixed(2)} natW=${natW} ` +
+        `src=${srcSnip} alt="${alt.slice(0, 20)}" inCard=${inCard} inView=${inView} ` +
+        `${placeholder ? 'PLACEHOLDER' : (reject ? 'REJECT' : 'ok')}${reason ? ` (${reason})` : ''}`,
+      );
     }
+
+    // ── VIDEO ──────────────────────────────────────────────────────────────
+    if (mtype === 'VIDEO') {
+      // Prefer a real <video>; if collapsed/too short, fall back to poster image.
+      let seed: Cand | null = null;
+      for (const c of cands) if (c.tag === 'video' && c.inCard && !c.reject && c.h >= 120) { seed = c; break; }
+      if (!seed) for (const c of cands) if (c.tag === 'video' && c.inCard && !c.reject) { seed = c; break; }
+      if (!seed) {
+        // No usable <video>: use the largest non-placeholder poster image. Try
+        // strict (non-reject) first, then any non-placeholder image >= 80x80.
+        let bestA = 0;
+        for (const c of cands) {
+          if (c.tag !== 'img' || c.reject) continue;
+          const a = c.w * c.h;
+          if (a > bestA) { bestA = a; seed = c; }
+        }
+        if (!seed) {
+          for (const c of cands) {
+            if (c.tag !== 'img' || c.placeholder || !c.inCard || !c.inView || c.w < 80 || c.h < 80) continue;
+            const a = c.w * c.h;
+            if (a > bestA) { bestA = a; seed = c; }
+          }
+          if (seed) log.push('video fallback: largest non-placeholder in-card image');
+        }
+        if (seed) log.push('no usable <video> — falling back to poster image region');
+      }
+      if (!seed) return { found: false as const, notes: [...log, 'no real video/poster creative in card'] };
+
+      // Walk up to the player container: largest squareish ancestor inside the
+      // card that is not the full card and is >= MIN.
+      let best = { x: seed.x, y: seed.y, width: seed.w, height: seed.h };
+      let cur: HTMLElement | null = seed.el.parentElement; let depth = 0;
+      while (cur && depth < 8) {
+        const cb = cur.getBoundingClientRect();
+        const curIn = cb.x >= card.x - P && cb.y >= card.y - P &&
+          cb.x + cb.width  <= card.x + card.width  + P &&
+          cb.y + cb.height <= card.y + card.height + P;
+        if (!curIn) break;
+        if (cb.width >= card.width - 5 && cb.height >= card.height - 5) break;
+        const car = cb.height > 0 ? cb.width / cb.height : 0;
+        if (cb.width >= MIN_W && cb.height >= MIN_H && car >= 0.5 && car <= 2.2 &&
+            cb.width * cb.height >= best.width * best.height) {
+          best = { x: cb.x, y: cb.y, width: cb.width, height: cb.height };
+        }
+        cur = cur.parentElement; depth++;
+      }
+      log.push(`video region ${Math.round(best.width)}x${Math.round(best.height)} at (${Math.round(best.x)},${Math.round(best.y)})`);
+      return { found: true as const, ...best, notes: log };
+    }
+
+    // ── CAROUSEL ─────────────────────────────────────────────────────────────
+    if (mtype === 'CAROUSEL') {
+      let best: { x: number; y: number; width: number; height: number } | null = null;
+      let bestScore = -1;
+      for (const c of cands) {
+        if (c.tag !== 'img' || c.reject) continue;
+        // Walk up: collect the smallest squareish ancestor >= MIN that is inside
+        // the card but not the full card (the visible carousel card viewport).
+        let cur: HTMLElement | null = c.el.parentElement; let depth = 0;
+        while (cur && depth < 15) {
+          const cb = cur.getBoundingClientRect();
+          const curIn = cb.x >= card.x - P && cb.y >= card.y - P &&
+            cb.x + cb.width  <= card.x + card.width  + P &&
+            cb.y + cb.height <= card.y + card.height + P;
+          if (!curIn) break;
+          if (cb.width >= card.width - 5 && cb.height >= card.height - 5) break;
+          if (cb.width >= MIN_W && cb.height >= MIN_H) {
+            const car = cb.height > 0 ? cb.width / cb.height : 0;
+            // Prefer squarer, larger viewports.
+            const score = (cb.width * cb.height) - Math.abs(1 - car) * 60000;
+            if (score > bestScore) {
+              bestScore = score;
+              best = { x: cb.x, y: cb.y, width: cb.width, height: cb.height };
+              log.push(`-> viewport ${Math.round(cb.width)}x${Math.round(cb.height)} ar=${car.toFixed(2)} [candidate]`);
+            }
+            break; // smallest qualifying ancestor for this image
+          }
+          cur = cur.parentElement; depth++;
+        }
+      }
+      if (!best) return { found: false as const, notes: [...log, 'no carousel viewport >=280x250 inside card'] };
+      return { found: true as const, ...best, notes: log };
+    }
+
+    // ── IMAGE ──────────────────────────────────────────────────────────────
+    // Tier 1: largest non-soft-rejected, non-placeholder image.
     let best: { x: number; y: number; width: number; height: number } | null = null;
     let bestA = 0;
-    for (const img of Array.from(document.querySelectorAll<HTMLImageElement>(
-      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]',
-    ))) {
-      const b = img.getBoundingClientRect();
-      if (!inCard(b) || b.width < 150 || b.height < 100) continue;
-      const a = b.width * b.height;
-      if (a > bestA) { bestA = a; best = { x: b.x, y: b.y, width: b.width, height: b.height }; }
+    for (const c of cands) {
+      if (c.tag !== 'img' || c.reject) continue;
+      const a = c.w * c.h;
+      if (a > bestA) { bestA = a; best = { x: c.x, y: c.y, width: c.w, height: c.h }; }
     }
-    return best ? { found: true as const, ...best } : { found: false as const };
-  }, { card: adCardBBox, vid: isVid });
-  if (r.found) return { x: r.x, y: r.y, width: r.width, height: r.height };
-  return adCardBBox; // last resort: use the full ad card
+    // Tier 2 fallback: largest non-placeholder image >= 80x80 (ignores soft rejects
+    // so a real creative is still captured rather than skipped).
+    if (!best) {
+      for (const c of cands) {
+        if (c.tag !== 'img' || c.placeholder || !c.inCard || !c.inView || c.w < 80 || c.h < 80) continue;
+        const a = c.w * c.h;
+        if (a > bestA) { bestA = a; best = { x: c.x, y: c.y, width: c.w, height: c.h }; }
+      }
+      if (best) log.push('image fallback: largest non-placeholder in-card candidate');
+    }
+    if (best) log.push(`accepted image ${Math.round(best.width)}x${Math.round(best.height)}`);
+    return best
+      ? { found: true as const, ...best, notes: log }
+      : { found: false as const, notes: [...log, 'no real creative image (all candidates were placeholders)'] };
+
+  }, { card: adCardBBox, mtype: mt });
+
+  const notes: string[] = Array.isArray((r as any).notes) ? (r as any).notes as string[] : [];
+
+  if (r.found) {
+    // Final size gate. Carousel keeps the hard 280x250 minimum (reject tiny tiles).
+    // Image/video only need a real creative region, not modal chrome, so the floor
+    // is low — this is what stops legitimate creatives being over-rejected.
+    if (mt === 'CAROUSEL' && (r.width < 280 || r.height < 250)) {
+      notes.push(`REJECTED final: carousel ${Math.round(r.width)}x${Math.round(r.height)} below 280x250 minimum`);
+      return { bbox: null, notes };
+    }
+    if ((mt === 'IMAGE' || mt === 'VIDEO') && (r.width < 120 || r.height < 90)) {
+      notes.push(`REJECTED final: ${Math.round(r.width)}x${Math.round(r.height)} below 120x90 minimum`);
+      return { bbox: null, notes };
+    }
+    return { bbox: { x: r.x, y: r.y, width: r.width, height: r.height }, notes };
+  }
+
+  // Not found → SKIP. Never fall back to the ad card / modal as a production asset.
+  notes.push(
+    mt === 'CAROUSEL'
+      ? 'SKIP: carousel creative area too small or uncertain'
+      : 'SKIP: could not identify real creative media inside modal',
+  );
+  return { bbox: null, notes };
 }
 
 // ─── Screenshot helpers ───────────────────────────────────────────────────────
@@ -343,15 +569,23 @@ function bufferSig(buf: Buffer): string {
 }
 
 async function screenshotCreative(page: Page, bbox: BBox, outPath: string): Promise<void> {
-  await page.screenshot({
-    path: outPath,
-    clip: {
-      x:      Math.max(0, Math.floor(bbox.x)),
-      y:      Math.max(0, Math.floor(bbox.y)),
-      width:  Math.max(1, Math.ceil(bbox.width)),
-      height: Math.max(1, Math.ceil(bbox.height)),
-    },
-  });
+  const vp = page.viewportSize() ?? { width: 1280, height: 900 };
+  // Reject clips that fall entirely outside the rendered viewport (e.g. an
+  // off-screen duplicate at y=2094). page.screenshot would otherwise throw
+  // "Clipped area is either empty or outside the resulting image".
+  if (bbox.x >= vp.width || bbox.y >= vp.height ||
+      bbox.x + bbox.width <= 0 || bbox.y + bbox.height <= 0) {
+    throw new Error(
+      `creative bbox outside viewport (x=${Math.round(bbox.x)}, y=${Math.round(bbox.y)}, ` +
+      `${Math.round(bbox.width)}x${Math.round(bbox.height)}, viewport ${vp.width}x${vp.height})`,
+    );
+  }
+  // Clamp the clip to the viewport so it is always a valid screenshot region.
+  const x = Math.max(0, Math.floor(bbox.x));
+  const y = Math.max(0, Math.floor(bbox.y));
+  const width  = Math.max(1, Math.min(Math.ceil(bbox.width),  vp.width  - x));
+  const height = Math.max(1, Math.min(Math.ceil(bbox.height), vp.height - y));
+  await page.screenshot({ path: outPath, clip: { x, y, width, height } });
 }
 
 // ─── Debug info ───────────────────────────────────────────────────────────────
@@ -469,6 +703,65 @@ async function findCarouselNextButton(
   }, creativeBBox);
 }
 
+// ─── Carousel central-card helper ────────────────────────────────────────────
+
+/**
+ * Within the carousel viewport, pick the SINGLE card whose centre is closest to
+ * the viewport centre and return only that card's image bbox (clamped to the
+ * viewport). This is what makes each card-NN.png contain one card instead of the
+ * whole rail (neighbouring cards, side cards, arrows, CTAs).
+ *
+ * Inline-only page.evaluate body — no named helpers / `const x = () =>` inside
+ * evaluate — to avoid the tsx/esbuild `__name` injection that crashes the browser.
+ */
+async function findCentralCard(
+  page: Page, vp: BBox,
+): Promise<{ bbox: BBox | null; notes: string[] }> {
+  const r = await page.evaluate((view) => {
+    const cx = view.x + view.width / 2;
+    const log: string[] = [];
+    type K = { x: number; y: number; w: number; h: number; dist: number; vis: number };
+    const cands: K[] = [];
+    for (const img of Array.from(document.querySelectorAll<HTMLImageElement>(
+      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]',
+    ))) {
+      const b = img.getBoundingClientRect();
+      const src = (img.currentSrc || img.src || '').toLowerCase();
+      // Skip placeholder / UI resources.
+      if (src.startsWith('data:') || src.includes('rsrc.php') || src.includes('.svg') ||
+          (src.includes('static.') && src.includes('fbcdn'))) continue;
+      // Must overlap the viewport.
+      const ox = Math.min(b.x + b.width,  view.x + view.width)  - Math.max(b.x, view.x);
+      const oy = Math.min(b.y + b.height, view.y + view.height) - Math.max(b.y, view.y);
+      if (ox <= 0 || oy <= 0) continue;
+      if (b.width < 100 || b.height < 100) continue;
+      if (b.height < view.height * 0.35) continue; // too short to be a card image
+      const vis  = (ox * oy) / (b.width * b.height);
+      const dist = Math.abs((b.x + b.width / 2) - cx);
+      cands.push({ x: b.x, y: b.y, w: b.width, h: b.height, dist, vis });
+      log.push(`card-img ${Math.round(b.width)}x${Math.round(b.height)} at (${Math.round(b.x)},${Math.round(b.y)}) distFromCentre=${Math.round(dist)} vis=${vis.toFixed(2)}`);
+    }
+    if (!cands.length) return { found: false as const, log };
+    // Prefer the most-centred card that is at least 60% visible; else most centred.
+    cands.sort((a, b) => a.dist - b.dist);
+    let pick = cands[0]!;
+    for (const c of cands) { if (c.vis >= 0.6) { pick = c; break; } }
+    // Clamp to the viewport so neighbouring/overflow cards are excluded.
+    const x = Math.max(pick.x, view.x);
+    const y = Math.max(pick.y, view.y);
+    const right  = Math.min(pick.x + pick.w, view.x + view.width);
+    const bottom = Math.min(pick.y + pick.h, view.y + view.height);
+    log.push(`SELECTED central card at (${Math.round(pick.x)},${Math.round(pick.y)}) ${Math.round(pick.w)}x${Math.round(pick.h)} — closest to viewport centre, vis=${pick.vis.toFixed(2)}; ${cands.length - 1} neighbour card(s) excluded`);
+    return { found: true as const, x, y, width: right - x, height: bottom - y, log };
+  }, vp);
+
+  const notes = Array.isArray((r as { log?: string[] }).log) ? (r as { log: string[] }).log : [];
+  if (r.found && r.width >= 80 && r.height >= 80) {
+    return { bbox: { x: r.x, y: r.y, width: r.width, height: r.height }, notes };
+  }
+  return { bbox: null, notes };
+}
+
 // ─── Capture functions ────────────────────────────────────────────────────────
 
 async function captureImage(
@@ -487,34 +780,235 @@ async function captureVideo(
   const files: string[] = [];
   const sigs:  string[] = [];
 
-  dbg.playClicked = await clickPlayButton(page, creativeBBox);
-  dbg.notes.push(`play: labelled button found=${dbg.playClicked}`);
-  await page.waitForTimeout(2500);
-
-  for (let i = 1; i <= 3; i++) {
-    if (i > 1) await page.waitForTimeout(2000);
-    const fp = path.join(outDir, `frame-0${i}.png`);
-    await screenshotCreative(page, creativeBBox, fp);
-    const sig = bufferSig(fs.readFileSync(fp));
-    if (sigs.includes(sig)) {
-      fs.unlinkSync(fp);
-      dbg.notes.push(`frame-0${i}: duplicate — not saved`);
-    } else {
-      sigs.push(sig); files.push(fp);
-      dbg.notes.push(`frame-0${i}: saved`);
+  // ── Probe any <video> overlapping the creative area (inline, no helpers) ──
+  const probe = await page.evaluate((bbox) => {
+    for (const v of Array.from(document.querySelectorAll<HTMLVideoElement>('video'))) {
+      const b = v.getBoundingClientRect();
+      if (b.width < 40 || b.height < 40) continue;
+      const overlap = !(b.x > bbox.x + bbox.width || b.x + b.width < bbox.x ||
+                        b.y > bbox.y + bbox.height || b.y + b.height < bbox.y);
+      if (!overlap) continue;
+      return {
+        hasVideo: true,
+        currentTime: v.currentTime || 0,
+        duration: (isFinite(v.duration) && v.duration > 0) ? v.duration : 0,
+        paused: v.paused, muted: v.muted, readyState: v.readyState,
+      };
     }
+    return { hasVideo: false, currentTime: 0, duration: 0, paused: true, muted: false, readyState: 0 };
+  }, creativeBBox);
+  dbg.notes.push(`video probe: hasVideo=${probe.hasVideo} duration=${probe.duration.toFixed(2)} readyState=${probe.readyState}`);
+
+  // ── Baseline thumbnail (pre-play) used to detect whether anything moved ──
+  const thumbTmp = path.join(outDir, '.thumb.png');
+  await screenshotCreative(page, creativeBBox, thumbTmp);
+  const thumbSig = bufferSig(fs.readFileSync(thumbTmp));
+
+  // ── Start playback: click the centre play button AND force the <video> ──
+  dbg.playClicked = await clickPlayButton(page, creativeBBox);
+  dbg.notes.push(`play: centre play button clicked (labelled=${dbg.playClicked})`);
+  if (probe.hasVideo) {
+    await page.evaluate((bbox) => {
+      for (const v of Array.from(document.querySelectorAll<HTMLVideoElement>('video'))) {
+        const b = v.getBoundingClientRect();
+        if (b.width < 40 || b.height < 40) continue;
+        const overlap = !(b.x > bbox.x + bbox.width || b.x + b.width < bbox.x ||
+                          b.y > bbox.y + bbox.height || b.y + b.height < bbox.y);
+        if (!overlap) continue;
+        try { v.muted = true; const p = v.play(); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch { /* play blocked */ }
+        break;
+      }
+    }, creativeBBox);
   }
 
-  dbg.framesChanged = files.length > 1;
+  // ── Capture frames across time; only frames that differ from the thumbnail
+  //    (i.e. real playback) are saved. Sample across duration when known. ──
+  const plan = (probe.duration > 1.5)
+    ? [0.1, 0.3, 0.55, 0.8].map((f) => Math.max(0.5, probe.duration * f))
+    : [1, 3, 5, 8];
+  let prev = 0;
+  for (let i = 0; i < plan.length; i++) {
+    const waitMs = Math.max(200, Math.round((plan[i]! - prev) * 1000));
+    prev = plan[i]!;
+    await page.waitForTimeout(waitMs);
+    const tmp = path.join(outDir, `.tmp-frame-${i + 1}.png`);
+    await screenshotCreative(page, creativeBBox, tmp);
+    const sig = bufferSig(fs.readFileSync(tmp));
+    if (sig === thumbSig || sigs.includes(sig)) {
+      try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+      dbg.notes.push(`frame@${plan[i]!.toFixed(1)}s: ${sig === thumbSig ? 'same as thumbnail (overlay/no playback)' : 'duplicate'} — skipped`);
+      continue;
+    }
+    sigs.push(sig);
+    const fp = path.join(outDir, `frame-0${files.length + 1}.png`);
+    fs.renameSync(tmp, fp);
+    files.push(fp);
+    dbg.notes.push(`frame-0${files.length}: saved (t≈${plan[i]!.toFixed(1)}s)`);
+  }
 
-  if (files.length === 1) {
-    dbg.notes.push('warning: only one unique frame — playback may not have started');
+  // ── Post-play state for confirmation + summary ──
+  const post = probe.hasVideo
+    ? await page.evaluate((bbox) => {
+        for (const v of Array.from(document.querySelectorAll<HTMLVideoElement>('video'))) {
+          const b = v.getBoundingClientRect();
+          if (b.width < 40 || b.height < 40) continue;
+          const overlap = !(b.x > bbox.x + bbox.width || b.x + b.width < bbox.x ||
+                            b.y > bbox.y + bbox.height || b.y + b.height < bbox.y);
+          if (!overlap) continue;
+          const anyV = v as unknown as { mozHasAudio?: boolean; webkitAudioDecodedByteCount?: number };
+          const hasAudio = anyV.mozHasAudio === true || (typeof anyV.webkitAudioDecodedByteCount === 'number' && anyV.webkitAudioDecodedByteCount > 0);
+          return { t: v.currentTime || 0, paused: v.paused, duration: (isFinite(v.duration) && v.duration > 0) ? v.duration : 0, hasAudio };
+        }
+        return { t: 0, paused: true, duration: 0, hasAudio: false };
+      }, creativeBBox)
+    : { t: 0, paused: true, duration: 0, hasAudio: false };
+
+  const overlayVisible = await page.evaluate((bbox) => {
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>(
+      '[aria-label*="play" i], [data-testid*="play" i]',
+    ))) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 24 || r.height < 24) continue; // only the LARGE overlay
+      const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+      if (cx < bbox.x || cx > bbox.x + bbox.width || cy < bbox.y || cy > bbox.y + bbox.height) continue;
+      const st = window.getComputedStyle(el);
+      if (st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.1) return true;
+    }
+    return false;
+  }, creativeBBox);
+
+  const timeAdvanced = probe.hasVideo && (post.t - probe.currentTime) > 0.15;
+  // Playback is "started" only with real evidence: a <video> whose currentTime
+  // advanced, or (when there is no <video> at all) frames that actually changed.
+  // A frame change alone is NOT trusted when a <video> exists, because a poster
+  // image loading after the thumbnail would otherwise look like playback.
+  const started = timeAdvanced || (!probe.hasVideo && files.length >= 1);
+  dbg.framesChanged = files.length > 1;
+  dbg.notes.push(`playback: started=${started} (frames=${files.length}, currentTime ${probe.currentTime.toFixed(2)}→${post.t.toFixed(2)}, overlayVisible=${overlayVisible})`);
+
+  if (!started) {
+    // Playback failed → keep exactly ONE thumbnail frame, clearly marked
+    // thumbnail-only. If the loop captured a poster frame, keep that (more
+    // informative); otherwise fall back to the pre-play thumbnail.
+    if (files.length === 0) {
+      const fp = path.join(outDir, 'frame-01.png');
+      try { fs.renameSync(thumbTmp, fp); files.push(fp); } catch { /* keep going */ }
+    } else {
+      try { fs.unlinkSync(thumbTmp); } catch { /* best-effort */ }
+      for (let k = files.length; k >= 2; k--) {
+        try { fs.unlinkSync(path.join(outDir, `frame-0${k}.png`)); } catch { /* best-effort */ }
+      }
+      files.length = 1;
+    }
+    dbg.stopReason = 'video could not be played; thumbnail captured only';
+    dbg.notes.push('VIDEO: playback NOT confirmed — saved thumbnail only (may show play overlay)');
     fs.writeFileSync(
       path.join(outDir, 'video-capture-notes.txt'),
-      `ad_id: ${path.basename(outDir)}\nOnly thumbnail captured. Playback may not have started.\n\n${dbg.notes.join('\n')}`,
+      `ad_id: ${path.basename(outDir)}\n` +
+      `video could not be played; thumbnail captured only\n` +
+      `large play overlay visible: ${overlayVisible}\n` +
+      `play button labelled-click: ${dbg.playClicked}\n`,
       'utf-8',
     );
+  } else {
+    if (files.length === 0) {
+      // Playback confirmed (currentTime advanced) but the sampled frames looked
+      // identical — keep one representative frame rather than returning nothing.
+      const fp = path.join(outDir, 'frame-01.png');
+      try { fs.renameSync(thumbTmp, fp); files.push(fp); } catch { /* best-effort */ }
+      dbg.notes.push('VIDEO: playback confirmed but frames identical — saved one frame');
+    } else {
+      try { fs.unlinkSync(thumbTmp); } catch { /* best-effort */ }
+    }
+    dbg.notes.push(`VIDEO: playback confirmed — ${files.length} unique frame(s)`);
   }
+
+  // ── Best-effort: capture the video SOURCE for richer later analysis ──
+  // Preference order for downstream analysis: downloaded file > recording > frames.
+  // Never break capture if any of this fails.
+  let sourceUrl = '';
+  let sourceDownloaded = false;
+  const recordingSaved = false; // cropped per-element recording is not supported by
+                                // Playwright (context recordVideo = whole page only),
+                                // and we avoid whole-page recording — deferred by design.
+  if (probe.hasVideo) {
+    try {
+      sourceUrl = await page.evaluate((bbox) => {
+        for (const v of Array.from(document.querySelectorAll<HTMLVideoElement>('video'))) {
+          const b = v.getBoundingClientRect();
+          if (b.width < 40 || b.height < 40) continue;
+          const overlap = !(b.x > bbox.x + bbox.width || b.x + b.width < bbox.x ||
+                            b.y > bbox.y + bbox.height || b.y + b.height < bbox.y);
+          if (!overlap) continue;
+          // Prefer a <source> child with a real (non-blob) URL over a blob currentSrc.
+          let best = v.currentSrc || v.src || '';
+          for (const s of Array.from(v.querySelectorAll('source'))) {
+            const su = s.getAttribute('src') || '';
+            if (su && !su.startsWith('blob:')) { best = su; break; }
+          }
+          return best;
+        }
+        return '';
+      }, creativeBBox);
+    } catch { sourceUrl = ''; }
+
+    if (sourceUrl) {
+      try { fs.writeFileSync(path.join(outDir, 'video-source-url.txt'), sourceUrl + '\n', 'utf-8'); } catch { /* best-effort */ }
+      // Only attempt a download for simple http(s) sources (blob:/MSE streams and
+      // file: are not directly downloadable). Uses the page's request context so
+      // cookies are preserved. Capped size, fully guarded.
+      if (/^https?:\/\//i.test(sourceUrl)) {
+        try {
+          const resp = await page.context().request.get(sourceUrl, { timeout: 20000 });
+          if (resp.ok()) {
+            const buf = await resp.body();
+            if (buf.length > 1000 && buf.length < 60 * 1024 * 1024) {
+              fs.writeFileSync(path.join(outDir, 'video.mp4'), buf);
+              sourceDownloaded = true;
+            }
+          }
+        } catch { sourceDownloaded = false; }
+      }
+    }
+  }
+  dbg.notes.push(`video source: urlFound=${!!sourceUrl} downloaded=${sourceDownloaded}`);
+
+  // Which input should the later analyser use for this row?
+  const analysisInput = sourceDownloaded
+    ? 'video file (video.mp4)'
+    : recordingSaved
+      ? 'browser recording (video-recording.webm)'
+      : (started && files.length >= 1)
+        ? 'sampled frames (frame-0N.png)'
+        : 'sampled frames (thumbnail only)';
+
+  // ── video-summary-notes.txt — TECHNICAL CAPTURE METADATA ONLY (always) ──
+  fs.writeFileSync(
+    path.join(outDir, 'video-summary-notes.txt'),
+    [
+      '# video-summary-notes — TECHNICAL CAPTURE METADATA ONLY.',
+      '# This is NOT a semantic description of the ad. Content analysis happens later',
+      '# (browser:preview / Claude Vision) using, in order of preference:',
+      '#   downloaded video file > browser recording > sampled frames.',
+      '',
+      `ad_id: ${path.basename(outDir)}`,
+      `playback started: ${started}`,
+      `play button clicked: ${dbg.playClicked}`,
+      `<video> element present: ${probe.hasVideo}`,
+      `video duration (s): ${(probe.duration || post.duration) || 'unknown'}`,
+      `currentTime reached (s): ${probe.hasVideo ? post.t.toFixed(2) : 'n/a'}`,
+      `audio detected: ${probe.hasVideo ? (post.hasAudio ? 'yes' : 'unknown (muted for capture / not exposed)') : 'n/a'}`,
+      `unique frames captured: ${files.length}`,
+      `large play overlay remained visible: ${overlayVisible}`,
+      `source URL found: ${sourceUrl ? 'yes' : 'no'}`,
+      `source video downloaded: ${sourceDownloaded ? 'yes (video.mp4)' : 'no'}`,
+      `browser recording saved: ${recordingSaved ? 'yes (video-recording.webm)' : 'no (cropped recording unsupported; deferred)'}`,
+      `recommended analysis input: ${analysisInput}`,
+      `on-screen text (DOM): `,
+    ].join('\n') + '\n',
+    'utf-8',
+  );
+
   return files;
 }
 
@@ -525,41 +1019,96 @@ async function captureCarousel(
   const files: string[] = [];
   const sigs:  string[] = [];
 
-  for (let n = 1; n <= CAROUSEL_MAX; n++) {
-    await page.waitForTimeout(600);
-    const lbl  = String(n).padStart(2, '0');
-    const fp   = path.join(outDir, `card-${lbl}.png`);
+  dbg.notes.push(`carousel viewport: ${Math.round(creativeBBox.width)}x${Math.round(creativeBBox.height)} at (${Math.round(creativeBBox.x)},${Math.round(creativeBBox.y)})`);
 
-    await screenshotCreative(page, creativeBBox, fp);
-    const sig = bufferSig(fs.readFileSync(fp));
+  // ── card-01: crop to the single central card, not the whole rail ──
+  await page.waitForTimeout(600);
+  const c1   = await findCentralCard(page, creativeBBox);
+  for (const ln of c1.notes) dbg.notes.push(`card-01 ${ln}`);
+  const crop1 = c1.bbox ?? creativeBBox;
+  if (!c1.bbox) dbg.notes.push('card-01: central card not found — using full viewport');
+  const first = path.join(outDir, 'card-01.png');
+  await screenshotCreative(page, crop1, first);
+  let lastSig = bufferSig(fs.readFileSync(first));
+  sigs.push(lastSig); files.push(first);
+  dbg.notes.push(`card-01: saved (crop ${Math.round(crop1.width)}x${Math.round(crop1.height)})`);
+  console.log('       card-01: saved');
 
-    if (sigs.includes(sig)) {
-      fs.unlinkSync(fp);
-      dbg.notes.push(`card-${lbl}: duplicate — stopping`);
-      dbg.carouselNextBtn = `stopped at card ${n} (duplicate)`;
-      break;
-    }
-    sigs.push(sig); files.push(fp);
-    dbg.notes.push(`card-${lbl}: saved`);
-    console.log(`       card-${lbl}: saved`);
-
-    if (n === CAROUSEL_MAX) break;
+  // ── card-02 … card-N: click next, require a visual change before saving ──
+  for (let n = 2; n <= CAROUSEL_MAX; n++) {
+    const lbl = String(n).padStart(2, '0');
 
     const nxt = await findCarouselNextButton(page, creativeBBox);
     if (!nxt) {
-      dbg.notes.push(`card-${lbl}: no next button — stopping`);
-      dbg.carouselNextBtn = `not found after card ${n}`;
+      dbg.notes.push(`card-${lbl}: no next arrow found — stopping`);
+      dbg.carouselNextBtn = `not found after card ${n - 1}`;
+      dbg.stopReason = `no next arrow found after card ${n - 1}`;
       break;
     }
     dbg.carouselNextBtn = `clicked at (${Math.round(nxt.x)},${Math.round(nxt.y)})`;
 
-    // JS DOM click — reliable for React SPAs
-    const dc = await page.evaluate((pos) => {
-      const el = document.elementFromPoint(pos.x, pos.y) as HTMLElement | null;
-      if (el) { el.click(); return true; }
-      return false;
+    // Safe DOM click. elementFromPoint can return a non-clickable node (SVG path,
+    // span, text wrapper) with no .click(). Climb to the nearest real control,
+    // guard typeof .click, fall back to synthetic MouseEvents, and never throw.
+    const clicked = await page.evaluate((pos) => {
+      try {
+        const node = document.elementFromPoint(pos.x, pos.y) as Element | null;
+        if (!node) return false;
+        const ctrl = (node.closest('button,[role="button"],a,[tabindex]') as HTMLElement | null) || (node as HTMLElement);
+        if (ctrl && typeof (ctrl as { click?: unknown }).click === 'function') {
+          (ctrl as HTMLElement).click();
+          return true;
+        }
+        const target: Element = ctrl || node;
+        for (const type of ['mousedown', 'mouseup', 'click']) {
+          target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: pos.x, clientY: pos.y }));
+        }
+        return true;
+      } catch {
+        return false; // never throw from the click attempt
+      }
     }, nxt);
-    if (!dc) await page.mouse.click(nxt.x, nxt.y);
+    if (!clicked) {
+      try { await page.mouse.click(nxt.x, nxt.y); }
+      catch { dbg.notes.push(`card-${lbl}: all click attempts failed`); }
+    }
+
+    // Poll up to ~2.4 s for the creative to visually change. Each attempt
+    // recomputes the central card and crops to it, so a saved card is one card.
+    let changedSig: string | null = null;
+    let usedCrop: BBox = creativeBBox;
+    let pickedNote = '';
+    const tmp = path.join(outDir, `.tmp-${lbl}.png`);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await page.waitForTimeout(600);
+      const cc = await findCentralCard(page, creativeBBox);
+      usedCrop = cc.bbox ?? creativeBBox;
+      for (const ln of cc.notes) if (ln.startsWith('SELECTED')) pickedNote = ln;
+      await screenshotCreative(page, usedCrop, tmp);
+      const sig = bufferSig(fs.readFileSync(tmp));
+      if (sig !== lastSig && !sigs.includes(sig)) { changedSig = sig; break; }
+    }
+
+    if (!changedSig) {
+      try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* temp cleanup best-effort */ }
+      const dup = sigs.length > 1 ? 'duplicate card (reached end)' : 'no visual change after click (end or click failed)';
+      dbg.notes.push(`card-${lbl}: ${dup} — stopping`);
+      dbg.stopReason = `stopped after card ${n - 1}: ${dup}`;
+      break;
+    }
+
+    const fp = path.join(outDir, `card-${lbl}.png`);
+    fs.renameSync(tmp, fp);
+    lastSig = changedSig; sigs.push(changedSig); files.push(fp);
+    if (pickedNote) dbg.notes.push(`card-${lbl} ${pickedNote}`);
+    dbg.notes.push(`card-${lbl}: saved (crop ${Math.round(usedCrop.width)}x${Math.round(usedCrop.height)}, visual change confirmed)`);
+    console.log(`       card-${lbl}: saved`);
+
+    if (n === CAROUSEL_MAX) { dbg.stopReason = `reached CAROUSEL_MAX (${CAROUSEL_MAX})`; }
+  }
+
+  if (files.length === 1 && !dbg.stopReason) {
+    dbg.stopReason = 'only card-01 captured — no further cards detected';
   }
   return files;
 }
@@ -612,6 +1161,8 @@ async function main(): Promise<void> {
 
   const context: BrowserContext = await browser.newContext({
     viewport:  { width: 1280, height: 900 },
+    // 2x pixel density → captured creatives are sharp, not blurry, when clipped.
+    deviceScaleFactor: 2,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   });
 
@@ -620,6 +1171,7 @@ async function main(): Promise<void> {
   let inactive   = 0;
   let failed     = 0;
   let noContainer = 0;
+  let qualitySkipped = 0;
 
   for (let i = 0; i < rows.length; i++) {
     const row    = rows[i]!;
@@ -654,6 +1206,7 @@ async function main(): Promise<void> {
 
     const outDir  = assetDir(name, adId);
     const page: Page = await context.newPage();
+    const dbg = newDebugState(mt); // hoisted so the catch block can persist debug on failure
 
     try {
       console.log('    navigating…');
@@ -694,12 +1247,10 @@ async function main(): Promise<void> {
       }
 
       // ── 1. Modal detection ────────────────────────────────────────────────
-      const dbg       = newDebugState(mt);
-      const modalBBox = await waitForModal(page);
+      const modalRes  = await waitForModal(page);
+      const modalBBox = modalRes.bbox;
       dbg.modalBBox   = modalBBox;
-      dbg.notes.push(modalBBox
-        ? `modal: ${Math.round(modalBBox.width)}×${Math.round(modalBBox.height)} at (${Math.round(modalBBox.x)},${Math.round(modalBBox.y)})`
-        : 'modal: not found — using page layout');
+      for (const n of modalRes.notes) dbg.notes.push(n);
       console.log(`    modal: ${modalBBox
         ? `${Math.round(modalBBox.width)}×${Math.round(modalBBox.height)} at (${Math.round(modalBBox.x)},${Math.round(modalBBox.y)})`
         : 'not found'}`);
@@ -719,12 +1270,18 @@ async function main(): Promise<void> {
       dbg.notes.push(`ad card: ${Math.round(adCardBBox.width)}×${Math.round(adCardBBox.height)} at (${Math.round(adCardBBox.x)},${Math.round(adCardBBox.y)})`);
 
       // ── 3. Creative area ─────────────────────────────────────────────────
-      const creativeBBox = await findCreativeArea(page, adCardBBox, mt);
-      dbg.creativeBBox   = creativeBBox;
+      const { bbox: creativeBBox, notes: creativeNotes } = await findCreativeArea(page, adCardBBox, mt);
+      for (const n of creativeNotes) dbg.notes.push(n);
+      dbg.creativeBBox = creativeBBox;
       if (!creativeBBox) {
-        dbg.stopReason = 'creative area not found in ad card';
+        dbg.stopReason  = creativeNotes[creativeNotes.length - 1] ?? 'creative area not found';
         await saveDebugInfo(page, adId, outDir, dbg);
-        console.log('    SKIPPED — could not identify modal creative container');
+        // Message is keyed off media type, not string-matching (so an IMAGE row
+        // never reports a "carousel" skip reason).
+        const skipMsg = mt === 'CAROUSEL'
+          ? 'SKIPPED — carousel creative area too small or uncertain'
+          : `SKIPPED — could not identify real creative media inside modal (${mt || 'unknown'})`;
+        console.log(`    ${skipMsg}`);
         noContainer++;
         await page.close();
         continue;
@@ -746,6 +1303,16 @@ async function main(): Promise<void> {
         savedFiles = await captureVideo(page, outDir, creativeBBox, dbg);
       }
 
+      // ── Fail-safe: never mark a row captured unless a real asset was saved ──
+      if (savedFiles.length === 0) {
+        dbg.stopReason = dbg.stopReason || 'no real creative asset saved';
+        await saveDebugInfo(page, adId, outDir, dbg);
+        console.log('    SKIPPED — could not identify real creative media inside modal');
+        qualitySkipped++;
+        await page.close();
+        continue;
+      }
+
       await saveDebugInfo(page, adId, outDir, dbg);
 
       const relPath = path.relative(process.cwd(), outDir).replace(/\\/g, '/');
@@ -761,6 +1328,10 @@ async function main(): Promise<void> {
       const msg   = err instanceof Error ? err.message : String(err);
       const short = msg.replace(/\n/g, ' ').slice(0, 140);
       console.log(`    ❌ Capture failed: ${short}`);
+      // Persist debug info on failure too, so failed rows are diagnosable.
+      dbg.stopReason = dbg.stopReason || `capture error: ${short}`;
+      dbg.notes.push(`ERROR: ${short}`);
+      try { await saveDebugInfo(page, adId, outDir, dbg); } catch { /* page may already be closed */ }
       failed++;
     } finally {
       await page.close();
@@ -773,12 +1344,13 @@ async function main(): Promise<void> {
   fs.writeFileSync(outputFile, serializeCsv(headers, rows), 'utf-8');
 
   console.log('\n' + '═'.repeat(64));
-  console.log(`  READY rows:       ${readyRows.length}`);
-  console.log(`  Captured:         ${captured}`);
-  console.log(`  Inactive/skipped: ${inactive}`);
-  console.log(`  No container:     ${noContainer}`);
-  console.log(`  Failed:           ${failed}`);
-  console.log(`  Non-READY:        ${skipped}`);
+  console.log(`  READY rows:           ${readyRows.length}`);
+  console.log(`  Captured:             ${captured}`);
+  console.log(`  Inactive/skipped:     ${inactive}`);
+  console.log(`  No container:         ${noContainer}`);
+  console.log(`  Skipped (no creative):${qualitySkipped}`);
+  console.log(`  Failed:               ${failed}`);
+  console.log(`  Non-READY:            ${skipped}`);
   console.log('─'.repeat(64));
   console.log(`  Output CSV:       ${outputFile}`);
   console.log(`  Asset folder:     ${path.resolve(ASSET_BASE)}`);
@@ -799,3 +1371,4 @@ main().catch((err: unknown) => {
   console.error(`\n❌ Fatal error: ${msg}`);
   process.exit(1);
 });
+
