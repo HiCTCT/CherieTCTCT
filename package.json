@@ -25,7 +25,8 @@
     "browser:validate": "tsx scripts/validate-browser-collected-ads.ts",
     "browser:preview": "tsx scripts/preview-browser-collected-ads.ts",
     "browser:ingest": "tsx scripts/ingest-browser-collected-ads.ts",
-    "browser:capture-assets": "tsx scripts/capture-browser-ad-assets.ts"
+    "browser:capture-assets": "tsx scripts/capture-browser-ad-assets.ts",
+    "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
