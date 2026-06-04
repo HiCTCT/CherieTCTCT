@@ -1,6 +1,12 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getAdById } from '@/lib/queries/ads';
+import {
+  tierLabel,
+  confidenceLabel,
+  evidenceLabel,
+  creativeSourceLabel,
+} from '@/lib/analysis/competitorScoring';
 
 // ------------------------------------------------------------------ helpers
 
@@ -236,6 +242,14 @@ export default async function AdDetailPage({
   const strengths = parseJson<string[]>(a?.strengthsJson ?? null) ?? [];
   const weaknesses = parseJson<string[]>(a?.weaknessesJson ?? null) ?? [];
 
+  // Competitor benchmark breakdown (stored as { formula, breakdown[] })
+  type BenchmarkBreakdown = {
+    formula: string;
+    breakdown: { label: string; value: number; weight: number }[];
+  };
+  const benchmarkBreakdown = parseJson<BenchmarkBreakdown>(a?.benchmarkBreakdownJson ?? null);
+  const hasBenchmark = ad.competitorBenchmarkScore != null;
+
   const copyScore = a?.copyScore ?? null;
   const headlineScore = a?.headlineScore ?? null;
   const descriptionScore = a?.descriptionScore ?? null;
@@ -269,8 +283,66 @@ export default async function AdDetailPage({
         <Link href="/competitors">Competitors</Link>
       </p>
 
-      {/* ── 1. Top Summary Card ── */}
+      {/* ── Competitor Benchmark panel (primary) ── */}
+      {hasBenchmark ? (
+        <div className="card">
+          <h2>Competitor Benchmark</h2>
+          <div className="summary-header">
+            <div className="summary-score-block">
+              <div className="summary-score">{(ad.competitorBenchmarkScore as number).toFixed(1)}</div>
+              <div className="summary-score-label">/ 10 benchmark</div>
+              <span className="badge">{tierLabel(ad.benchmarkTier)}</span>
+            </div>
+            <div className="summary-verdict">
+              <div className="summary-verdict-heading">Confidence</div>
+              <div className="summary-verdict-value">{confidenceLabel(ad.benchmarkConfidence)}</div>
+            </div>
+          </div>
+          <div className="tag-row">
+            <span className="tag"><strong>Evidence:</strong> {evidenceLabel(ad.evidenceSource)}</span>
+            <span className="tag"><strong>Creative source:</strong> {creativeSourceLabel(ad.creativeSource)}</span>
+            <span className="tag"><strong>Format:</strong> {ad.adFormat}</span>
+            {ad.benchmarkScoredAt && (
+              <span className="tag">
+                <strong>Scored:</strong>{' '}
+                {new Date(ad.benchmarkScoredAt).toLocaleDateString('en-GB')}
+              </span>
+            )}
+          </div>
+          {a?.recommendedUse && (
+            <p style={{ marginTop: '12px' }}>
+              <strong>Recommended use:</strong> {a.recommendedUse}
+            </p>
+          )}
+          {benchmarkBreakdown && (
+            <div className="analysis-subsection">
+              <p className="section-label">How this benchmark is computed</p>
+              <p>{benchmarkBreakdown.formula}</p>
+              <ul className="compact-list">
+                {benchmarkBreakdown.breakdown.map((b, i) => (
+                  <li key={i}>
+                    {b.label}: {b.value.toFixed(1)} × {b.weight}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="card">
+          <h2>Competitor Benchmark</h2>
+          <p className="muted">Not scored yet — this ad has no competitor benchmark score.</p>
+        </div>
+      )}
+
+      {/* ── 1. Internal Ad QA Score (for comparison only) ── */}
       <div className="card">
+        <h2>
+          Internal Ad QA Score{' '}
+          <span className="muted" style={{ fontWeight: 'normal', fontSize: '13px' }}>
+            — for comparison only
+          </span>
+        </h2>
         <div className="summary-header">
           <div className="summary-score-block">
             <div className="summary-score">{ad.score.toFixed(1)}</div>
@@ -568,7 +640,7 @@ export default async function AdDetailPage({
         )}
       </div>
 
-            {/* ── 12. Recommendations ── */}
+      {/* ── 12. Recommendations ── */}
       <div className="card">
         <h2>Recommendations for Improvement</h2>
         {recommendations ? (
