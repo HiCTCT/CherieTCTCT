@@ -78,6 +78,48 @@ export function benchmarkTier(score: number): BenchmarkTier {
   return TIER_LABEL[benchmarkTierToken(score)];
 }
 
+// ─── UI label helpers (token → display label) ───────────────────────────────────
+// Accept the canonical stored tokens (or null for not-yet-scored / legacy rows)
+// and return short, dashboard-friendly labels. Shared by the dashboard pages and
+// the preview scripts so labels never drift.
+
+export function tierLabel(token: string | null | undefined): string {
+  switch (token) {
+    case 'STRONG':   return 'Strong';
+    case 'MODERATE': return 'Moderate';
+    case 'WEAK':     return 'Weak';
+    case 'LOW':      return 'Low';
+    default:         return 'Not scored';
+  }
+}
+
+export function confidenceLabel(token: string | null | undefined): string {
+  switch (token) {
+    case 'HIGH':   return 'High confidence (Vision)';
+    case 'MEDIUM': return 'Medium confidence (manual text)';
+    case 'LOW':    return 'Low confidence (no creative)';
+    default:       return 'Confidence unknown';
+  }
+}
+
+export function evidenceLabel(token: string | null | undefined): string {
+  switch (token) {
+    case 'VISION': return 'Vision creative analysis';
+    case 'MANUAL': return 'Manual CSV text';
+    case 'NONE':   return 'No creative evidence';
+    default:       return '—';
+  }
+}
+
+export function creativeSourceLabel(token: string | null | undefined): string {
+  switch (token) {
+    case 'ASSET':    return 'Vision-analysed asset';
+    case 'MANUAL':   return 'Manual text';
+    case 'FALLBACK': return 'No creative captured';
+    default:         return '—';
+  }
+}
+
 /**
  * Shared analyst guidance — the SINGLE source of truth used by both the preview
  * scripts and ingestion (so they never drift). Derived from tier + confidence.

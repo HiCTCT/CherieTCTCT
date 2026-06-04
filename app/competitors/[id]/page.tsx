@@ -1,8 +1,18 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import CompetitorMetaConfigForm from '@/app/components/CompetitorMetaConfigForm';
-import { getCompetitorById, getCompetitorWithScanHistory } from '@/lib/queries/competitors';
+import {
+  getCompetitorById,
+  getCompetitorWithScanHistory,
+  getCompetitorAdsRanked,
+} from '@/lib/queries/competitors';
 import { getPendingAdCount } from '@/lib/queries/pendingAds';
+import {
+  tierLabel,
+  confidenceLabel,
+  evidenceLabel,
+  creativeSourceLabel,
+} from '@/lib/analysis/competitorScoring';
 
 function formatDate(date: Date | string | null | undefined): string {
   if (!date) return 'N/A';
@@ -41,10 +51,11 @@ export default async function CompetitorDetailPage({
 }: {
   params: { id: string };
 }) {
-  const [competitor, competitorWithScans, pendingAdCount] = await Promise.all([
+  const [competitor, competitorWithScans, pendingAdCount, rankedAds] = await Promise.all([
     getCompetitorById(params.id),
     getCompetitorWithScanHistory(params.id),
     getPendingAdCount(params.id),
+    getCompetitorAdsRanked(params.id),
   ]);
 
   if (!competitor) {
@@ -53,6 +64,21 @@ export default async function CompetitorDetailPage({
 
   const scanRuns = competitorWithScans?.scanRuns ?? [];
   const metaReadiness = getMetaReadiness(competitor.metaPageId, competitor.lastScannedAt);
+
+  // ── Benchmark summary (computed from the ranked ads) ──
+  const scoredAds = rankedAds.filter((ad) => ad.competitorBenchmarkScore != null);
+  const avgBenchmark =
+    scoredAds.length > 0
+      ? scoredAds.reduce((sum, ad) => sum + (ad.competitorBenchmarkScore as number), 0) / scoredAds.length
+      : null;
+  const tierMix = { STRONG: 0, MODERATE: 0, WEAK: 0, LOW: 0 };
+  for (const ad of rankedAds) {
+    if (ad.benchmarkTier && ad.benchmarkTier in tierMix) {
+      tierMix[ad.benchmarkTier as keyof typeof tierMix] += 1;
+    }
+  }
+  const highConfidenceCount = rankedAds.filter((ad) => ad.benchmarkConfidence === 'HIGH').length;
+  const notScoredCount = rankedAds.length - scoredAds.length;
 
   return (
     <section>
@@ -105,7 +131,16 @@ export default async function CompetitorDetailPage({
       <div className="card">
         <h2>Summary</h2>
         <p>Total ads: {competitor._count.ads}</p>
-        <p>Qualified ads: {competitor.ads.length}</p>
+        <p>
+          Average benchmark (scored):{' '}
+          {avgBenchmark !== null ? `${avgBenchmark.toFixed(1)} / 10` : 'N/A'}
+        </p>
+        <p>
+          Tier mix: Strong {tierMix.STRONG} · Moderate {tierMix.MODERATE} · Weak{' '}
+          {tierMix.WEAK} · Low {tierMix.LOW}
+        </p>
+        <p>High-confidence ads (Vision): {highConfidenceCount}</p>
+        <p>Not scored yet: {notScoredCount}</p>
         <p>Scan runs: {competitor._count.scanRuns}</p>
       </div>
 
@@ -126,27 +161,48 @@ export default async function CompetitorDetailPage({
       )}
 
       <div className="card">
-        <h2>Recent qualified ads</h2>
-        {competitor.ads.length === 0 ? (
-          <p>No qualified ads found for this competitor.</p>
+        <h2>Competitor ads — ranked by benchmark</h2>
+        {rankedAds.length === 0 ? (
+          <p>No ads found for this competitor yet.</p>
         ) : (
-          competitor.ads.map((ad) => (
-            <div className="card" key={ad.id}>
-              <p>
-                <strong>{ad.productOrService ?? 'No product name'}</strong> · Score{' '}
-                {ad.score.toFixed(1)} / 10
-              </p>
-              <p><strong>Format:</strong> {ad.adFormat}</p>
-              <p><strong>Headline:</strong> {ad.headline ?? 'No headline available'}</p>
-              <p>
-                <Link href={`/ads/${ad.id}`}>Open ad detail</Link>
-                {' | '}
-                <a href={ad.adLink} target="_blank" rel="noreferrer">
-                  Open Facebook ad
-                </a>
-              </p>
-            </div>
-          ))
+          rankedAds.map((ad) => {
+            const scored = ad.competitorBenchmarkScore != null;
+            return (
+              <div className="card" key={ad.id}>
+                <p>
+                  <strong>
+                    {scored
+                      ? `${(ad.competitorBenchmarkScore as number).toFixed(1)} / 10`
+                      : 'Not scored yet'}
+                  </strong>
+                  {scored && <> · {tierLabel(ad.benchmarkTier)}</>}
+                  {' · '}
+                  <span className="badge">{confidenceLabel(ad.benchmarkConfidence)}</span>
+                </p>
+                <p>
+                  <strong>Format:</strong> {ad.adFormat}
+                  {' · '}
+                  <strong>Creative:</strong> {creativeSourceLabel(ad.creativeSource)}
+                  {' · '}
+                  <strong>Evidence:</strong> {evidenceLabel(ad.evidenceSource)}
+                </p>
+                <p>
+                  <strong>Headline:</strong>{' '}
+                  {ad.headline ?? ad.metaAdId ?? 'No headline available'}
+                </p>
+                <p className="muted" style={{ fontSize: '12px' }}>
+                  Internal QA score: {ad.score.toFixed(1)} / 10 (for comparison only)
+                </p>
+                <p>
+                  <Link href={`/ads/${ad.id}`}>Open ad detail</Link>
+                  {' | '}
+                  <a href={ad.adLink} target="_blank" rel="noreferrer">
+                    Open Facebook ad
+                  </a>
+                </p>
+              </div>
+            );
+          })
         )}
       </div>
 

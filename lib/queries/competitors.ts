@@ -156,6 +156,36 @@ export function getCompetitorById(id: string) {
   });
 }
 
+/**
+ * Returns ALL ads for a competitor (not just qualified), ranked by the competitor
+ * benchmark score. SQLite sorts NULL lowest, so `competitorBenchmarkScore: 'desc'`
+ * places not-yet-scored ads last automatically; the secondary `score` sort keeps
+ * ordering stable among them. Internal QA `score`/`qualified` are returned for the
+ * small "for comparison" line on the page, not as the primary score.
+ */
+export function getCompetitorAdsRanked(competitorId: string, limit = 200) {
+  return db.ad.findMany({
+    where: { competitorId },
+    select: {
+      id: true,
+      metaAdId: true,
+      adFormat: true,
+      headline: true,
+      adLink: true,
+      score: true,
+      qualified: true,
+      competitorBenchmarkScore: true,
+      benchmarkTier: true,
+      benchmarkConfidence: true,
+      evidenceSource: true,
+      creativeSource: true,
+      benchmarkScoredAt: true,
+    },
+    orderBy: [{ competitorBenchmarkScore: 'desc' }, { score: 'desc' }],
+    take: limit,
+  });
+}
+
 export function getCompetitorWithScanHistory(id: string) {
   return db.competitor.findUnique({
     where: { id },
