@@ -22,6 +22,8 @@ import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
 import { resolveCreativeContext } from '@/lib/analysis/creativeAssetAnalyser';
 import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
+import { scoreCompetitorBenchmarkAd } from '@/lib/analysis/competitorScoring';
+import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -87,6 +89,7 @@ type ScoredRow = {
   copyWasContaminated: boolean;
   rawAdCopy: string;
   creativeSource: CreativeSource;
+  benchmark: CompetitorBenchmark;
   error: null;
 };
 
@@ -325,6 +328,7 @@ async function main(): Promise<void> {
 
       const exampleRow = toExampleRow(row, creative);
       const analysis   = analyseAdRow(exampleRow, format);
+      const benchmark  = scoreCompetitorBenchmarkAd(analysis, creative.source);
       const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
       results.push({
         rowNumber,
@@ -332,6 +336,7 @@ async function main(): Promise<void> {
         mediaType: row.media_type.trim().toUpperCase(),
         format,
         analysis,
+        benchmark,
         copyPreview:          truncate(row.ad_copy.trim() || row.headline.trim(), 80),
         visualDescPreview:    truncate(creative.visual_description, 80),
         creativeNotesPreview: truncate(creative.creative_notes, 80),
@@ -384,7 +389,7 @@ async function main(): Promise<void> {
       copyPreview, visualDescPreview, creativeNotesPreview,
       exampleRowAnalysis, exampleRowCreativeAnalysis,
       exampleRowCopy, exampleRowHeadline, exampleRowDescription,
-      copyWasContaminated, rawAdCopy, creativeSource,
+      copyWasContaminated, rawAdCopy, creativeSource, benchmark,
     } = result;
 
     const sourceLabel =
@@ -414,9 +419,21 @@ async function main(): Promise<void> {
     console.log(`      Description:       ${truncate(exampleRowDescription, 120)}`);
     console.log('    ───────────────────────────────────────────────────────');
     console.log('');
-    console.log(`    Overall score: ${scoreBar(analysis.overallScore)}`);
-    console.log(`    Qualified:     ${analysis.qualified ? `YES ✓  (≥ ${SCORE_THRESHOLD})` : `NO    (below ${SCORE_THRESHOLD})`}`);
-    console.log(`    Final verdict: ${analysis.finalVerdict}`);
+    // ── Competitor benchmark (primary lens for competitor ads) ──
+    const confIcon = benchmark.confidence === 'HIGH' ? '🟢' : benchmark.confidence === 'MEDIUM' ? '🟡' : '🔴';
+    console.log('    ══ COMPETITOR BENCHMARK (primary for competitor ads) ══');
+    console.log(`    Benchmark score:  ${scoreBar(benchmark.benchmarkScore)}`);
+    console.log(`    Benchmark tier:   ${benchmark.tier}`);
+    console.log(`    Confidence:       ${confIcon} ${benchmark.confidence}`);
+    console.log(`    Evidence source:  ${benchmark.evidenceSource}`);
+    console.log(`    Formula:          ${benchmark.formula}`);
+    console.log(`    Inputs:           ${benchmark.breakdown.map((b) => `${b.label}=${b.value.toFixed(1)}×${b.weight}`).join('  ')}`);
+    if (benchmark.warning) console.log(`    ⚠  ${benchmark.warning}`);
+    console.log('');
+    // ── Internal QA score (OOM internal scorer — shown for comparison only) ──
+    console.log(`    Internal QA score: ${scoreBar(analysis.overallScore)}`);
+    console.log(`    QA qualified:      ${analysis.qualified ? `YES ✓  (≥ ${SCORE_THRESHOLD})` : `NO    (below ${SCORE_THRESHOLD})`}   [internal QA gate — not the competitor decision]`);
+    console.log(`    QA final verdict:  ${analysis.finalVerdict}`);
     console.log('');
     console.log('    Component scores:');
     console.log(`      Copy:         ${fmt(analysis.copyScore)}`);
@@ -467,7 +484,7 @@ async function main(): Promise<void> {
     scored.filter((r) => r.analysis.overallScore >= lo && r.analysis.overallScore < hi).length;
 
   console.log(`\n${LINE}`);
-  console.log('  SUMMARY');
+  console.log('  INTERNAL QA SUMMARY  (OOM internal scorer — for comparison only)');
   console.log(LINE);
   console.log(`  READY rows:              ${readyRows.length}`);
   console.log(`  Successfully scored:     ${totalScored}`);
@@ -484,6 +501,36 @@ async function main(): Promise<void> {
   console.log(`    7.0 – 7.9      :  ${band(7.0, 8.0)}`);
   console.log(`    below 7.0      :  ${scored.filter((r) => r.analysis.overallScore < 7.0).length}`);
 
+  // ── Competitor benchmark summary (the primary lens for competitor ads) ──
+  const avgBenchmark = totalScored > 0
+    ? scored.reduce((sum, r) => sum + r.benchmark.benchmarkScore, 0) / totalScored
+    : 0;
+  const tierCount = (t: string) => scored.filter((r) => r.benchmark.tier === t).length;
+  const confCount = (c: string) => scored.filter((r) => r.benchmark.confidence === c).length;
+
+  console.log(`\n${LINE}`);
+  console.log('  COMPETITOR BENCHMARK SUMMARY  (primary lens for competitor ads)');
+  console.log(LINE);
+  console.log(`  Average benchmark score: ${totalScored > 0 ? avgBenchmark.toFixed(2) : 'N/A'}`);
+  console.log('');
+  console.log('  Tier distribution:');
+  console.log(`    Strong   (8.0–10) :  ${tierCount('Strong competitor signal')}`);
+  console.log(`    Moderate (6.5–7.9):  ${tierCount('Moderate competitor signal')}`);
+  console.log(`    Weak     (5.0–6.4):  ${tierCount('Weak competitor signal')}`);
+  console.log(`    Low      (< 5.0)  :  ${tierCount('Low competitor signal')}`);
+  console.log('');
+  console.log('  Confidence distribution:');
+  console.log(`    🟢 HIGH   (ASSET / Vision)        :  ${confCount('HIGH')}`);
+  console.log(`    🟡 MEDIUM (MANUAL CSV text)       :  ${confCount('MEDIUM')}`);
+  console.log(`    🔴 LOW    (FALLBACK / no evidence):  ${confCount('LOW')}`);
+  const lowConf = confCount('MEDIUM') + confCount('LOW');
+  if (lowConf > 0) {
+    console.log('');
+    console.log(`  ⚠  ${lowConf} row(s) are MEDIUM/LOW confidence — their benchmark scores`);
+    console.log('     are based on manual text or no creative evidence, not Vision analysis.');
+    console.log('     Do not rank them alongside HIGH-confidence rows without this caveat.');
+  }
+
   // ── Final verdict ────────────────────────────────────────────────────────────
   console.log(`\n${LINE}`);
   console.log('  FINAL VERDICT');
@@ -492,15 +539,19 @@ async function main(): Promise<void> {
   const hasFail = totalErrored > 0;
 
   if (!hasFail) {
+    const strong   = scored.filter((r) => r.benchmark.tier === 'Strong competitor signal').length;
+    const moderate = scored.filter((r) => r.benchmark.tier === 'Moderate competitor signal').length;
+    const highConf = scored.filter((r) => r.benchmark.confidence === 'HIGH').length;
     console.log(`\n  ✓ PASS`);
     console.log(`    ${totalScored} READY row(s) scored with 0 errors.`);
-    if (qualifiedRows.length === 0) {
-      console.log(`    Note: 0 rows qualified (score ≥ ${SCORE_THRESHOLD}). This does not fail the preview.`);
-      console.log('    Review scores above to understand signal quality before planning ingestion.');
-    } else {
-      console.log(`    ${qualifiedRows.length} of ${totalScored} rows qualify (score ≥ ${SCORE_THRESHOLD}).`);
-    }
-    console.log('    Next step: plan ingest-browser-collected-ads.ts with META_DRY_RUN=true support.');
+    console.log('');
+    console.log('    Competitor benchmark (the decision lens for competitor ads):');
+    console.log(`      ${strong} strong + ${moderate} moderate competitor signal(s); ${highConf}/${totalScored} are HIGH confidence (Vision).`);
+    console.log('      Use the benchmark score + tier + confidence to rank competitor ads —');
+    console.log('      NOT the internal QA "qualified ≥ 7" gate, which is built for OOM\'s own ads.');
+    console.log('');
+    console.log(`    (Internal QA: ${qualifiedRows.length}/${totalScored} would pass the 7.0 QA gate — shown for comparison only.)`);
+    console.log('    Next step: confirm these benchmark scores look right before any ingestion work.');
   } else {
     console.log(`\n  ✗ FAIL`);
     console.log(`    ${totalErrored} row(s) errored during scoring.`);
