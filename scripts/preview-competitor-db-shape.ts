@@ -51,17 +51,8 @@ type AdView = {
   recommendedUse: string;
 };
 
-// ─── recommendedUse — derived from tier + confidence (preview-only logic) ───────
-
-function recommendedUse(tier: string, confidence: string): string {
-  if (confidence === 'LOW') return 'Reference only — low confidence (no creative seen)';
-  const base =
-    tier === 'Strong competitor signal'   ? 'Model / reverse-engineer — strong signal' :
-    tier === 'Moderate competitor signal' ? 'Study — worth analysing' :
-    tier === 'Weak competitor signal'     ? 'Reference only — weak signal' :
-                                            'Archive — low signal';
-  return confidence === 'MEDIUM' ? `${base} (verify — manual text only)` : base;
-}
+// recommendedUse now comes from competitorScoring.ts (benchmark.recommendedUse) so
+// the preview and ingestion share one source of truth.
 
 function buildView(
   metaAdId: string,
@@ -80,7 +71,7 @@ function buildView(
     internalQaQualified: analysis.qualified,
     internalQaVerdict: analysis.finalVerdict,
     benchmark,
-    recommendedUse: recommendedUse(benchmark.tier, benchmark.confidence),
+    recommendedUse: benchmark.recommendedUse,
   };
 }
 

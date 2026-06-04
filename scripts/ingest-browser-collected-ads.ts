@@ -35,6 +35,8 @@ import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
 import { resolveCreativeContext } from '@/lib/analysis/creativeAssetAnalyser';
 import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
+import { scoreCompetitorBenchmarkAd } from '@/lib/analysis/competitorScoring';
+import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -108,6 +110,7 @@ type ProcessedRow = {
   row: BrowserAdRow;
   copyWasContaminated: boolean;
   creativeSource: CreativeSource;
+  benchmark: CompetitorBenchmark;
 };
 
 type ErroredRow = {
@@ -270,7 +273,7 @@ function printDryRunRow(
   competitor: CompetitorRecord,
   DIV: string,
 ): void {
-  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated, creativeSource } = r;
+  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated, creativeSource, benchmark } = r;
   const outcomeIcon = outcome === 'WOULD_INSERT' ? '✓' : '○';
   const outcomeLabel = outcome === 'WOULD_INSERT'
     ? '[WOULD INSERT]'
@@ -315,6 +318,15 @@ function printDryRunRow(
   console.log(`    productOrService:${row.competitor_name.trim() || '(empty)'}`);
 
   console.log('');
+  console.log('  Competitor benchmark (NEW — Ad fields):');
+  console.log(`    competitorBenchmarkScore: ${benchmark.benchmarkScore.toFixed(2)}`);
+  console.log(`    benchmarkTier:            ${benchmark.tierToken}`);
+  console.log(`    benchmarkConfidence:      ${benchmark.confidence}`);
+  console.log(`    evidenceSource:           ${benchmark.evidenceToken}`);
+  console.log(`    creativeSource:           ${creativeSource}`);
+  console.log(`    benchmarkScoredAt:        (set to now on write)`);
+
+  console.log('');
   console.log('  AdAnalysis record:');
   console.log(`    overallScore:        ${analysis.overallScore.toFixed(2)}`);
   console.log(`    finalVerdict:        ${analysis.finalVerdict}`);
@@ -332,6 +344,8 @@ function printDryRunRow(
   console.log(`    aidaInterest:        ${analysis.aidaScores.interest.toFixed(1)}`);
   console.log(`    aidaDesire:          ${analysis.aidaScores.desire.toFixed(1)}`);
   console.log(`    aidaAction:          ${analysis.aidaScores.action.toFixed(1)}`);
+  console.log(`    recommendedUse:          ${truncate(benchmark.recommendedUse, 70)}`);
+  console.log(`    benchmarkBreakdownJson:  ${truncate(JSON.stringify({ formula: benchmark.formula, breakdown: benchmark.breakdown }), 90)}`);
 
   const activeTriggers = analysis.behaviouralTriggers.filter((t) => t.strength !== 'MISSING');
   if (activeTriggers.length > 0) {
@@ -560,6 +574,7 @@ async function main(): Promise<void> {
     row: BrowserAdRow;
     copyWasContaminated: boolean;
     creativeSource: CreativeSource;
+    benchmark: CompetitorBenchmark;
   };
 
   type PreErrorRow = {
@@ -593,6 +608,7 @@ async function main(): Promise<void> {
 
       const exampleRow = toExampleRow(row, creative);
       const analysis   = analyseAdRow(exampleRow, format);
+      const benchmark  = scoreCompetitorBenchmarkAd(analysis, creative.source);
       const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
       scored.push({
         rowNumber,
@@ -604,6 +620,7 @@ async function main(): Promise<void> {
         row,
         copyWasContaminated,
         creativeSource: creative.source,
+        benchmark,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -725,6 +742,14 @@ async function main(): Promise<void> {
               firstSeenAt:      now,
               lastSeenAt:       now,
               adStatus:         'ACTIVE',
+
+              // Competitor benchmark — ranking/filtering fields (canonical tokens)
+              competitorBenchmarkScore: r.benchmark.benchmarkScore,
+              benchmarkTier:            r.benchmark.tierToken,
+              benchmarkConfidence:      r.benchmark.confidence,
+              evidenceSource:           r.benchmark.evidenceToken,
+              creativeSource:           r.creativeSource,
+              benchmarkScoredAt:        now,
             },
           });
 
@@ -791,6 +816,10 @@ async function main(): Promise<void> {
                 ? JSON.stringify(r.analysis.rewriteDirection)
                 : null,
               finalVerdict: r.analysis.finalVerdict,
+
+              // Competitor benchmark — display/detail fields
+              recommendedUse:         r.benchmark.recommendedUse,
+              benchmarkBreakdownJson: JSON.stringify({ formula: r.benchmark.formula, breakdown: r.benchmark.breakdown }),
             },
           });
         });
@@ -910,7 +939,6 @@ async function main(): Promise<void> {
       console.log(`    All ${insertCandidates.length} would be stored as adSource='${AD_SOURCE}'.`);
       console.log(`    qualified=true:  ${qualifiedInserted.length}  |  qualified=false: ${unqualifiedInserted.length}`);
       console.log('    Non-qualified ads are stored as competitor reference data.');
-      console.log('    Winning-ad views can filter qualified=true at query time.');
     }
     if (skipCandidates.length > 0) {
       console.log(`    ${skipCandidates.length} duplicate(s) would be skipped (competitorId + metaAdId already in DB).`);
@@ -924,7 +952,7 @@ async function main(): Promise<void> {
     console.log('       BROWSER_INGEST_WRITE=true');
     console.log('       BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND');
   } else {
-    console.log(`\n  \u26a0  ${preErrors.length} row(s) errored and would be skipped.`);
+    console.log(`\n  ⚠  ${preErrors.length} row(s) errored and would be skipped.`);
     console.log('    Review errors above before proceeding to live ingestion.');
   }
 
@@ -954,6 +982,6 @@ function printSafetyFooter(LINE: string, dryRun: boolean): void {
 
 main().catch((err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
-  console.error('\n\u274c Fatal error:', message);
+  console.error('\n❌ Fatal error:', message);
   process.exit(1);
 });
