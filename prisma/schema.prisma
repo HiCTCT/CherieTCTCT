@@ -73,12 +73,23 @@ model Ad {
   firstSeenAt      DateTime?
   lastSeenAt       DateTime?
   adStatus         String      @default("ACTIVE")
+
+  // ── Competitor benchmark — ranking/filtering keys (additive, all nullable) ──
+  // Internal-QA fields (score, qualified) above are unchanged and kept separate.
+  competitorBenchmarkScore Float?     // 0–10, primary ranking key for the competitor page
+  benchmarkTier            String?    // STRONG | MODERATE | WEAK | LOW
+  benchmarkConfidence      String?    // HIGH | MEDIUM | LOW
+  evidenceSource           String?    // VISION | MANUAL | NONE
+  creativeSource           String?    // ASSET | MANUAL | FALLBACK
+  benchmarkScoredAt        DateTime?  // when the benchmark was computed (re-score tracking)
+
   analysis         AdAnalysis?
   adScanRecords    AdScanRecord[]
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 
   @@index([qualified, score])
+  @@index([competitorId, competitorBenchmarkScore])
 }
 
 model AdAnalysis {
@@ -142,6 +153,10 @@ model AdAnalysis {
   recommendationsJson        String?
   rewriteDirectionJson       String?
   finalVerdict               String?
+
+  // ── Competitor benchmark — display-only detail (additive, nullable) ──
+  recommendedUse             String?  // derived analyst guidance
+  benchmarkBreakdownJson     String?  // { formula, breakdown[] } for transparency
 
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt
