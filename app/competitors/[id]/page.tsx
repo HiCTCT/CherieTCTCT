@@ -46,16 +46,79 @@ function getMetaReadiness(metaPageId: string | null, lastScannedAt: Date | null)
   };
 }
 
+const tc = (s: string): string => s.charAt(0) + s.slice(1).toLowerCase();
+
+function FilterGroup({
+  label,
+  paramKey,
+  options,
+  current,
+  buildHref,
+  includeAll = true,
+}: {
+  label: string;
+  paramKey: string;
+  options: { value: string; label: string }[];
+  current: string | undefined;
+  buildHref: (o: Record<string, string | undefined>) => string;
+  includeAll?: boolean;
+}) {
+  const style = (active: boolean) => ({ fontWeight: active ? 700 : 400 });
+  return (
+    <p style={{ margin: '4px 0' }}>
+      <strong>{label}:</strong>{' '}
+      {includeAll && (
+        <Link href={buildHref({ [paramKey]: undefined })} style={style(!current)}>
+          All
+        </Link>
+      )}
+      {options.map((o, i) => (
+        <span key={o.value}>
+          {(includeAll || i > 0) && ' · '}
+          <Link href={buildHref({ [paramKey]: o.value })} style={style(current === o.value)}>
+            {o.label}
+          </Link>
+        </span>
+      ))}
+    </p>
+  );
+}
+
 export default async function CompetitorDetailPage({
   params,
+  searchParams,
 }: {
   params: { id: string };
+  searchParams?: Record<string, string | string[] | undefined>;
 }) {
+  // ── Parse + validate filters from the URL ──
+  const sp = searchParams ?? {};
+  const one = (k: string) => (typeof sp[k] === 'string' ? (sp[k] as string) : undefined);
+
+  const TIERS = ['STRONG', 'MODERATE', 'WEAK', 'LOW'];
+  const CONFS = ['HIGH', 'MEDIUM', 'LOW'];
+  const SOURCES = ['ASSET', 'MANUAL', 'FALLBACK'];
+  const FORMATS = ['STATIC', 'VIDEO'];
+  const SORTS = ['benchmark', 'newest', 'longestRunning'];
+
+  const tier = TIERS.includes(one('tier') ?? '') ? one('tier') : undefined;
+  const conf = CONFS.includes(one('confidence') ?? '') ? one('confidence') : undefined;
+  const source = SOURCES.includes(one('source') ?? '') ? one('source') : undefined;
+  const format = FORMATS.includes(one('format') ?? '') ? one('format') : undefined;
+  const sort = (SORTS.includes(one('sort') ?? '') ? one('sort') : 'benchmark') as
+    'benchmark' | 'newest' | 'longestRunning';
+
   const [competitor, competitorWithScans, pendingAdCount, rankedAds] = await Promise.all([
     getCompetitorById(params.id),
     getCompetitorWithScanHistory(params.id),
     getPendingAdCount(params.id),
-    getCompetitorAdsRanked(params.id),
+    getCompetitorAdsRanked(params.id, {
+      benchmarkTier: tier,
+      benchmarkConfidence: conf,
+      creativeSource: source,
+      adFormat: format,
+      sort,
+    }),
   ]);
 
   if (!competitor) {
@@ -64,6 +127,27 @@ export default async function CompetitorDetailPage({
 
   const scanRuns = competitorWithScans?.scanRuns ?? [];
   const metaReadiness = getMetaReadiness(competitor.metaPageId, competitor.lastScannedAt);
+
+  // ── Filter/sort URL helpers ──
+  const hasActiveFilters = Boolean(tier || conf || source || format);
+  const buildHref = (overrides: Record<string, string | undefined>): string => {
+    const merged: Record<string, string | undefined> = {
+      tier, confidence: conf, source, format, sort, ...overrides,
+    };
+    const usp = new URLSearchParams();
+    for (const [k, v] of Object.entries(merged)) {
+      // Omit empty values and the default sort to keep URLs clean.
+      if (v && !(k === 'sort' && v === 'benchmark')) usp.set(k, v);
+    }
+    const qs = usp.toString();
+    return `/competitors/${params.id}${qs ? `?${qs}` : ''}`;
+  };
+
+  const activeFilterLabels: string[] = [];
+  if (tier) activeFilterLabels.push(`Tier = ${tc(tier)}`);
+  if (conf) activeFilterLabels.push(`Confidence = ${tc(conf)}`);
+  if (source) activeFilterLabels.push(`Creative source = ${tc(source)}`);
+  if (format) activeFilterLabels.push(`Format = ${tc(format)}`);
 
   // ── Benchmark summary (computed from the ranked ads) ──
   const scoredAds = rankedAds.filter((ad) => ad.competitorBenchmarkScore != null);
@@ -129,10 +213,13 @@ export default async function CompetitorDetailPage({
       </div>
 
       <div className="card">
-        <h2>Summary</h2>
-        <p>Total ads: {competitor._count.ads}</p>
+        <h2>Benchmark summary {hasActiveFilters ? '(filtered view)' : '(all ads)'}</h2>
         <p>
-          Average benchmark (scored):{' '}
+          Ads shown: {rankedAds.length}
+          {hasActiveFilters && <> of {competitor._count.ads} total</>}
+        </p>
+        <p>
+          Average benchmark score (scored):{' '}
           {avgBenchmark !== null ? `${avgBenchmark.toFixed(1)} / 10` : 'N/A'}
         </p>
         <p>
@@ -161,9 +248,92 @@ export default async function CompetitorDetailPage({
       )}
 
       <div className="card">
+        <h2>Filter &amp; sort</h2>
+        <FilterGroup
+          label="Tier"
+          paramKey="tier"
+          current={tier}
+          buildHref={buildHref}
+          options={[
+            { value: 'STRONG', label: 'Strong' },
+            { value: 'MODERATE', label: 'Moderate' },
+            { value: 'WEAK', label: 'Weak' },
+            { value: 'LOW', label: 'Low' },
+          ]}
+        />
+        <FilterGroup
+          label="Confidence"
+          paramKey="confidence"
+          current={conf}
+          buildHref={buildHref}
+          options={[
+            { value: 'HIGH', label: 'High' },
+            { value: 'MEDIUM', label: 'Medium' },
+            { value: 'LOW', label: 'Low' },
+          ]}
+        />
+        <FilterGroup
+          label="Creative source"
+          paramKey="source"
+          current={source}
+          buildHref={buildHref}
+          options={[
+            { value: 'ASSET', label: 'Asset' },
+            { value: 'MANUAL', label: 'Manual' },
+            { value: 'FALLBACK', label: 'Fallback' },
+          ]}
+        />
+        <FilterGroup
+          label="Format"
+          paramKey="format"
+          current={format}
+          buildHref={buildHref}
+          options={[
+            { value: 'STATIC', label: 'Static' },
+            { value: 'VIDEO', label: 'Video' },
+          ]}
+        />
+        <FilterGroup
+          label="Sort"
+          paramKey="sort"
+          current={sort}
+          buildHref={buildHref}
+          includeAll={false}
+          options={[
+            { value: 'benchmark', label: 'Benchmark' },
+            { value: 'newest', label: 'Newest' },
+            { value: 'longestRunning', label: 'Longest-running' },
+          ]}
+        />
+        {hasActiveFilters && (
+          <p style={{ marginTop: '8px' }}>
+            <strong>Active filters:</strong> {activeFilterLabels.join(', ')}
+            {' · '}
+            <Link
+              href={buildHref({ tier: undefined, confidence: undefined, source: undefined, format: undefined })}
+            >
+              Clear filters
+            </Link>
+          </p>
+        )}
+      </div>
+
+      <div className="card">
         <h2>Competitor ads — ranked by benchmark</h2>
         {rankedAds.length === 0 ? (
-          <p>No ads found for this competitor yet.</p>
+          hasActiveFilters ? (
+            <p>
+              No ads match these filters.{' '}
+              <Link
+                href={buildHref({ tier: undefined, confidence: undefined, source: undefined, format: undefined })}
+              >
+                Clear filters
+              </Link>{' '}
+              to view all competitor ads.
+            </p>
+          ) : (
+            <p>No ads found for this competitor yet.</p>
+          )
         ) : (
           rankedAds.map((ad) => {
             const scored = ad.competitorBenchmarkScore != null;

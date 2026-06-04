@@ -156,16 +156,57 @@ export function getCompetitorById(id: string) {
   });
 }
 
+export type CompetitorAdsSort = 'benchmark' | 'newest' | 'longestRunning';
+
+export type CompetitorAdsFilter = {
+  benchmarkTier?: string;       // STRONG | MODERATE | WEAK | LOW
+  benchmarkConfidence?: string; // HIGH | MEDIUM | LOW
+  creativeSource?: string;      // ASSET | MANUAL | FALLBACK
+  adFormat?: string;            // STATIC | VIDEO
+  sort?: CompetitorAdsSort;
+  limit?: number;
+};
+
 /**
- * Returns ALL ads for a competitor (not just qualified), ranked by the competitor
- * benchmark score. SQLite sorts NULL lowest, so `competitorBenchmarkScore: 'desc'`
- * places not-yet-scored ads last automatically; the secondary `score` sort keeps
- * ordering stable among them. Internal QA `score`/`qualified` are returned for the
- * small "for comparison" line on the page, not as the primary score.
+ * Returns ALL ads for a competitor (not just qualified), filtered + sorted for the
+ * competitor detail page.
+ *
+ * Default sort (`benchmark`) ranks by competitorBenchmarkScore desc then internal
+ * score desc. SQLite sorts NULL lowest, so on a `desc` sort not-yet-scored ads land
+ * last automatically. Internal QA `score`/`qualified` are returned only for the
+ * small "for comparison" line, not as the primary score.
+ *
+ * Sort options:
+ *   benchmark       — competitorBenchmarkScore desc, then score desc (default)
+ *   newest          — activeSince desc, then firstSeenAt desc
+ *   longestRunning  — activeSince asc, then competitorBenchmarkScore desc
+ *
+ * (Note: on SQLite, `activeSince asc` places NULL activeSince first; ads missing a
+ * start date will appear at the top of "longest-running". Most browser-collected ads
+ * carry activeSince, so this is a minor edge case.)
  */
-export function getCompetitorAdsRanked(competitorId: string, limit = 200) {
+export function getCompetitorAdsRanked(competitorId: string, filter: CompetitorAdsFilter = {}) {
+  const where: Prisma.AdWhereInput = { competitorId };
+  if (filter.benchmarkTier)       where.benchmarkTier = filter.benchmarkTier;
+  if (filter.benchmarkConfidence) where.benchmarkConfidence = filter.benchmarkConfidence;
+  if (filter.creativeSource)      where.creativeSource = filter.creativeSource;
+  if (filter.adFormat)            where.adFormat = filter.adFormat;
+
+  let orderBy: Prisma.AdOrderByWithRelationInput[];
+  switch (filter.sort) {
+    case 'newest':
+      orderBy = [{ activeSince: 'desc' }, { firstSeenAt: 'desc' }];
+      break;
+    case 'longestRunning':
+      orderBy = [{ activeSince: 'asc' }, { competitorBenchmarkScore: 'desc' }];
+      break;
+    case 'benchmark':
+    default:
+      orderBy = [{ competitorBenchmarkScore: 'desc' }, { score: 'desc' }];
+  }
+
   return db.ad.findMany({
-    where: { competitorId },
+    where,
     select: {
       id: true,
       metaAdId: true,
@@ -181,8 +222,8 @@ export function getCompetitorAdsRanked(competitorId: string, limit = 200) {
       creativeSource: true,
       benchmarkScoredAt: true,
     },
-    orderBy: [{ competitorBenchmarkScore: 'desc' }, { score: 'desc' }],
-    take: limit,
+    orderBy,
+    take: filter.limit ?? 200,
   });
 }
 
