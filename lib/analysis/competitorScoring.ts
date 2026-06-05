@@ -61,7 +61,7 @@ const EVIDENCE_TOKEN: Record<CreativeSource, EvidenceToken> = {
 
 const EVIDENCE_LABEL: Record<CreativeSource, string> = {
   ASSET:    'Vision creative analysis (creative seen by Claude Vision)',
-  MANUAL:   'Manual CSV text (creative NOT analysed by Vision)',
+  MANUAL:   'Stored manual analysis (creative NOT analysed by Vision)',
   FALLBACK: 'No creative evidence (no asset, no manual text)',
 };
 
@@ -105,7 +105,7 @@ export function confidenceLabel(token: string | null | undefined): string {
 export function evidenceLabel(token: string | null | undefined): string {
   switch (token) {
     case 'VISION': return 'Vision creative analysis';
-    case 'MANUAL': return 'Manual CSV text';
+    case 'MANUAL': return 'Stored manual analysis';
     case 'NONE':   return 'No creative evidence';
     default:       return '—';
   }
