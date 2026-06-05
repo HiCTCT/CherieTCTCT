@@ -64,9 +64,15 @@ export default async function DashboardPage({
         <p><strong>Qualified ads:</strong> {qualifiedAdCount}</p>
       </div>
 
-      <p>
-        <Link href="/industries">Browse industries</Link>
-      </p>
+      <div className="card">
+        <h2>Browse</h2>
+        <p>
+          <Link href="/industries">→ Browse industries</Link>
+        </p>
+        <p>
+          <Link href="/competitors">→ Browse competitors</Link>
+        </p>
+      </div>
 
       <h2>{heading}</h2>
 
