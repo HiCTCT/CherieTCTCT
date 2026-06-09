@@ -27,6 +27,7 @@
     "browser:ingest": "tsx scripts/ingest-browser-collected-ads.ts",
     "browser:capture-assets": "tsx scripts/capture-browser-ad-assets.ts",
     "browser:create-csv": "tsx scripts/create-browser-ads-csv-from-meta-page.ts",
+    "browser:workflow-one": "tsx scripts/run-one-competitor-browser-workflow.ts",
     "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts"
   },
   "dependencies": {
@@ -46,7 +47,5 @@
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
-  }
+  "prisma": { "seed": "tsx prisma/seed.ts" }
 }
