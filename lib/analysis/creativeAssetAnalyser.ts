@@ -64,30 +64,30 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5';
 const MAX_TOKENS = 1024;
 const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
-const IMAGE_PROMPT = `You are analysing a Meta Ad Library advertising creative for a Singapore home furniture or lifestyle brand. Your output will be used to score the ad's marketing effectiveness.
+const IMAGE_PROMPT = `You are analysing a Meta Ad Library advertising creative for a competitor advertiser. The advertiser may be in any industry and may sell a product or a service. Describe only what is actually shown in this creative; do not assume an industry or category and do not compare it to any other brand or product type. Your output will be used to score the ad's marketing effectiveness.
 
 Provide exactly two sections:
 
 VISUAL_DESCRIPTION:
-2-4 sentences covering: product shown, setting or background, human presence (yes/no), text overlays visible (yes/no and what they say if clear), price or discount visible (yes/no), CTA button or text visible (yes/no and wording if clear), brand or logo visible (yes/no), visual hierarchy (strong/moderate/weak), composition quality (polished/clean/cluttered), scroll-stopping strength (high/medium/low).
+2-4 sentences covering: product or service shown, setting or background, human presence (yes/no), text overlays visible (yes/no and what they say if clear), price or discount visible (yes/no), CTA button or text visible (yes/no and wording if clear), brand or logo visible (yes/no), visual hierarchy (strong/moderate/weak), composition quality (polished/clean/cluttered), scroll-stopping strength (high/medium/low).
 
 CREATIVE_NOTES:
 First line only: "Attention X/10. Interest X/10. Desire X/10. Action X/10." (score each dimension 1-10 based solely on what you can observe).
-Then 2-3 sentences covering: funnel stage (TOFU/MOFU/BOFU), the ad's primary message or offer, the main emotional hook or trigger, any trust signals present, and one key strength and one key weakness of this creative.
+Then 2-3 sentences covering: the funnel stage this creative appears to target (TOFU/MOFU/BOFU), the ad's primary message or offer, the main emotional hook or trigger, any trust signals present, and one key strength and one key weakness of this creative.
 
 Respond with only the two labelled sections. No preamble or commentary.`;
 
 function buildCarouselPrompt(cardCount: number): string {
-  return `You are analysing a ${cardCount}-card Meta Ad Library carousel ad for a Singapore home furniture or lifestyle brand. Your output will be used to score the ad's marketing effectiveness.
+  return `You are analysing a ${cardCount}-card Meta Ad Library carousel ad for a competitor advertiser. The advertiser may be in any industry and may sell a product or a service. Describe only what is actually shown across these cards; do not assume an industry or category and do not compare it to any other brand or product type. Your output will be used to score the ad's marketing effectiveness.
 
 Provide exactly two sections:
 
 VISUAL_DESCRIPTION:
-Describe the carousel as a unit: products shown across all cards, setting or tone, human presence (yes/no), text overlays present (yes/no), price or offer visible on any card (yes/no), CTA on any card (yes/no and wording if clear), brand or logo visible (yes/no), first-card visual strength (strong/moderate/weak), visual consistency across cards, whether later cards introduce new products or information.
+Describe the carousel as a unit: products or services shown across all cards, setting or tone, human presence (yes/no), text overlays present (yes/no), price or offer visible on any card (yes/no), CTA on any card (yes/no and wording if clear), brand or logo visible (yes/no), first-card visual strength (strong/moderate/weak), visual consistency across cards, whether later cards introduce new products, services, or information.
 
 CREATIVE_NOTES:
 First line only: "Attention X/10. Interest X/10. Desire X/10. Action X/10." (score the carousel as a unit, 1-10 each).
-Then 2-3 sentences covering: funnel stage (TOFU/MOFU/BOFU), first-card hook strength, whether the sequence tells a coherent story or shows product variety, whether the final card drives action, and one key strength and one key weakness of this carousel.
+Then 2-3 sentences covering: the funnel stage this carousel appears to target (TOFU/MOFU/BOFU), first-card hook strength, whether the sequence tells a coherent story or shows product variety, whether the final card drives action, and one key strength and one key weakness of this carousel.
 
 Respond with only the two labelled sections. No preamble or commentary.`;
 }
