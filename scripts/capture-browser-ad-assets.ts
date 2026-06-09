@@ -529,10 +529,61 @@ async function findCreativeArea(
       }
       if (best) log.push('image fallback: largest non-placeholder in-card candidate');
     }
-    if (best) log.push(`accepted image ${Math.round(best.width)}x${Math.round(best.height)}`);
+    // Tier 3: CSS background-image — Meta sometimes renders the creative as a div
+    // with background-image instead of an <img> element; scan for CDN bg URLs.
+    if (!best) {
+      let t3A = 0;
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>('div,section,figure,span'))) {
+        const b  = el.getBoundingClientRect();
+        const ic = b.x >= card.x - P && b.y >= card.y - P &&
+          b.x + b.width  <= card.x + card.width  + P &&
+          b.y + b.height <= card.y + card.height + P;
+        if (!ic || b.width < 120 || b.height < 90) continue;
+        const iv = b.width > 0 && b.height > 0 &&
+          b.x < (window.innerWidth || 1280) && b.y < (window.innerHeight || 900);
+        if (!iv) continue;
+        const bgImg = window.getComputedStyle(el).backgroundImage || '';
+        if (!bgImg || bgImg === 'none') continue;
+        const cdnBg = bgImg.includes('scontent') || bgImg.includes('fbcdn.net') || bgImg.includes('cdninstagram');
+        if (!cdnBg) continue;
+        const a = b.width * b.height;
+        if (a > t3A) { t3A = a; best = { x: b.x, y: b.y, width: b.width, height: b.height }; }
+      }
+      if (best) log.push(`tier3 bg-image: ${Math.round(best.width)}x${Math.round(best.height)} (CSS background-image CDN source)`);
+    }
+    // Tier 4: Semantic layout crop — locate the "Library ID" text element inside the
+    // card (the info footer); take everything ABOVE it as the visual creative area.
+    // This works even when no <img> or bg-image CDN element is detectable.
+    if (!best) {
+      let libY: number | null = null;
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>('span,div,p,a,strong'))) {
+        const txt = (el.textContent || '').toLowerCase().trim();
+        if (!txt.includes('library id')) continue;
+        const b  = el.getBoundingClientRect();
+        const ic = b.x >= card.x - P && b.y >= card.y - P &&
+          b.x + b.width  <= card.x + card.width  + P &&
+          b.y + b.height <= card.y + card.height + P;
+        if (!ic) continue;
+        if (b.height > 80 || b.width > card.width * 0.95) continue; // skip card-sized containers
+        if (libY === null || b.y < libY) libY = b.y;
+      }
+      if (libY !== null) {
+        const vH = libY - card.y;
+        if (vH >= 120 && vH <= card.height * 0.92) {
+          const m = 6; // trim card border artefacts
+          best = { x: card.x + m, y: card.y, width: card.width - m * 2, height: vH };
+          log.push(`tier4 semantic-crop: upper ${Math.round(vH)}px of card (library-id anchor at y=${Math.round(libY)})`);
+        } else {
+          log.push(`tier4 semantic-crop: library-id at y=${Math.round(libY)}, visual area ${Math.round(vH)}px — out of range [120–${Math.round(card.height * 0.92)}]`);
+        }
+      } else {
+        log.push('tier4 semantic-crop: library-id text not found inside card');
+      }
+    }
+    if (best) log.push(`image accepted: ${Math.round(best.width)}x${Math.round(best.height)}`);
     return best
       ? { found: true as const, ...best, notes: log }
-      : { found: false as const, notes: [...log, 'no real creative image (all candidates were placeholders)'] };
+      : { found: false as const, notes: [...log, 'no real creative image found (all tiers exhausted)'] };
 
   }, { card: adCardBBox, mtype: mt });
 
@@ -747,10 +798,12 @@ async function findCentralCard(
     let pick = cands[0]!;
     for (const c of cands) { if (c.vis >= 0.6) { pick = c; break; } }
     // Clamp to the viewport so neighbouring/overflow cards are excluded.
-    const x = Math.max(pick.x, view.x);
-    const y = Math.max(pick.y, view.y);
-    const right  = Math.min(pick.x + pick.w, view.x + view.width);
-    const bottom = Math.min(pick.y + pick.h, view.y + view.height);
+    // A small pad includes the card frame/border without reaching adjacent cards.
+    const PAD = 8;
+    const x = Math.max(pick.x - PAD, view.x);
+    const y = Math.max(pick.y - PAD, view.y);
+    const right  = Math.min(pick.x + pick.w + PAD, view.x + view.width);
+    const bottom = Math.min(pick.y + pick.h + PAD, view.y + view.height);
     log.push(`SELECTED central card at (${Math.round(pick.x)},${Math.round(pick.y)}) ${Math.round(pick.w)}x${Math.round(pick.h)} — closest to viewport centre, vis=${pick.vis.toFixed(2)}; ${cands.length - 1} neighbour card(s) excluded`);
     return { found: true as const, x, y, width: right - x, height: bottom - y, log };
   }, vp);
