@@ -129,6 +129,8 @@ const INACTIVE_PHRASES: string[] = [
   'we could not find this ad',
   'ad is no longer active',
   'this ad has ended',
+  "ad isn't in the ad library",   // Meta empty-state: ad removed / not yet in library
+  'ad is not in the ad library',  // alternate phrasing
   'something went wrong',
   'page not found',
 ];
