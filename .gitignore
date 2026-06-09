@@ -10,3 +10,4 @@ prisma/dev.db.backup*
 *.db.backup*data/creative-assets/
 
 /data/creative-assets/
+data/imports/*.extraction-log.txt

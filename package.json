@@ -26,6 +26,7 @@
     "browser:preview": "tsx scripts/preview-browser-collected-ads.ts",
     "browser:ingest": "tsx scripts/ingest-browser-collected-ads.ts",
     "browser:capture-assets": "tsx scripts/capture-browser-ad-assets.ts",
+    "browser:create-csv": "tsx scripts/create-browser-ads-csv-from-meta-page.ts",
     "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts"
   },
   "dependencies": {
