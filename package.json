@@ -29,6 +29,7 @@
     "browser:create-csv": "tsx scripts/create-browser-ads-csv-from-meta-page.ts",
     "browser:workflow-one": "tsx scripts/run-one-competitor-browser-workflow.ts",
     "browser:workflow-db-one": "tsx scripts/run-db-competitor-browser-workflow.ts",
+    "browser:workflow-client": "tsx scripts/run-client-browser-workflow.ts",
     "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts"
   },
   "dependencies": {
