@@ -85,6 +85,46 @@ function parsePageIdFromUrl(url: string): string {
   return m ? m[1]! : '';
 }
 
+/**
+ * Normalise a raw headline scraped from a Meta ad-preview link. Meta renders the
+ * display URL, the headline, and the CTA button as ONE link, so the scraped text
+ * comes back merged, e.g.:
+ *   "WWW.WATELIER.COMExperience Refined Comfort in PersonBook now"
+ * This strips a leading display-URL / domain and a trailing CTA-button label,
+ * leaving only the real headline. Description is returned trimmed, never invented.
+ */
+function cleanMetaHeadlineText(rawHeadline: string, rawDescription?: string): { headline: string; description: string } {
+  let h = (rawHeadline ?? '').replace(/\s+/g, ' ').trim();
+
+  // 1. Strip a leading display URL / domain glued to the headline start.
+  //    Handles "WWW.WATELIER.COM…", "https://www.x.com…", "X.COM.SG…", and the
+  //    case where the real headline starts with a digit/symbol ("…COM30% Off…").
+  //    The domain is matched case-insensitively, but we only strip when the char
+  //    AFTER the TLD is NOT a lowercase letter — so a true TLD boundary (digit,
+  //    symbol, uppercase, space, or end) is cut, while a longer word such as
+  //    ".community" is left intact. The case-sensitive boundary check is done in
+  //    code because `(?![a-z])` under the /i flag would also exclude uppercase.
+  const domainMatch = h.match(/^\s*(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]*?\.(?:com\.sg|com|sg|org|net)/i);
+  if (domainMatch) {
+    const after = h.slice(domainMatch[0].length);
+    if (after === '' || !/^[a-z]/.test(after)) {
+      h = after.trim();
+    }
+  }
+
+  // 2. Strip a trailing CTA-button label (multi-word labels checked first).
+  const CTAS = [
+    'Send message', 'Learn More', 'See details', 'Contact us', 'Get Quote',
+    'Apply Now', 'Sign Up', 'Shop Now', 'Book now', 'Subscribe', 'Download', 'WhatsApp',
+  ];
+  for (const cta of CTAS) {
+    const re = new RegExp('\\s*' + cta.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i');
+    if (re.test(h)) { h = h.replace(re, '').trim(); break; }
+  }
+
+  return { headline: h.replace(/\s+/g, ' ').trim(), description: (rawDescription ?? '').trim() };
+}
+
 async function dismissOverlays(page: Page): Promise<void> {
   const tryClick = async (selectors: string[]) => {
     for (const sel of selectors) {
@@ -412,6 +452,15 @@ async function main(): Promise<void> {
   let readyCount = 0;
   let needsReviewCount = 0;
   for (const [id, info] of Array.from(ads.entries()).slice(0, MAX_ADS)) {
+    // Normalise headline: strip glued display-URL prefix + CTA-button suffix.
+    const cleaned = cleanMetaHeadlineText(info.headline || '');
+    if (cleaned.headline !== (info.headline || '').trim()) {
+      note('headline cleaned:');
+      note(`  before: ${info.headline}`);
+      note(`  after: ${cleaned.headline}`);
+      info.headline = cleaned.headline;
+    }
+
     const known = info.mediaType === 'IMAGE' || info.mediaType === 'VIDEO' || info.mediaType === 'CAROUSEL';
     const hasText = Boolean((info.copy && info.copy.trim()) || (info.headline && info.headline.trim()));
     const ready = Boolean(id) && known && hasText;
