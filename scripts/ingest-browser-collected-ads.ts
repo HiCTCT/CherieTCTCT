@@ -111,6 +111,8 @@ type ProcessedRow = {
   copyWasContaminated: boolean;
   creativeSource: CreativeSource;
   benchmark: CompetitorBenchmark;
+  capturedAssetPath: string;
+  capturedAssetType: string;
 };
 
 type ErroredRow = {
