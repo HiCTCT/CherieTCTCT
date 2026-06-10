@@ -207,6 +207,17 @@ a {
   font-size: 14px;
 }
 
+/* ── Archived-capture banner (Phase G) ────────────────────── */
+
+.archived-banner {
+  border-left: 4px solid #d97706;
+  background: #fffbeb;
+}
+
+.archived-banner h2 {
+  color: #92400e;
+}
+
 /* ── Trigger badges ───────────────────────────────────────── */
 
 .trigger-list {

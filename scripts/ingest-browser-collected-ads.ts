@@ -273,7 +273,7 @@ function printDryRunRow(
   competitor: CompetitorRecord,
   DIV: string,
 ): void {
-  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated, creativeSource, benchmark } = r;
+  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated, creativeSource, benchmark, capturedAssetPath, capturedAssetType } = r;
   const outcomeIcon = outcome === 'WOULD_INSERT' ? '✓' : '○';
   const outcomeLabel = outcome === 'WOULD_INSERT'
     ? '[WOULD INSERT]'
@@ -310,6 +310,9 @@ function printDryRunRow(
   console.log(`    qualified:       ${analysis.qualified}`);
   console.log(`    reviewStatus:    PENDING`);
   console.log(`    adStatus:        ACTIVE`);
+  console.log(`    lastSeenActiveAt: (now — set on insert)`);
+  console.log(`    capturedAssetPath: ${capturedAssetPath || '(none)'}`);
+  console.log(`    capturedAssetType: ${capturedAssetType}`);
   console.log(`    activeSince:     ${activeSince ? activeSince.toISOString().slice(0, 10) : '(empty)'}`);
   console.log(`    primaryCopy:     ${cleanedCopy ? truncate(cleanedCopy, 80) : '(null — contaminated)'}`);
   console.log(`    headline:        ${truncate(row.headline, 80)}`);
@@ -575,6 +578,8 @@ async function main(): Promise<void> {
     copyWasContaminated: boolean;
     creativeSource: CreativeSource;
     benchmark: CompetitorBenchmark;
+    capturedAssetPath: string;
+    capturedAssetType: string;
   };
 
   type PreErrorRow = {
@@ -610,6 +615,22 @@ async function main(): Promise<void> {
       const analysis   = analyseAdRow(exampleRow, format);
       const benchmark  = scoreCompetitorBenchmarkAd(analysis, creative.source);
       const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
+
+      // Captured creative evidence: store the path as-is, and derive the asset TYPE
+      // from the saved files (image-/card-/frame-), NOT from adFormat.
+      const capturedAssetPath = row.creative_asset_path?.trim() || '';
+      let capturedAssetType = 'UNKNOWN';
+      if (capturedAssetPath) {
+        try {
+          const abs = path.resolve(capturedAssetPath);
+          const st = fs.statSync(abs);
+          const files = (st.isDirectory() ? fs.readdirSync(abs) : [path.basename(abs)]).map((f) => f.toLowerCase());
+          if (files.some((f) => /^image-\d+\.(?:png|jpe?g|webp)$/.test(f)))      capturedAssetType = 'CREATIVE_IMAGE';
+          else if (files.some((f) => /^card-\d+\.(?:png|jpe?g|webp)$/.test(f)))  capturedAssetType = 'CAROUSEL_CARD';
+          else if (files.some((f) => /^frame-\d+\.(?:png|jpe?g|webp)$/.test(f))) capturedAssetType = 'VIDEO_FRAME';
+        } catch { /* folder missing/unreadable — leave UNKNOWN */ }
+      }
+
       scored.push({
         rowNumber,
         adId,
@@ -621,6 +642,8 @@ async function main(): Promise<void> {
         copyWasContaminated,
         creativeSource: creative.source,
         benchmark,
+        capturedAssetPath,
+        capturedAssetType,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -742,6 +765,11 @@ async function main(): Promise<void> {
               firstSeenAt:      now,
               lastSeenAt:       now,
               adStatus:         'ACTIVE',
+
+              // Phase G: captured creative evidence + active-seen tracking (additive)
+              lastSeenActiveAt:  now,
+              capturedAssetPath: r.capturedAssetPath || undefined,
+              capturedAssetType: r.capturedAssetPath ? r.capturedAssetType : undefined,
 
               // Competitor benchmark — ranking/filtering fields (canonical tokens)
               competitorBenchmarkScore: r.benchmark.benchmarkScore,

@@ -74,6 +74,15 @@ model Ad {
   lastSeenAt       DateTime?
   adStatus         String      @default("ACTIVE")
 
+  // ── Phase G: inactive-archive status tracking + captured creative evidence ──
+  // All additive + nullable. No automatic inactive detection yet (Phase H);
+  // these fields make archived state + evidence representable and displayable.
+  lastSeenActiveAt   DateTime?  // last time this ad was confirmed live in Meta Ad Library
+  lastCheckedAt      DateTime?  // last time the ad's live status was re-checked
+  inactiveDetectedAt DateTime?  // when the ad was first detected inactive / no longer found
+  capturedAssetPath  String?    // durable reference to captured evidence (folder under data/creative-assets); path only, never binaries
+  capturedAssetType  String?    // CREATIVE_IMAGE | VIDEO_FRAME | CAROUSEL_CARD | UNKNOWN — derived from the saved files, NOT adFormat
+
   // ── Competitor benchmark — ranking/filtering keys (additive, all nullable) ──
   // Internal-QA fields (score, qualified) above are unchanged and kept separate.
   competitorBenchmarkScore Float?     // 0–10, primary ranking key for the competitor page

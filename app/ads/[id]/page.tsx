@@ -7,6 +7,35 @@ import {
   evidenceLabel,
   creativeSourceLabel,
 } from '@/lib/analysis/competitorScoring';
+import * as fs from 'fs';
+import * as path from 'path';
+
+const ASSET_ROOT = path.resolve('data', 'creative-assets');
+
+/**
+ * Pick a representative captured image from the stored evidence folder/path and
+ * return a cwd-relative path for the /api/captured-asset route. Stays strictly
+ * within data/creative-assets; returns null if nothing servable is found.
+ */
+function pickCapturedEvidence(assetPath: string | null | undefined): string | null {
+  if (!assetPath) return null;
+  try {
+    const abs = path.resolve(assetPath);
+    if (abs !== ASSET_ROOT && !abs.startsWith(ASSET_ROOT + path.sep)) return null;
+    const stat = fs.statSync(abs);
+    const dir = stat.isDirectory() ? abs : path.dirname(abs);
+    const imgs = fs.readdirSync(dir).filter((f) => /\.(?:png|jpe?g|webp)$/i.test(f)).sort();
+    if (imgs.length === 0) return null;
+    let chosen = imgs[0]!;
+    for (const pref of ['image-01', 'card-01', 'frame-01']) {
+      const m = imgs.find((f) => f.toLowerCase().startsWith(pref));
+      if (m) { chosen = m; break; }
+    }
+    return path.relative(process.cwd(), path.join(dir, chosen)).replace(/\\/g, '/');
+  } catch {
+    return null;
+  }
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -234,6 +263,10 @@ export default async function AdDetailPage({
 
   const a = ad.analysis;
 
+  // Phase G: archived-capture state + captured creative evidence
+  const archived = ad.adStatus !== 'ACTIVE' || ad.inactiveDetectedAt != null;
+  const evidenceRel = pickCapturedEvidence(ad.capturedAssetPath);
+
   const recommendations = parseJson<Recommendations>(a?.recommendationsJson ?? null);
   const rewriteDirection = parseJson<RewriteDirection>(a?.rewriteDirectionJson ?? null);
   const triggers = (parseJson<Trigger[]>(a?.behaviouralTriggersJson ?? null) ?? [])
@@ -282,6 +315,27 @@ export default async function AdDetailPage({
         {' | '}
         <Link href="/competitors">Competitors</Link>
       </p>
+
+      {/* ── Ad status / archived-capture banner ── */}
+      {archived ? (
+        <div className="card archived-banner">
+          <h2 style={{ marginTop: 0 }}>📁 Archived capture</h2>
+          <p>
+            This ad is no longer shown as active in the Meta Ad Library. The analysis below is based
+            on a captured snapshot. <strong>Live Meta link may no longer be available.</strong>
+          </p>
+          <p className="muted">
+            Status: {ad.adStatus}
+            {ad.inactiveDetectedAt && ` · detected inactive ${new Date(ad.inactiveDetectedAt).toLocaleDateString('en-GB')}`}
+            {ad.lastSeenActiveAt && ` · last seen active ${new Date(ad.lastSeenActiveAt).toLocaleDateString('en-GB')}`}
+          </p>
+        </div>
+      ) : (
+        <p className="muted">
+          Status: {ad.adStatus}
+          {ad.lastSeenActiveAt && ` · last seen active ${new Date(ad.lastSeenActiveAt).toLocaleDateString('en-GB')}`}
+        </p>
+      )}
 
       {/* ── Competitor Benchmark panel (primary) ── */}
       {hasBenchmark ? (
@@ -388,6 +442,9 @@ export default async function AdDetailPage({
         <p>
           <strong>Ad Link:</strong>{' '}
           <a href={ad.adLink} target="_blank" rel="noreferrer">Open in Meta Ad Library ↗</a>
+          {archived && (
+            <span className="muted"> — live Meta link may no longer be available</span>
+          )}
         </p>
         {ad.activeSince && (
           <p>
@@ -396,6 +453,30 @@ export default async function AdDetailPage({
           </p>
         )}
       </div>
+
+      {/* ── Captured creative evidence ── */}
+      {ad.capturedAssetPath && (
+        <div className="card">
+          <h2>Captured creative evidence</h2>
+          <p className="muted">
+            {ad.capturedAssetType ?? 'UNKNOWN'} · captured snapshot{archived ? ' (ad now archived)' : ''}
+          </p>
+          {evidenceRel ? (
+            <img
+              src={`/api/captured-asset?path=${encodeURIComponent(evidenceRel)}`}
+              alt="Captured ad creative"
+              style={{ maxWidth: '100%', height: 'auto', borderRadius: '8px', border: '1px solid #e2e8f0' }}
+            />
+          ) : (
+            <p className="muted">
+              Evidence reference on file: {ad.capturedAssetPath} (image not currently available locally)
+            </p>
+          )}
+          <p className="muted" style={{ fontSize: '12px', marginTop: '8px' }}>
+            Stored locally: {ad.capturedAssetPath}
+          </p>
+        </div>
+      )}
 
       {/* ── 3. Original Ad Content ── */}
       {(ad.primaryCopy || ad.headline || ad.description) && (
