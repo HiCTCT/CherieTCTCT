@@ -30,6 +30,7 @@
     "browser:workflow-one": "tsx scripts/run-one-competitor-browser-workflow.ts",
     "browser:workflow-db-one": "tsx scripts/run-db-competitor-browser-workflow.ts",
     "browser:workflow-client": "tsx scripts/run-client-browser-workflow.ts",
+    "browser:plan-client-ingestion": "tsx scripts/plan-client-ingestion.ts",
     "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts"
   },
   "dependencies": {
