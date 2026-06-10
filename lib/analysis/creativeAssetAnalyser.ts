@@ -63,6 +63,10 @@ type ContentBlock = ImageBlock | TextBlock;
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5';
 const MAX_TOKENS = 1024;
 const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+// Anthropic rejects images whose longest side exceeds 8000px. Tall carousel-card
+// screenshots (deviceScaleFactor 2) can exceed this, so we downscale any creative
+// whose longest side is over this safe limit BEFORE sending it to Vision.
+const MAX_VISION_SIDE = 4096;
 
 const IMAGE_PROMPT = `You are analysing a Meta Ad Library advertising creative for a competitor advertiser. The advertiser may be in any industry and may sell a product or a service. Describe only what is actually shown in this creative; do not assume an industry or category and do not compare it to any other brand or product type. Your output will be used to score the ad's marketing effectiveness.
 
@@ -101,15 +105,74 @@ function detectMimeType(filePath: string): SupportedMimeType {
   return 'image/jpeg';
 }
 
-function buildImageBlock(filePath: string): ImageBlock {
-  const data = fs.readFileSync(filePath).toString('base64');
+/** Read PNG pixel dimensions from the IHDR header (no image library required). */
+function pngSize(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24) return null;
+  // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+  if (buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47) return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+/**
+ * Downscale an oversized creative IN MEMORY for Vision only — the originals on disk
+ * are never modified. Reuses the already-installed Playwright/Chromium via a lazy
+ * import (no new dependency), so this only runs for images that are actually too
+ * large. Returns a base64 PNG of the resized image, or null if no resize was needed
+ * or possible (caller then uses the original).
+ */
+async function resizeImageForVision(filePath: string, buf: Buffer, mime: string): Promise<string | null> {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    const dataUrl = `data:${mime};base64,${buf.toString('base64')}`;
+    const result = await page.evaluate(async (args) => {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve(null);
+        img.onerror = () => reject(new Error('image failed to load'));
+        img.src = args.src;
+      });
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      const scale = Math.min(1, args.maxSide / Math.max(w, h));
+      if (scale >= 1) return { resized: false, w, h, cw: w, ch: h, data: '' };
+      const cw = Math.max(1, Math.round(w * scale));
+      const ch = Math.max(1, Math.round(h * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = cw;
+      canvas.height = ch;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return { resized: false, w, h, cw: w, ch: h, data: '' };
+      ctx.drawImage(img, 0, 0, cw, ch);
+      return { resized: true, w, h, cw, ch, data: canvas.toDataURL('image/png').split(',')[1] || '' };
+    }, { src: dataUrl, maxSide: MAX_VISION_SIDE });
+
+    if (!result.resized || !result.data) return null;
+    console.log(`  ↺ resized creative for Vision: ${path.basename(filePath)} ${result.w}x${result.h} → ${result.cw}x${result.ch}`);
+    return result.data;
+  } finally {
+    await browser.close();
+  }
+}
+
+/** Build a Claude image content block, downscaling oversized creatives for Vision only. */
+async function buildImageBlock(filePath: string): Promise<ImageBlock> {
+  const buf = fs.readFileSync(filePath);
+  const mime = detectMimeType(filePath);
+  const size = pngSize(buf);
+  const oversized = !size || size.width > MAX_VISION_SIDE || size.height > MAX_VISION_SIDE;
+
+  if (oversized) {
+    const resized = await resizeImageForVision(filePath, buf, mime);
+    if (resized) {
+      return { type: 'image', source: { type: 'base64', media_type: 'image/png', data: resized } };
+    }
+    // Could not / did not resize once measured — fall through to the original bytes.
+  }
   return {
     type: 'image',
-    source: {
-      type: 'base64',
-      media_type: detectMimeType(filePath),
-      data,
-    },
+    source: { type: 'base64', media_type: mime, data: buf.toString('base64') },
   };
 }
 
@@ -157,7 +220,8 @@ export async function analyseCreativeAsset(
     if (frames.length === 0) {
       throw new Error(`No image files found in carousel folder: ${assetPath}`);
     }
-    const imageBlocks: ImageBlock[] = frames.map(buildImageBlock);
+    const imageBlocks: ImageBlock[] = [];
+    for (const f of frames) imageBlocks.push(await buildImageBlock(f)); // sequential: avoids concurrent browser launches
     content = [...imageBlocks, { type: 'text', text: buildCarouselPrompt(frames.length) }];
   } else if (stat.isDirectory()) {
     // VIDEO Phase 1 or IMAGE folder fallback — use first frame
@@ -165,10 +229,10 @@ export async function analyseCreativeAsset(
     if (frames.length === 0) {
       throw new Error(`No image files found in folder: ${assetPath}`);
     }
-    content = [buildImageBlock(frames[0]!), { type: 'text', text: IMAGE_PROMPT }];
+    content = [await buildImageBlock(frames[0]!), { type: 'text', text: IMAGE_PROMPT }];
   } else {
     // Single image file (IMAGE or VIDEO frame)
-    content = [buildImageBlock(assetPath), { type: 'text', text: IMAGE_PROMPT }];
+    content = [await buildImageBlock(assetPath), { type: 'text', text: IMAGE_PROMPT }];
   }
 
   const apiResponse = await fetch('https://api.anthropic.com/v1/messages', {

@@ -75,6 +75,8 @@ const SCROLL_PAUSE = 1_800;
 const MAX_SCROLLS = 30;
 const NO_GROWTH_LIMIT = 4;
 const DETAIL_SETTLE = 2_000;
+const ZERO_CARD_WAIT = 6_000;          // extra lazy-load wait before the 0-card reload
+const ZERO_CARD_SIGNAL_TIMEOUT = 15_000; // wait for ad cards / no-active-ads state after reload
 
 type AdInfo = { mediaType: string; startDate: string; copy: string; headline: string; landing: string };
 
@@ -235,8 +237,32 @@ async function main(): Promise<void> {
     await dismissOverlays(page);
     await page.waitForTimeout(SETTLE);
 
-    let noGrowth = 0;
-    for (let scroll = 0; scroll <= MAX_SCROLLS; scroll++) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (attempt === 2) {
+        // ── 0-card retry: first pass found nothing. Treat as a Meta lazy-load /
+        //    no-active-card condition, not a crash: wait longer, reload once, then
+        //    wait for ad cards / a "Library ID" / a clear no-active-ads state. ──
+        note('0 cards found, waiting for Meta lazy load');
+        await page.waitForTimeout(ZERO_CARD_WAIT);
+        note('0 cards found, reloading once');
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+        await page.waitForTimeout(SETTLE);
+        await dismissOverlays(page);
+        try {
+          await page.waitForFunction(() => {
+            const t = document.body ? document.body.innerText : '';
+            if (/Library ID/i.test(t)) return true;
+            if (/no ads?\b[^.]{0,40}\b(match|results|found)|isn'?t running ads|not (currently )?running ads|0 results|no results/i.test(t)) return true;
+            return false;
+          }, { timeout: ZERO_CARD_SIGNAL_TIMEOUT });
+        } catch {
+          note('retry: no clear ad-card or no-active-ads signal within timeout — scanning anyway');
+        }
+        await page.waitForTimeout(SETTLE);
+      }
+
+      let noGrowth = 0;
+      for (let scroll = 0; scroll <= MAX_SCROLLS; scroll++) {
       const batch = await page.evaluate(() => {
         // Meta-owned / system / tracking / CDN domains — never advertiser landing pages.
         const blocked = [
@@ -349,6 +375,10 @@ async function main(): Promise<void> {
 
       await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.9));
       await page.waitForTimeout(SCROLL_PAUSE);
+      }
+
+      if (ads.size > 0) break;            // found ads — no retry needed
+      if (attempt === 2) note('still 0 cards after retry');
     }
 
     // ── Detail fallback: for ads with no copy AND no headline, open the ad page ──
