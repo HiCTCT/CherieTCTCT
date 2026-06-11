@@ -367,9 +367,13 @@ async function findCreativeArea(
     const vw = window.innerWidth  || 1280;
     const vh = window.innerHeight || 900;
 
-    const mediaEls = Array.from(document.querySelectorAll<HTMLElement>(
-      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"], video',
-    ));
+    // Consider ALL images + videos, then let the placeholder + size rejection below
+    // drop chrome. Restricting to specific CDN hosts up front was too strict and
+    // missed real creatives whose <img> src does not contain scontent/fbcdn/
+    // cdninstagram (lazy-loaded, srcset-driven, or served from another host). The
+    // placeholder gate (data:/svg/rsrc.php/emoji/static/safe_image/avatar/logo) and
+    // the size/aspect filters still reject non-creative images.
+    const mediaEls = Array.from(document.querySelectorAll<HTMLElement>('img, video'));
 
     for (const el of mediaEls) {
       const b   = el.getBoundingClientRect();
@@ -468,7 +472,11 @@ async function findCreativeArea(
         if (!curIn) break;
         if (cb.width >= card.width - 5 && cb.height >= card.height - 5) break;
         const car = cb.height > 0 ? cb.width / cb.height : 0;
-        if (cb.width >= MIN_W && cb.height >= MIN_H && car >= 0.5 && car <= 2.2 &&
+        // Video player container: allow real media slightly shorter than the generic
+        // 280x250 floor (>=200x180) so genuine but shorter video regions are kept.
+        // The seed <video>/poster is used anyway if no larger container qualifies,
+        // and the final size gate still guards against tiny chrome.
+        if (cb.width >= 200 && cb.height >= 180 && car >= 0.5 && car <= 2.2 &&
             cb.width * cb.height >= best.width * best.height) {
           best = { x: cb.x, y: cb.y, width: cb.width, height: cb.height };
         }
