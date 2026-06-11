@@ -12,28 +12,33 @@ import * as path from 'path';
 
 const ASSET_ROOT = path.resolve('data', 'creative-assets');
 
+type EvidenceFile = { rel: string; filename: string };
+
 /**
- * Pick a representative captured image from the stored evidence folder/path and
- * return a cwd-relative path for the /api/captured-asset route. Stays strictly
- * within data/creative-assets; returns null if nothing servable is found.
+ * List ALL captured images inside the stored evidence folder, as cwd-relative
+ * paths for the /api/captured-asset route. Stays strictly within
+ * data/creative-assets. Shows the real creative files (card-NN / frame-NN /
+ * image-NN) and excludes debug/thumb/tmp diagnostics; falls back to other
+ * non-debug images if no standard creative files are present. Returns [] if none.
  */
-function pickCapturedEvidence(assetPath: string | null | undefined): string | null {
-  if (!assetPath) return null;
+function listCapturedEvidence(assetPath: string | null | undefined): EvidenceFile[] {
+  if (!assetPath) return [];
   try {
     const abs = path.resolve(assetPath);
-    if (abs !== ASSET_ROOT && !abs.startsWith(ASSET_ROOT + path.sep)) return null;
+    if (abs !== ASSET_ROOT && !abs.startsWith(ASSET_ROOT + path.sep)) return [];
     const stat = fs.statSync(abs);
     const dir = stat.isDirectory() ? abs : path.dirname(abs);
-    const imgs = fs.readdirSync(dir).filter((f) => /\.(?:png|jpe?g|webp)$/i.test(f)).sort();
-    if (imgs.length === 0) return null;
-    let chosen = imgs[0]!;
-    for (const pref of ['image-01', 'card-01', 'frame-01']) {
-      const m = imgs.find((f) => f.toLowerCase().startsWith(pref));
-      if (m) { chosen = m; break; }
+    const all = fs.readdirSync(dir).filter((f) => /\.(?:png|jpe?g|webp)$/i.test(f));
+    let creatives = all.filter((f) => /^(?:card|frame|image)-\d+\.(?:png|jpe?g|webp)$/i.test(f)).sort();
+    if (creatives.length === 0) {
+      creatives = all.filter((f) => !/^debug-/i.test(f) && !/^\./.test(f)).sort();
     }
-    return path.relative(process.cwd(), path.join(dir, chosen)).replace(/\\/g, '/');
+    return creatives.map((f) => ({
+      rel: path.relative(process.cwd(), path.join(dir, f)).replace(/\\/g, '/'),
+      filename: f,
+    }));
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -265,7 +270,7 @@ export default async function AdDetailPage({
 
   // Phase G: archived-capture state + captured creative evidence
   const archived = ad.adStatus !== 'ACTIVE' || ad.inactiveDetectedAt != null;
-  const evidenceRel = pickCapturedEvidence(ad.capturedAssetPath);
+  const evidenceFiles = listCapturedEvidence(ad.capturedAssetPath);
 
   const recommendations = parseJson<Recommendations>(a?.recommendationsJson ?? null);
   const rewriteDirection = parseJson<RewriteDirection>(a?.rewriteDirectionJson ?? null);
@@ -459,17 +464,36 @@ export default async function AdDetailPage({
         <div className="card">
           <h2>Captured creative evidence</h2>
           <p className="muted">
-            {ad.capturedAssetType ?? 'UNKNOWN'} · captured snapshot{archived ? ' (ad now archived)' : ''}
+            {ad.capturedAssetType === 'VIDEO_FRAME'
+              ? 'VIDEO_FRAME · representative captured frame'
+              : `${ad.capturedAssetType ?? 'UNKNOWN'} · captured snapshot`}
+            {archived ? ' (ad now archived)' : ''}
           </p>
-          {evidenceRel ? (
-            <img
-              src={`/api/captured-asset?path=${encodeURIComponent(evidenceRel)}`}
-              alt="Captured ad creative"
-              style={{ maxWidth: '100%', height: 'auto', borderRadius: '8px', border: '1px solid #e2e8f0' }}
-            />
+          {evidenceFiles.length > 0 ? (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                gap: '12px',
+                marginTop: '8px',
+              }}
+            >
+              {evidenceFiles.map((f) => (
+                <figure key={f.filename} style={{ margin: 0 }}>
+                  <img
+                    src={`/api/captured-asset?path=${encodeURIComponent(f.rel)}`}
+                    alt={`Captured creative ${f.filename}`}
+                    style={{ width: '100%', height: 'auto', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'block' }}
+                  />
+                  <figcaption className="muted" style={{ fontSize: '12px', marginTop: '4px', textAlign: 'center' }}>
+                    {f.filename}
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
           ) : (
             <p className="muted">
-              Evidence reference on file: {ad.capturedAssetPath} (image not currently available locally)
+              Evidence reference on file: {ad.capturedAssetPath} (images not currently available locally)
             </p>
           )}
           <p className="muted" style={{ fontSize: '12px', marginTop: '8px' }}>

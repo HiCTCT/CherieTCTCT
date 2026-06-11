@@ -46,6 +46,13 @@ const CAROUSEL_MAX = 10;      // max cards per carousel
 
 const DEBUG_CAPTURE_GLOBAL = process.env.DEBUG_CAPTURE === 'true';
 
+// Test-only flags (no DB writes; capture-side only):
+//   BROWSER_ONLY_AD_ID       — process only this one ad_id from the CSV
+//   BROWSER_FORCE_RECAPTURE  — ignore an existing creative_asset_path and recapture
+//                              into the SAME asset folder (old generated files cleaned)
+const ONLY_AD_ID      = (process.env.BROWSER_ONLY_AD_ID ?? '').trim();
+const FORCE_RECAPTURE = process.env.BROWSER_FORCE_RECAPTURE === 'true';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type BrowserAdRow = {
@@ -113,6 +120,34 @@ function toSafeFolder(name: string): string {
 function assetDir(competitorName: string, adId: string): string {
   const safe = toSafeFolder(competitorName) || 'unknown';
   return path.join(ASSET_BASE, safe, adId);
+}
+
+/**
+ * Remove ONLY this script's generated files from an existing asset folder (used by
+ * BROWSER_FORCE_RECAPTURE so a recapture starts clean). The folder itself and any
+ * non-generated user files are left intact. Generated names are well-known:
+ *   card-NN.png, image-NN.png, frame-NN.png, .tmp-*.png, .thumb.png,
+ *   debug-*-<adId>.{png,txt}, video.mp4, video-summary-notes.txt, video-source-url.txt
+ */
+function cleanGeneratedAssets(dir: string): void {
+  if (!fs.existsSync(dir)) return;
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      const isGenerated =
+        /^card-\d+\.png$/i.test(f) ||
+        /^image-\d+\.png$/i.test(f) ||
+        /^frame-\d+\.png$/i.test(f) ||
+        /^\.tmp-.*\.png$/i.test(f) ||
+        /^\.thumb\.png$/i.test(f) ||
+        /^debug-.*\.(png|txt)$/i.test(f) ||
+        f === 'video.mp4' ||
+        f === 'video-summary-notes.txt' ||
+        f === 'video-source-url.txt';
+      if (isGenerated) {
+        try { fs.unlinkSync(path.join(dir, f)); } catch { /* best-effort */ }
+      }
+    }
+  } catch { /* best-effort — never throw from cleanup */ }
 }
 
 // ─── Active-ad detection ──────────────────────────────────────────────────────
@@ -516,7 +551,47 @@ async function findCreativeArea(
           cur = cur.parentElement; depth++;
         }
       }
-      if (!best) return { found: false as const, notes: [...log, 'no carousel viewport >=280x250 inside card'] };
+      // ── Compact-carousel fallback ──
+      // Some Meta carousels use small square cards / compact rails (~140–200px) with
+      // no >=280x250 viewport container. Build the visible rail bbox from the real,
+      // in-card, non-placeholder image candidates aligned on one row. Avatars, logos,
+      // profile pics, icons, SVG/emoji, tiny and off-card images are already excluded
+      // by the placeholder + reject classification (c.reject).
+      if (!best) {
+        log.push('compact-carousel fallback: normal large viewport (>=280x250) not found');
+        const compact = cands.filter((c) => c.tag === 'img' && !c.reject && c.inCard && c.inView && c.w >= 140 && c.h >= 140);
+        log.push(`compact-carousel fallback: ${compact.length} in-card image candidate(s) >=140x140`);
+        if (compact.length >= 1) {
+          // Pick the row nearest the card's vertical centre, then union cards sharing
+          // that row (centre y within 40px) — the visible carousel rail/card area.
+          const cardCy = card.y + card.height / 2;
+          let rowSeed = compact[0]!;
+          let bestDy = Math.abs((rowSeed.y + rowSeed.h / 2) - cardCy);
+          for (const c of compact) {
+            const dy = Math.abs((c.y + c.h / 2) - cardCy);
+            if (dy < bestDy) { bestDy = dy; rowSeed = c; }
+          }
+          const rowCy = rowSeed.y + rowSeed.h / 2;
+          const row = compact.filter((c) => Math.abs((c.y + c.h / 2) - rowCy) <= 40);
+          let minX = Infinity; let minY = Infinity; let maxR = -Infinity; let maxB = -Infinity;
+          for (const c of row) { minX = Math.min(minX, c.x); minY = Math.min(minY, c.y); maxR = Math.max(maxR, c.x + c.w); maxB = Math.max(maxB, c.y + c.h); }
+          // Clamp to the ad card AND the viewport so we cover the rail, not chrome.
+          const fx = Math.max(minX, card.x, 0);
+          const fy = Math.max(minY, card.y, 0);
+          const fr = Math.min(maxR, card.x + card.width, vw);
+          const fb = Math.min(maxB, card.y + card.height, vh);
+          const fw = fr - fx; const fh = fb - fy;
+          if (fw >= 140 && fh >= 140) {
+            best = { x: fx, y: fy, width: fw, height: fh };
+            log.push(`compact-carousel fallback: selected rail ${Math.round(fw)}x${Math.round(fh)} at (${Math.round(fx)},${Math.round(fy)}) from ${row.length} aligned card(s)`);
+          } else {
+            log.push(`compact-carousel fallback: rail ${Math.round(fw)}x${Math.round(fh)} too small after clamp — failed`);
+          }
+        } else {
+          log.push('compact-carousel fallback: no in-card image candidate >=140x140 — failed');
+        }
+      }
+      if (!best) return { found: false as const, notes: [...log, 'no carousel viewport (normal or compact) inside card'] };
       return { found: true as const, ...best, notes: log };
     }
 
@@ -600,11 +675,12 @@ async function findCreativeArea(
   const notes: string[] = Array.isArray((r as any).notes) ? (r as any).notes as string[] : [];
 
   if (r.found) {
-    // Final size gate. Carousel keeps the hard 280x250 minimum (reject tiny tiles).
+    // Final size gate. Carousel floor is 260x140 so compact square-card rails
+    // (~175x175) are accepted while genuine tiny tiles/chrome are still rejected.
     // Image/video only need a real creative region, not modal chrome, so the floor
     // is low — this is what stops legitimate creatives being over-rejected.
-    if (mt === 'CAROUSEL' && (r.width < 280 || r.height < 250)) {
-      notes.push(`REJECTED final: carousel ${Math.round(r.width)}x${Math.round(r.height)} below 280x250 minimum`);
+    if (mt === 'CAROUSEL' && (r.width < 260 || r.height < 140)) {
+      notes.push(`REJECTED final: carousel ${Math.round(r.width)}x${Math.round(r.height)} below 260x140 minimum`);
       return { bbox: null, notes };
     }
     if ((mt === 'IMAGE' || mt === 'VIDEO') && (r.width < 120 || r.height < 90)) {
@@ -775,13 +851,15 @@ async function findCarouselNextButton(
  * Inline-only page.evaluate body — no named helpers / `const x = () =>` inside
  * evaluate — to avoid the tsx/esbuild `__name` injection that crashes the browser.
  */
+type CardIdentity = { src: string; x: number; y: number; w: number; h: number; text: string };
+
 async function findCentralCard(
   page: Page, vp: BBox,
-): Promise<{ bbox: BBox | null; notes: string[] }> {
+): Promise<{ bbox: BBox | null; identity: CardIdentity | null; notes: string[] }> {
   const r = await page.evaluate((view) => {
     const cx = view.x + view.width / 2;
     const log: string[] = [];
-    type K = { x: number; y: number; w: number; h: number; dist: number; vis: number };
+    type K = { el: HTMLImageElement; x: number; y: number; w: number; h: number; dist: number; vis: number; src: string };
     const cands: K[] = [];
     for (const img of Array.from(document.querySelectorAll<HTMLImageElement>(
       'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]',
@@ -799,30 +877,47 @@ async function findCentralCard(
       if (b.height < view.height * 0.35) continue; // too short to be a card image
       const vis  = (ox * oy) / (b.width * b.height);
       const dist = Math.abs((b.x + b.width / 2) - cx);
-      cands.push({ x: b.x, y: b.y, w: b.width, h: b.height, dist, vis });
-      log.push(`card-img ${Math.round(b.width)}x${Math.round(b.height)} at (${Math.round(b.x)},${Math.round(b.y)}) distFromCentre=${Math.round(dist)} vis=${vis.toFixed(2)}`);
+      cands.push({ el: img, x: b.x, y: b.y, w: b.width, h: b.height, dist, vis, src });
+      log.push(`card-img ${Math.round(b.width)}x${Math.round(b.height)} at (${Math.round(b.x)},${Math.round(b.y)}) distFromCentre=${Math.round(dist)} vis=${vis.toFixed(2)} src=${src.replace(/^https?:\/\//, '').slice(0, 44)}`);
     }
     if (!cands.length) return { found: false as const, log };
     // Prefer the most-centred card that is at least 60% visible; else most centred.
     cands.sort((a, b) => a.dist - b.dist);
     let pick = cands[0]!;
     for (const c of cands) { if (c.vis >= 0.6) { pick = c; break; } }
+    // Identity: src + raw (pre-clamp) bbox + a short text snippet from the nearest
+    // text-bearing ancestor — used to confirm the carousel actually moved to a
+    // different card, not just a re-crop of the same one.
+    let text = '';
+    let anc: HTMLElement | null = pick.el.parentElement; let d = 0;
+    while (anc && d < 4) {
+      const t = (anc.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t.length >= 4) { text = t.slice(0, 80); break; }
+      anc = anc.parentElement; d++;
+    }
     // Clamp to the viewport so neighbouring/overflow cards are excluded.
-    // A small pad includes the card frame/border without reaching adjacent cards.
     const PAD = 8;
     const x = Math.max(pick.x - PAD, view.x);
     const y = Math.max(pick.y - PAD, view.y);
     const right  = Math.min(pick.x + pick.w + PAD, view.x + view.width);
     const bottom = Math.min(pick.y + pick.h + PAD, view.y + view.height);
-    log.push(`SELECTED central card at (${Math.round(pick.x)},${Math.round(pick.y)}) ${Math.round(pick.w)}x${Math.round(pick.h)} — closest to viewport centre, vis=${pick.vis.toFixed(2)}; ${cands.length - 1} neighbour card(s) excluded`);
-    return { found: true as const, x, y, width: right - x, height: bottom - y, log };
+    log.push(`SELECTED central card at (${Math.round(pick.x)},${Math.round(pick.y)}) ${Math.round(pick.w)}x${Math.round(pick.h)} src=${pick.src.replace(/^https?:\/\//, '').slice(0, 44)} — closest to centre, vis=${pick.vis.toFixed(2)}; ${cands.length - 1} neighbour(s) excluded`);
+    return {
+      found: true as const, x, y, width: right - x, height: bottom - y,
+      idSrc: pick.src, idX: pick.x, idY: pick.y, idW: pick.w, idH: pick.h, idText: text, log,
+    };
   }, vp);
 
   const notes = Array.isArray((r as { log?: string[] }).log) ? (r as { log: string[] }).log : [];
   if (r.found && r.width >= 80 && r.height >= 80) {
-    return { bbox: { x: r.x, y: r.y, width: r.width, height: r.height }, notes };
+    const rr = r as { idSrc: string; idX: number; idY: number; idW: number; idH: number; idText: string };
+    return {
+      bbox: { x: r.x, y: r.y, width: r.width, height: r.height },
+      identity: { src: rr.idSrc, x: rr.idX, y: rr.idY, w: rr.idW, h: rr.idH, text: rr.idText },
+      notes,
+    };
   }
-  return { bbox: null, notes };
+  return { bbox: null, identity: null, notes };
 }
 
 // ─── Capture functions ────────────────────────────────────────────────────────
@@ -1075,103 +1170,299 @@ async function captureVideo(
   return files;
 }
 
+function srcSnip(s: string | undefined | null): string {
+  return s ? s.replace(/^https?:\/\//, '').slice(0, 44) : '(none)';
+}
+
+/**
+ * Advance the carousel by clicking a real, visible, enabled next-control beside the
+ * creative. Guarded + never throws. Returns the method used (for debug). DOM click
+ * is tried first, then a located-point page.mouse.click. ArrowRight is a separate
+ * escalation handled by the caller when no movement is detected.
+ */
+async function clickNextControl(page: Page, creativeBBox: BBox): Promise<string> {
+  try {
+    await page.mouse.move(creativeBBox.x + creativeBBox.width * 0.92, creativeBBox.y + creativeBBox.height / 2);
+    await page.waitForTimeout(350);
+  } catch { /* ignore */ }
+
+  const dom = await page.evaluate((bbox) => {
+    try {
+      const keys = ['next', 'forward', 'right', 'chevron'];
+      let best: Element | null = null;
+      let bestDist = Infinity;
+      for (const el of Array.from(document.querySelectorAll('button,[role="button"],[aria-label],div[tabindex="0"],a[role="button"]'))) {
+        const he = el as HTMLElement;
+        const r = he.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;                       // zero-size
+        const st = window.getComputedStyle(he);
+        if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') === 0) continue; // hidden/opacity-0
+        if (he.hasAttribute('disabled') || he.getAttribute('aria-disabled') === 'true') continue;                  // disabled
+        const lbl = ((he.getAttribute('aria-label') || '') + ' ' + (he.getAttribute('data-testid') || '')).toLowerCase();
+        if (!keys.some((k) => lbl.includes(k))) continue;                  // must be a next-ish control
+        const ccx = r.x + r.width / 2;
+        const ccy = r.y + r.height / 2;
+        const nearV = ccy >= bbox.y - 80 && ccy <= bbox.y + bbox.height + 80;        // beside the creative vertically
+        const nearRight = ccx >= bbox.x + bbox.width * 0.45 && ccx <= bbox.x + bbox.width + 140; // right side / just beside
+        if (!nearV || !nearRight) continue;
+        const d = Math.abs(ccx - (bbox.x + bbox.width));
+        if (d < bestDist) { bestDist = d; best = el; }
+      }
+      if (!best) return { ok: false, method: 'no-next-button' };
+      const ctrl = (best.closest('button,[role="button"],a,[tabindex]') as HTMLElement | null) || (best as HTMLElement);
+      if (typeof (ctrl as { click?: unknown }).click === 'function') { (ctrl as HTMLElement).click(); return { ok: true, method: 'dom-click' }; }
+      for (const t of ['mousedown', 'mouseup', 'click']) ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true }));
+      return { ok: true, method: 'dom-dispatch' };
+    } catch {
+      return { ok: false, method: 'dom-error' }; // never throw from the click attempt
+    }
+  }, creativeBBox);
+
+  if (dom.ok) return dom.method;
+
+  // Fallback: locate a button point and use the real mouse.
+  const pt = await findCarouselNextButton(page, creativeBBox);
+  if (pt) {
+    try { await page.mouse.click(pt.x, pt.y); return 'mouse-click'; }
+    catch { /* fall through */ }
+  }
+  return dom.method; // 'no-next-button' / 'dom-error'
+}
+
+/** Keyboard escalation: focus the carousel area, then press ArrowRight. Never throws. */
+async function pressArrowRightOnCarousel(page: Page, creativeBBox: BBox): Promise<void> {
+  try {
+    await page.mouse.click(creativeBBox.x + creativeBBox.width / 2, creativeBBox.y + creativeBBox.height / 2);
+    await page.waitForTimeout(150);
+    await page.keyboard.press('ArrowRight');
+  } catch { /* ignore */ }
+}
+
+/**
+ * Poll (up to ~2.4s) for the carousel to land on a MEANINGFULLY different card.
+ * "Meaningful" requires both a screenshot-signature change AND a real identity
+ * change (different image src, a rail shift > 40px, or different card text) versus
+ * the previously-saved card — and the new src must not be one we already captured.
+ * This rejects tiny-overlay changes and re-crops of the same card.
+ */
+/**
+ * Perceptual visual-difference ratio between two PNG buffers, computed with the
+ * browser's own canvas (no new dependency). Both images are drawn into a small
+ * NxN canvas and the mean per-pixel grayscale difference is returned in [0,1]:
+ * 0 = identical, higher = more different. Inline-only evaluate body (anonymous
+ * arrows only) to avoid the tsx/esbuild __name injection.
+ */
+async function visualDiffRatio(page: Page, pngA: Buffer, pngB: Buffer): Promise<number> {
+  const a = `data:image/png;base64,${pngA.toString('base64')}`;
+  const b = `data:image/png;base64,${pngB.toString('base64')}`;
+  try {
+    return await page.evaluate(async (args) => {
+      const N = 64;
+      const imgA = new Image();
+      await new Promise((resolve, reject) => { imgA.onload = () => resolve(null); imgA.onerror = () => reject(new Error('a')); imgA.src = args.a; });
+      const imgB = new Image();
+      await new Promise((resolve, reject) => { imgB.onload = () => resolve(null); imgB.onerror = () => reject(new Error('b')); imgB.src = args.b; });
+      const ca = document.createElement('canvas'); ca.width = N; ca.height = N;
+      const cb = document.createElement('canvas'); cb.width = N; cb.height = N;
+      const xa = ca.getContext('2d');
+      const xb = cb.getContext('2d');
+      if (!xa || !xb) return 1;
+      xa.drawImage(imgA, 0, 0, N, N);
+      xb.drawImage(imgB, 0, 0, N, N);
+      const da = xa.getImageData(0, 0, N, N).data;
+      const db = xb.getImageData(0, 0, N, N).data;
+      let sum = 0; let count = 0;
+      for (let i = 0; i < da.length; i += 4) {
+        // per-channel RGB difference (ignore alpha) so colour changes at equal
+        // luminance still register as different cards
+        sum += Math.abs(da[i]! - db[i]!) + Math.abs(da[i + 1]! - db[i + 1]!) + Math.abs(da[i + 2]! - db[i + 2]!);
+        count += 3;
+      }
+      return count ? (sum / count) / 255 : 1;
+    }, { a, b });
+  } catch {
+    return 1; // on any failure, treat as fully different (never block a real new card)
+  }
+}
+
+// ── Carousel movement helpers (Node-side; never throw) ──
+async function moveMouseRightEdge(page: Page, bbox: BBox): Promise<void> {
+  try { await page.mouse.click(bbox.x + bbox.width - 14, bbox.y + bbox.height / 2); } catch { /* ignore */ }
+}
+async function wheelCarousel(page: Page, bbox: BBox): Promise<void> {
+  try {
+    await page.mouse.move(bbox.x + bbox.width / 2, bbox.y + bbox.height / 2);
+    await page.mouse.wheel(Math.max(260, Math.round(bbox.width)), 0);
+  } catch { /* ignore */ }
+}
+async function swipeCarousel(page: Page, bbox: BBox): Promise<void> {
+  try {
+    const y = bbox.y + bbox.height / 2;
+    const startX = bbox.x + bbox.width * 0.85;
+    const endX = bbox.x + bbox.width * 0.2;
+    await page.mouse.move(startX, y);
+    await page.mouse.down();
+    for (let s = 1; s <= 6; s++) { await page.mouse.move(startX - (startX - endX) * (s / 6), y, { steps: 2 }); await page.waitForTimeout(40); }
+    await page.mouse.up();
+  } catch { /* ignore */ }
+}
+
+// Reject a candidate card if its visual diff vs EVERY already-saved card is below
+// this (i.e. it looks like a card we already have). Tuned for downscaled 64x64
+// grayscale comparison; a genuinely different product photo diffs well above this.
+const VISUAL_DIFF_MIN = 0.045;
+
+/**
+ * Return ALL well-visible carousel card images inside the viewport, ordered
+ * left→right, each with its own crop bbox + identity. Unlike findCentralCard
+ * (which returns only the central card), this lets a compact rail showing several
+ * cards at once be captured fully. Inline-only evaluate (anonymous arrows).
+ */
+async function findVisibleCards(
+  page: Page, vp: BBox,
+): Promise<{ cards: { crop: BBox; id: CardIdentity }[]; notes: string[] }> {
+  const r = await page.evaluate((view) => {
+    const log: string[] = [];
+    const out: { cx: number; cropX: number; cropY: number; cropW: number; cropH: number; src: string; idX: number; idY: number; idW: number; idH: number; text: string }[] = [];
+    const PAD = 8;
+    for (const img of Array.from(document.querySelectorAll<HTMLImageElement>(
+      'img[src*="scontent"], img[src*="fbcdn.net"], img[src*="cdninstagram"]',
+    ))) {
+      const b = img.getBoundingClientRect();
+      const src = (img.currentSrc || img.src || '').toLowerCase();
+      if (src.startsWith('data:') || src.includes('rsrc.php') || src.includes('.svg') ||
+          (src.includes('static.') && src.includes('fbcdn'))) continue;
+      const ox = Math.min(b.x + b.width,  view.x + view.width)  - Math.max(b.x, view.x);
+      const oy = Math.min(b.y + b.height, view.y + view.height) - Math.max(b.y, view.y);
+      if (ox <= 0 || oy <= 0) continue;
+      if (b.width < 100 || b.height < 100) continue;
+      if (b.height < view.height * 0.35) continue;
+      const vis = (ox * oy) / (b.width * b.height);
+      if (vis < 0.5) continue; // skip half-cut edge cards
+      let text = '';
+      let anc: HTMLElement | null = img.parentElement; let d = 0;
+      while (anc && d < 4) { const t = (anc.textContent || '').replace(/\s+/g, ' ').trim(); if (t.length >= 4) { text = t.slice(0, 80); break; } anc = anc.parentElement; d++; }
+      const x = Math.max(b.x - PAD, view.x);
+      const y = Math.max(b.y - PAD, view.y);
+      const right  = Math.min(b.x + b.width + PAD, view.x + view.width);
+      const bottom = Math.min(b.y + b.height + PAD, view.y + view.height);
+      out.push({ cx: b.x, cropX: x, cropY: y, cropW: right - x, cropH: bottom - y, src, idX: b.x, idY: b.y, idW: b.width, idH: b.height, text });
+      log.push(`visible card ${Math.round(b.width)}x${Math.round(b.height)} at (${Math.round(b.x)},${Math.round(b.y)}) vis=${vis.toFixed(2)} src=${src.replace(/^https?:\/\//, '').slice(0, 44)}`);
+    }
+    out.sort((a, b) => a.cx - b.cx); // left → right
+    return { out, log };
+  }, vp);
+
+  const cards = r.out
+    .filter((o) => o.cropW >= 80 && o.cropH >= 80)
+    .map((o) => ({
+      crop: { x: o.cropX, y: o.cropY, width: o.cropW, height: o.cropH },
+      id: { src: o.src, x: o.idX, y: o.idY, w: o.idW, h: o.idH, text: o.text } as CardIdentity,
+    }));
+  return { cards, notes: r.log };
+}
+
+/**
+ * Screenshot every currently-visible card and save those that are visually distinct
+ * (perceptual visualDiffRatio) from ALL already-saved cards. Returns how many new
+ * cards were saved. Never saves a visual duplicate.
+ */
+async function saveNewVisibleCards(
+  page: Page, creativeBBox: BBox, outDir: string, tmp: string,
+  files: string[], savedBufs: Buffer[], seenSrc: Set<string>, dbg: DebugState, phase: string,
+): Promise<number> {
+  const { cards, notes } = await findVisibleCards(page, creativeBBox);
+  for (const ln of notes) dbg.notes.push(`${phase}: ${ln}`);
+  dbg.notes.push(`${phase}: ${cards.length} visible card candidate(s)`);
+  let saved = 0;
+  for (const card of cards) {
+    const knownSrc = !!(card.id.src && seenSrc.has(card.id.src));
+    await screenshotCreative(page, card.crop, tmp);
+    const candBuf = fs.readFileSync(tmp);
+    let minDiff = 1; let closest = 0;
+    for (let k = 0; k < savedBufs.length; k++) {
+      const dRatio = await visualDiffRatio(page, savedBufs[k]!, candBuf);
+      if (dRatio < minDiff) { minDiff = dRatio; closest = k + 1; }
+    }
+    const isFirst = savedBufs.length === 0;
+    const accept = (isFirst || minDiff >= VISUAL_DIFF_MIN) && !knownSrc;
+    dbg.notes.push(
+      `${phase}: candidate at (${Math.round(card.id.x)},${Math.round(card.id.y)}) src=${srcSnip(card.id.src)} ` +
+      `visualDiffRatio=${isFirst ? 'n/a(first)' : minDiff.toFixed(3)}${closest ? ` (vs card-${String(closest).padStart(2, '0')})` : ''} ` +
+      `knownSrc=${knownSrc ? 'yes' : 'no'} -> ${accept ? 'SAVED visible card' : 'REJECTED visible duplicate (visualDiffRatio too low)'}`,
+    );
+    if (!accept) continue;
+    const lbl = String(files.length + 1).padStart(2, '0');
+    const fp = path.join(outDir, `card-${lbl}.png`);
+    fs.renameSync(tmp, fp);
+    files.push(fp);
+    savedBufs.push(fs.readFileSync(fp));
+    if (card.id.src) seenSrc.add(card.id.src);
+    dbg.notes.push(`${phase}: card-${lbl}: DECISION = SAVED visible card (crop ${Math.round(card.crop.width)}x${Math.round(card.crop.height)})`);
+    console.log(`       card-${lbl}: saved`);
+    saved++;
+  }
+  return saved;
+}
+
 async function captureCarousel(
   page: Page, outDir: string, creativeBBox: BBox, dbg: DebugState,
 ): Promise<string[]> {
   fs.mkdirSync(outDir, { recursive: true });
   const files: string[] = [];
-  const sigs:  string[] = [];
+  const savedBufs: Buffer[] = [];
+  const seenSrc = new Set<string>();
+  const tmp = path.join(outDir, '.tmp-card.png');
 
   dbg.notes.push(`carousel viewport: ${Math.round(creativeBBox.width)}x${Math.round(creativeBBox.height)} at (${Math.round(creativeBBox.x)},${Math.round(creativeBBox.y)})`);
 
-  // ── card-01: crop to the single central card, not the whole rail ──
+  // ── Phase 1: capture ALL currently-visible distinct cards (left→right) ──
   await page.waitForTimeout(600);
-  const c1   = await findCentralCard(page, creativeBBox);
-  for (const ln of c1.notes) dbg.notes.push(`card-01 ${ln}`);
-  const crop1 = c1.bbox ?? creativeBBox;
-  if (!c1.bbox) dbg.notes.push('card-01: central card not found — using full viewport');
-  const first = path.join(outDir, 'card-01.png');
-  await screenshotCreative(page, crop1, first);
-  let lastSig = bufferSig(fs.readFileSync(first));
-  sigs.push(lastSig); files.push(first);
-  dbg.notes.push(`card-01: saved (crop ${Math.round(crop1.width)}x${Math.round(crop1.height)})`);
-  console.log('       card-01: saved');
+  const firstPass = await saveNewVisibleCards(page, creativeBBox, outDir, tmp, files, savedBufs, seenSrc, dbg, 'initial');
+  dbg.notes.push(`initial visible-card pass saved ${firstPass} card(s)`);
 
-  // ── card-02 … card-N: click next, require a visual change before saving ──
-  for (let n = 2; n <= CAROUSEL_MAX; n++) {
-    const lbl = String(n).padStart(2, '0');
-
-    const nxt = await findCarouselNextButton(page, creativeBBox);
-    if (!nxt) {
-      dbg.notes.push(`card-${lbl}: no next arrow found — stopping`);
-      dbg.carouselNextBtn = `not found after card ${n - 1}`;
-      dbg.stopReason = `no next arrow found after card ${n - 1}`;
-      break;
-    }
-    dbg.carouselNextBtn = `clicked at (${Math.round(nxt.x)},${Math.round(nxt.y)})`;
-
-    // Safe DOM click. elementFromPoint can return a non-clickable node (SVG path,
-    // span, text wrapper) with no .click(). Climb to the nearest real control,
-    // guard typeof .click, fall back to synthetic MouseEvents, and never throw.
-    const clicked = await page.evaluate((pos) => {
-      try {
-        const node = document.elementFromPoint(pos.x, pos.y) as Element | null;
-        if (!node) return false;
-        const ctrl = (node.closest('button,[role="button"],a,[tabindex]') as HTMLElement | null) || (node as HTMLElement);
-        if (ctrl && typeof (ctrl as { click?: unknown }).click === 'function') {
-          (ctrl as HTMLElement).click();
-          return true;
-        }
-        const target: Element = ctrl || node;
-        for (const type of ['mousedown', 'mouseup', 'click']) {
-          target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: pos.x, clientY: pos.y }));
-        }
-        return true;
-      } catch {
-        return false; // never throw from the click attempt
-      }
-    }, nxt);
-    if (!clicked) {
-      try { await page.mouse.click(nxt.x, nxt.y); }
-      catch { dbg.notes.push(`card-${lbl}: all click attempts failed`); }
-    }
-
-    // Poll up to ~2.4 s for the creative to visually change. Each attempt
-    // recomputes the central card and crops to it, so a saved card is one card.
-    let changedSig: string | null = null;
-    let usedCrop: BBox = creativeBBox;
-    let pickedNote = '';
-    const tmp = path.join(outDir, `.tmp-${lbl}.png`);
-    for (let attempt = 0; attempt < 4; attempt++) {
-      await page.waitForTimeout(600);
-      const cc = await findCentralCard(page, creativeBBox);
-      usedCrop = cc.bbox ?? creativeBBox;
-      for (const ln of cc.notes) if (ln.startsWith('SELECTED')) pickedNote = ln;
-      await screenshotCreative(page, usedCrop, tmp);
-      const sig = bufferSig(fs.readFileSync(tmp));
-      if (sig !== lastSig && !sigs.includes(sig)) { changedSig = sig; break; }
-    }
-
-    if (!changedSig) {
-      try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* temp cleanup best-effort */ }
-      const dup = sigs.length > 1 ? 'duplicate card (reached end)' : 'no visual change after click (end or click failed)';
-      dbg.notes.push(`card-${lbl}: ${dup} — stopping`);
-      dbg.stopReason = `stopped after card ${n - 1}: ${dup}`;
-      break;
-    }
-
-    const fp = path.join(outDir, `card-${lbl}.png`);
-    fs.renameSync(tmp, fp);
-    lastSig = changedSig; sigs.push(changedSig); files.push(fp);
-    if (pickedNote) dbg.notes.push(`card-${lbl} ${pickedNote}`);
-    dbg.notes.push(`card-${lbl}: saved (crop ${Math.round(usedCrop.width)}x${Math.round(usedCrop.height)}, visual change confirmed)`);
-    console.log(`       card-${lbl}: saved`);
-
-    if (n === CAROUSEL_MAX) { dbg.stopReason = `reached CAROUSEL_MAX (${CAROUSEL_MAX})`; }
+  // Fallback: no visible-card candidate detectable → save the central card once.
+  if (files.length === 0) {
+    const c1 = await findCentralCard(page, creativeBBox);
+    for (const ln of c1.notes) dbg.notes.push(`card-01 ${ln}`);
+    const crop1 = c1.bbox ?? creativeBBox;
+    const first = path.join(outDir, 'card-01.png');
+    await screenshotCreative(page, crop1, first);
+    files.push(first);
+    savedBufs.push(fs.readFileSync(first));
+    if (c1.identity?.src) seenSrc.add(c1.identity.src);
+    dbg.notes.push(`card-01: DECISION = SAVED central card (no visible-card candidates; crop ${Math.round(crop1.width)}x${Math.round(crop1.height)})`);
+    console.log('       card-01: saved');
   }
 
-  if (files.length === 1 && !dbg.stopReason) {
-    dbg.stopReason = 'only card-01 captured — no further cards detected';
+  // ── Phase 2: try movement methods; after each, save any NEW distinct visible cards ──
+  const methods = ['next-button', 'mouse-right-edge', 'arrow-right', 'wheel', 'swipe'];
+  for (let round = 0; round < CAROUSEL_MAX && files.length < CAROUSEL_MAX; round++) {
+    let savedThisRound = 0;
+    for (const m of methods) {
+      let used = m;
+      if (m === 'next-button') used = await clickNextControl(page, creativeBBox);
+      else if (m === 'mouse-right-edge') await moveMouseRightEdge(page, creativeBBox);
+      else if (m === 'arrow-right') await pressArrowRightOnCarousel(page, creativeBBox);
+      else if (m === 'wheel') await wheelCarousel(page, creativeBBox);
+      else if (m === 'swipe') await swipeCarousel(page, creativeBBox);
+      dbg.carouselNextBtn = used;
+      await page.waitForTimeout(700);
+      const n = await saveNewVisibleCards(page, creativeBBox, outDir, tmp, files, savedBufs, seenSrc, dbg, `after-${used}`);
+      if (n > 0) { savedThisRound += n; break; } // new card(s) revealed — start a fresh movement round
+    }
+    if (savedThisRound === 0) {
+      dbg.notes.push(`movement round ${round + 1}: NO MOVEMENT — no new distinct cards after all methods`);
+      break;
+    }
+  }
+
+  try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* best-effort */ }
+
+  if (!dbg.stopReason) {
+    dbg.stopReason = files.length <= 1
+      ? 'only card-01 captured — no further distinct cards found'
+      : `END REACHED — ${files.length} distinct card(s) captured`;
   }
   return files;
 }
@@ -1252,6 +1543,9 @@ async function main(): Promise<void> {
     const url  = (row.ad_library_url  ?? '').trim();
     const name = (row.competitor_name ?? '').trim();
 
+    // Test-only: process only the requested ad_id (BROWSER_ONLY_AD_ID).
+    if (ONLY_AD_ID && adId !== ONLY_AD_ID) { skipped++; continue; }
+
     console.log(`\n  Row ${rowNum} [${adId}] ${mt}`);
     console.log(`  URL: ${url}`);
 
@@ -1261,13 +1555,18 @@ async function main(): Promise<void> {
       continue;
     }
 
-    if (row.creative_asset_path?.trim()) {
+    if (row.creative_asset_path?.trim() && !FORCE_RECAPTURE) {
       console.log(`    ↳ Already populated: ${row.creative_asset_path.trim()}`);
       captured++;
       continue;
     }
 
     const outDir  = assetDir(name, adId);
+    if (FORCE_RECAPTURE) {
+      // Recapture into the SAME folder: remove only this script's generated files.
+      cleanGeneratedAssets(outDir);
+      console.log(`    ↻ FORCE_RECAPTURE — cleaned old generated files, recapturing into ${path.relative(process.cwd(), outDir).replace(/\\/g, '/')}`);
+    }
     const page: Page = await context.newPage();
     const dbg = newDebugState(mt); // hoisted so the catch block can persist debug on failure
 
