@@ -32,6 +32,7 @@
     "browser:workflow-client": "tsx scripts/run-client-browser-workflow.ts",
     "browser:plan-client-ingestion": "tsx scripts/plan-client-ingestion.ts",
     "browser:backfill-assets": "tsx scripts/backfill-browser-ad-assets.ts",
+    "browser:backfill-headlines": "tsx scripts/backfill-browser-ad-headlines.ts",
     "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts"
   },
   "dependencies": {

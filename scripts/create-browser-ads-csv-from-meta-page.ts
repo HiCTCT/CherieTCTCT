@@ -217,13 +217,13 @@ async function harvestText(page: Page, id: string): Promise<{ copy: string; head
       const atLow = at.toLowerCase();
       let isUi = false;
       for (const u of uiLabels) if (atLow === u || atLow.includes(u)) { isUi = true; break; }
-      landing = target; // first clean advertiser-domain link
+      if (!landing) landing = target; // first clean advertiser-domain link
       if (isUi) {
         rejected.push(`rejected headline candidate: ${at || '(empty)'}, UI label`);
-      } else if (at && at.length >= 3 && at.length <= 120 && atLow !== copy.toLowerCase()) {
-        headline = at;
+      } else if (!headline && at && at.length >= 3 && at.length <= 120 && atLow !== copy.toLowerCase() && !/^\d+$/.test(at)) {
+        headline = at; // skip numeric-only anchor text (post/video IDs) — keep looking for the real title
       }
-      break;
+      if (landing && headline) break;
     }
 
     return { copy, headline, landing, rejected };
@@ -384,13 +384,13 @@ async function main(): Promise<void> {
             const atLow = at.toLowerCase();
             let isUi = false;
             for (const u of uiLabels) if (atLow === u || atLow.includes(u)) { isUi = true; break; }
-            landing = target;
+            if (!landing) landing = target; // first clean advertiser link
             if (isUi) {
               rejected.push(`rejected headline candidate: ${at || '(empty)'}, UI label`);
-            } else if (at && at.length >= 3 && at.length <= 120 && atLow !== copy.toLowerCase()) {
-              headline = at;
+            } else if (!headline && at && at.length >= 3 && at.length <= 120 && atLow !== copy.toLowerCase() && !/^\d+$/.test(at)) {
+              headline = at; // skip numeric-only anchor text (post/video IDs) — keep looking
             }
-            break;
+            if (landing && headline) break;
           }
 
           found.push({ id, mediaType, startDate, copy, headline, landing, rejected });
@@ -459,6 +459,14 @@ async function main(): Promise<void> {
       note(`  before: ${info.headline}`);
       note(`  after: ${cleaned.headline}`);
       info.headline = cleaned.headline;
+    }
+
+    // Reject a numeric-only headline or one equal to the ad id — those are scraped
+    // post/video IDs (e.g. "1820807492631733"), never a real headline. Drop it so
+    // the row never stores an ID as a headline (falls back to copy / NEEDS_REVIEW).
+    if (info.headline && (/^\d+$/.test(info.headline.trim()) || info.headline.trim() === id)) {
+      note(`ad ${id}: rejected numeric/id headline "${info.headline.trim()}" — dropped`);
+      info.headline = '';
     }
 
     const known = info.mediaType === 'IMAGE' || info.mediaType === 'VIDEO' || info.mediaType === 'CAROUSEL';

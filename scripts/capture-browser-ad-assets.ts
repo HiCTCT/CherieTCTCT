@@ -42,7 +42,9 @@ const NAV_TIMEOUT  = 25_000;  // ms — page navigation
 const MEDIA_WAIT   = 15_000;  // ms — wait for media elements
 const PAGE_SETTLE  = 2_500;   // ms — let React render after navigation
 const OVERLAY_WAIT = 600;     // ms — after dismissing overlays
-const CAROUSEL_MAX = 10;      // max cards per carousel
+// Max cards per carousel. Not a fixed "3" — the capture keeps advancing until no
+// visually-new card appears or this cap is hit. Override with BROWSER_MAX_CAROUSEL_CARDS.
+const CAROUSEL_MAX = Math.max(1, Math.min(20, parseInt(process.env.BROWSER_MAX_CAROUSEL_CARDS ?? '10', 10) || 10));
 
 const DEBUG_CAPTURE_GLOBAL = process.env.DEBUG_CAPTURE === 'true';
 

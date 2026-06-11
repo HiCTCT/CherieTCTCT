@@ -473,23 +473,32 @@ export default async function AdDetailPage({
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                // VIDEO_FRAME frames are shown larger (one representative frame is
+                // the whole evidence); carousel/image galleries keep the compact grid.
+                gridTemplateColumns: ad.capturedAssetType === 'VIDEO_FRAME'
+                  ? 'repeat(auto-fill, minmax(320px, 1fr))'
+                  : 'repeat(auto-fill, minmax(180px, 1fr))',
                 gap: '12px',
                 marginTop: '8px',
               }}
             >
-              {evidenceFiles.map((f) => (
-                <figure key={f.filename} style={{ margin: 0 }}>
-                  <img
-                    src={`/api/captured-asset?path=${encodeURIComponent(f.rel)}`}
-                    alt={`Captured creative ${f.filename}`}
-                    style={{ width: '100%', height: 'auto', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'block' }}
-                  />
-                  <figcaption className="muted" style={{ fontSize: '12px', marginTop: '4px', textAlign: 'center' }}>
-                    {f.filename}
-                  </figcaption>
-                </figure>
-              ))}
+              {evidenceFiles.map((f) => {
+                const href = `/api/captured-asset?path=${encodeURIComponent(f.rel)}`;
+                return (
+                  <figure key={f.filename} style={{ margin: 0 }}>
+                    <a href={href} target="_blank" rel="noreferrer" title="Open full size">
+                      <img
+                        src={href}
+                        alt={`Captured creative ${f.filename}`}
+                        style={{ width: '100%', height: 'auto', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'block' }}
+                      />
+                    </a>
+                    <figcaption className="muted" style={{ fontSize: '12px', marginTop: '4px', textAlign: 'center' }}>
+                      {f.filename} · <a href={href} target="_blank" rel="noreferrer">open full size ↗</a>
+                    </figcaption>
+                  </figure>
+                );
+              })}
             </div>
           ) : (
             <p className="muted">
