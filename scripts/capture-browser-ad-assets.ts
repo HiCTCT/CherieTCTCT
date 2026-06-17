@@ -103,6 +103,135 @@ function serializeCsv(headers: string[], rows: BrowserAdRow[]): string {
   return lines.join('\n') + '\n';
 }
 
+// ── Phase H.3b: per-card metadata sidecar (no DB writes) ──────────────────────
+// Capture runs one ad at a time, so a module-level accumulator avoids threading an
+// extra param through every capture function. main() sets `captureAdId` before each
+// ad; the carousel/video capture pushes one row per saved card/frame; main() writes
+// data/imports/<basename>.cards.csv at the end.
+type CardSidecarRow = {
+  ad_id: string; card_index: number; asset_path: string; media_type: string;
+  headline: string; description: string; cta: string; display_url: string; landing_url: string;
+};
+const cardRows: CardSidecarRow[] = [];
+let captureAdId = '';
+
+const CARDS_HEADER = ['ad_id', 'card_index', 'asset_path', 'media_type', 'headline', 'description', 'cta', 'display_url', 'landing_url'];
+
+function serializeCardsCsv(rows: CardSidecarRow[]): string {
+  const lines = [CARDS_HEADER.join(',')];
+  for (const r of rows) {
+    lines.push([r.ad_id, String(r.card_index), r.asset_path, r.media_type, r.headline, r.description, r.cta, r.display_url, r.landing_url].map(csvEscape).join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
+function cardsCsvPath(inputFile: string): string {
+  const dir  = path.dirname(inputFile);
+  const base = path.basename(inputFile, '.csv');
+  return path.join(dir, `${base}.cards.csv`);
+}
+
+// Post-processing safeguard (no DB): if 2+ visually-distinct CAROUSEL_CARD rows for
+// the same ad carry the EXACT same headline + landingUrl AND have no per-card
+// description/CTA difference, the metadata is shared/low-confidence (not truly
+// per-card) — blank headline/description/displayUrl/landingUrl for those rows. The
+// CTA is kept if present. Blank beats wrong card attribution.
+// Brand / display / platform text that is NOT a real ad description or headline.
+// Matched only when the WHOLE field equals one of these (or is a bare domain), so a
+// genuine multi-word headline like "Dalton Storage Bed | Castlery Singapore" survives.
+function isWeakMeta(s: string | null | undefined): boolean {
+  const t = (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!t) return true;                                   // blank
+  const NOISE = new Set([
+    'castlery', 'castlery.com', 'www.castlery.com',
+    'https://www.castlery.com', 'http://www.castlery.com',
+    'facebook', 'instagram', 'meta', 'sponsored',
+    'open drop-down', 'platforms',
+  ]);
+  if (NOISE.has(t)) return true;
+  // Bare display URL / domain only (no descriptive text, no real path).
+  if (/^(https?:\/\/)?(www\.)?[a-z0-9-]+\.(com\.sg|com|sg|net|org)\/?$/.test(t)) return true;
+  return false;
+}
+
+// Normalised headline key: trimmed, whitespace-collapsed, lowercased.
+function normHeadlineKey(s: string | null | undefined): string {
+  return (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function dedupeSharedCardMeta(rows: CardSidecarRow[]): void {
+  // Group CAROUSEL_CARD rows per ad.
+  const byAd = new Map<string, CardSidecarRow[]>();
+  for (const r of rows) {
+    if (r.media_type !== 'CAROUSEL_CARD') continue;
+    const arr = byAd.get(r.ad_id) ?? [];
+    arr.push(r);
+    byAd.set(r.ad_id, arr);
+  }
+
+  for (const [adId, cards] of byAd) {
+    if (cards.length < 2) continue;
+
+    // Group ONLY by headline (normalised). Two or more visually-distinct cards
+    // sharing the same non-empty headline is itself strong evidence the headline
+    // (and its landing link) is global/shared, not card-specific. Description and
+    // landingUrl are deliberately NOT part of the key, so weak text like "Castlery"
+    // vs blank — or a slightly different landing URL — can never split the group
+    // and block blanking.
+    const byHeadline = new Map<string, CardSidecarRow[]>();
+    for (const c of cards) {
+      const hk = normHeadlineKey(c.headline);
+      if (!hk) continue;                                 // no headline → nothing to dedupe here
+      const arr = byHeadline.get(hk) ?? [];
+      arr.push(c);
+      byHeadline.set(hk, arr);
+    }
+
+    for (const group of byHeadline.values()) {
+      if (group.length < 2) continue;                    // headline not repeated → leave it
+
+      // The ONLY thing that preserves a repeated headline is STRONG per-card
+      // metadata: every card having its own distinct, non-weak description. Weak
+      // text (brand, display URL, platform/UI, blank) never counts. We have no
+      // such proof yet, so repeated headlines are treated as shared and blanked.
+      const strongDescs = group
+        .map((g) => (g.description ?? '').trim())
+        .filter((d) => d && !isWeakMeta(d));
+      const distinctStrong = new Set(strongDescs.map((d) => d.toLowerCase()));
+      const hasStrongDifferentiator =
+        strongDescs.length === group.length && distinctStrong.size === group.length;
+      if (hasStrongDifferentiator) continue;             // genuine per-card metadata → keep
+
+      const labels     = group.map((g) => `card-${String(g.card_index).padStart(2, '0')}`).join(', ');
+      const sharedHead = (group[0]!.headline ?? '').trim();
+      const sharedLand = group.map((g) => (g.landing_url ?? '').trim()).find((l) => l) ?? '';
+      const seenDescs  = group.map((g) => (g.description ?? '').trim() || 'blank').join(' / ');
+      console.log(`    ⚠ metadata repeated across distinct cards: blanked shared headline/link for ${labels}`);
+      console.log(`      shared headline "${sharedHead}" + landingUrl "${sharedLand}"`);
+      console.log(`      weak descriptions ignored: ${seenDescs}`);
+      for (const g of group) {
+        g.headline    = '';
+        g.description = '';
+        g.display_url = '';
+        g.landing_url = '';
+        // CTA intentionally kept (e.g. "Shop Now") if confidently detected.
+      }
+    }
+  }
+
+  // Final scrub: brand/display/platform/UI text must NEVER appear as a headline or
+  // description (covers single-card ads and any group rows left untouched above).
+  // display_url legitimately holds a domain, so it is not scrubbed here.
+  for (const r of rows) {
+    if (r.media_type !== 'CAROUSEL_CARD') continue;
+    if (isWeakMeta(r.headline)) r.headline = '';
+    if ((r.description ?? '').trim() && isWeakMeta(r.description)) {
+      console.log(`    ⚠ weak description ignored: "${r.description}" — brand/display/UI text, not a real ad description; blanked`);
+      r.description = '';
+    }
+  }
+}
+
 function outputCsvPath(inputFile: string): string {
   const dir  = path.dirname(inputFile);
   const base = path.basename(inputFile, '.csv');
@@ -1365,6 +1494,112 @@ async function findVisibleCards(
 }
 
 /**
+ * Best-effort per-card link-preview metadata, scoped to the card's column and the
+ * caption band directly below the card image. Conservative — returns blanks when
+ * nothing confident is found; never invents text. Inline-only evaluate (anonymous
+ * arrows) to avoid the tsx/esbuild __name injection.
+ */
+async function extractCardMeta(
+  page: Page, cardBBox: BBox,
+): Promise<{ headline: string; description: string; cta: string; displayUrl: string; landingUrl: string; candidates: number; rejectedUi: string[]; reason: string }> {
+  try {
+    return await page.evaluate((bb) => {
+      const blocked = ['facebook.com', 'fb.com', 'fb.me', 'meta.com', 'metastatus.com', 'instagram.com', 'whatsapp.com', 'messenger.com', 'fbcdn.net', 'cdninstagram'];
+      const ctaWords = ['shop now', 'learn more', 'book now', 'sign up', 'contact us', 'send message', 'get quote', 'apply now', 'download', 'subscribe', 'order now', 'get offer', 'see menu', 'watch more', 'listen now', 'get directions'];
+      // Meta UI / chrome text — never a real headline or description.
+      const uiChrome = ['open drop-down', 'open drop-down menu', 'open drop down menu', 'open drop down', 'drop-down menu', 'more', 'see more', 'see less', 'sponsored', 'active', 'inactive', 'library id', 'why am i seeing', 'see ad details', 'see summary details', 'see summary', 'this ad has', 'ad library', 'platforms'];
+      const colMinX = bb.x - 10;
+      const colMaxX = bb.x + bb.width + 10;
+      const top = bb.y + bb.height * 0.5;   // caption sits at/below the image bottom
+      const bot = bb.y + bb.height + 240;   // ~240px below for the link-preview block
+      // Card-scoped width: a per-card caption is roughly card-width. Reject anything
+      // wider — those are shared / rail-spanning previews, NOT card-specific.
+      const maxElemW = Math.max(bb.width * 1.5, 150);
+      let landingUrl = '';
+      let displayUrl = '';
+      let cta = '';
+      let candidates = 0;
+      const rejectedUi: string[] = [];
+      const lines: { y: number; text: string }[] = [];
+      for (const el of Array.from(document.querySelectorAll('a, span, div, button'))) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const ccx = r.x + r.width / 2;
+        const ccy = r.y + r.height / 2;
+        if (ccx < colMinX || ccx > colMaxX) continue;                       // centre in this card's column
+        if (ccy < top || ccy > bot) continue;                               // caption band below the card
+        if (r.width > maxElemW) continue;                                   // reject wide shared / rail-spanning blocks
+        if (r.x < colMinX - 6 || r.x + r.width > colMaxX + 6) continue;     // must not spill beyond the card column
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'a' && !landingUrl) {
+          const href = (el as HTMLAnchorElement).getAttribute('href') || '';
+          let target = href;
+          const um = href.match(/[?&]u=([^&]+)/);
+          if (um) { try { target = decodeURIComponent(um[1]!); } catch { /* keep */ } }
+          if (/^https?:\/\//.test(target)) {
+            let isB = false;
+            for (const d of blocked) if (target.toLowerCase().includes(d)) { isB = true; break; }
+            if (!isB) landingUrl = target;
+          }
+        }
+        let direct = '';
+        for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) direct += n.textContent || '';
+        direct = direct.replace(/\s+/g, ' ').trim();
+        if (!direct) continue;
+        candidates++;
+        const low = direct.toLowerCase();
+        // Reject Meta UI / chrome text outright (never headline/description); log it.
+        let isChrome = false;
+        for (const u of uiChrome) if (low === u || low.includes(u)) { isChrome = true; break; }
+        if (isChrome) { if (rejectedUi.length < 12 && rejectedUi.indexOf(direct) < 0) rejectedUi.push(direct); continue; }
+        // CTA is allowed (even though never a headline).
+        if (!cta && direct.length <= 20) { for (const w of ctaWords) if (low === w || low.includes(w)) { cta = direct; break; } }
+        if (!displayUrl && /^(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com\.sg|com|sg|net|org)$/i.test(direct)) { displayUrl = direct; continue; }
+        if (direct.length < 3 || direct.length > 160) continue;
+        if (/^\d+$/.test(direct)) continue;                                      // numeric id
+        let isCtaOnly = false; for (const w of ctaWords) if (low === w) { isCtaOnly = true; break; }
+        if (isCtaOnly) continue;
+        if (/^(?:https?:\/\/)?(?:www\.)?[a-z0-9.-]+\.(?:com\.sg|com|sg|net|org)$/i.test(direct)) continue; // url-only line
+        lines.push({ y: r.y, text: direct });
+      }
+      if (!displayUrl && landingUrl) {
+        try { displayUrl = new URL(landingUrl).hostname.replace(/^www\./, ''); } catch { /* ignore */ }
+      }
+      lines.sort((a, b) => a.y - b.y);
+      const uniq: string[] = [];
+      for (const l of lines) if (uniq.indexOf(l.text) < 0) uniq.push(l.text);
+      const headline = uniq[0] || '';
+      const description = (uniq[1] && uniq[1] !== headline) ? uniq[1] : '';
+      let reason = '';
+      if (!headline && !landingUrl && !cta) reason = `no card-scoped metadata in this card column/band (rejected ${rejectedUi.length} UI text item(s); other text too wide/shared or absent)`;
+      else if (!headline) reason = 'card-scoped CTA/link found but no card-specific headline text — headline left blank';
+      else reason = `card-scoped text block (<= ${Math.round(maxElemW)}px wide) within the card column`;
+      return { headline, description, cta, displayUrl, landingUrl, candidates, rejectedUi, reason };
+    }, cardBBox);
+  } catch {
+    return { headline: '', description: '', cta: '', displayUrl: '', landingUrl: '', candidates: 0, rejectedUi: [], reason: 'extract error' };
+  }
+}
+
+/** Extract + record one card/frame metadata row to the sidecar accumulator (no DB). */
+async function recordCard(page: Page, crop: BBox, cardIndex: number, assetFp: string, mediaType: string, dbg: DebugState): Promise<void> {
+  const meta = await extractCardMeta(page, crop);
+  const asset_path = path.relative(process.cwd(), assetFp).replace(/\\/g, '/');
+  cardRows.push({
+    ad_id: captureAdId, card_index: cardIndex, asset_path, media_type: mediaType,
+    headline: meta.headline, description: meta.description, cta: meta.cta, display_url: meta.displayUrl, landing_url: meta.landingUrl,
+  });
+  const label = mediaType === 'VIDEO_FRAME' ? 'frame-01' : `card-${String(cardIndex).padStart(2, '0')}`;
+  dbg.notes.push(`card-meta ${label} candidates: ${meta.candidates}`);
+  if (meta.rejectedUi.length) dbg.notes.push(`card-meta ${label} rejected UI text: ${meta.rejectedUi.map((t) => '"' + t + '"').join(', ')}`);
+  dbg.notes.push(`card-meta ${label} selected headline: ${meta.headline ? '"' + meta.headline + '"' : '(blank)'}`);
+  dbg.notes.push(`card-meta ${label} selected description: ${meta.description ? '"' + meta.description + '"' : '(blank)'}`);
+  dbg.notes.push(`card-meta ${label} selected CTA: ${meta.cta || '(blank)'}`);
+  dbg.notes.push(`card-meta ${label} selected landingUrl: ${meta.landingUrl || '(blank)'}`);
+  dbg.notes.push(`card-meta ${label} confidence reason: ${meta.reason}`);
+}
+
+/**
  * Screenshot every currently-visible card and save those that are visually distinct
  * (perceptual visualDiffRatio) from ALL already-saved cards. Returns how many new
  * cards were saved. Never saves a visual duplicate.
@@ -1402,6 +1637,7 @@ async function saveNewVisibleCards(
     if (card.id.src) seenSrc.add(card.id.src);
     dbg.notes.push(`${phase}: card-${lbl}: DECISION = SAVED visible card (crop ${Math.round(card.crop.width)}x${Math.round(card.crop.height)})`);
     console.log(`       card-${lbl}: saved`);
+    await recordCard(page, card.crop, files.length, fp, 'CAROUSEL_CARD', dbg);
     saved++;
   }
   return saved;
@@ -1435,6 +1671,7 @@ async function captureCarousel(
     if (c1.identity?.src) seenSrc.add(c1.identity.src);
     dbg.notes.push(`card-01: DECISION = SAVED central card (no visible-card candidates; crop ${Math.round(crop1.width)}x${Math.round(crop1.height)})`);
     console.log('       card-01: saved');
+    await recordCard(page, crop1, 1, first, 'CAROUSEL_CARD', dbg);
   }
 
   // ── Phase 2: try movement methods; after each, save any NEW distinct visible cards ──
@@ -1547,6 +1784,9 @@ async function main(): Promise<void> {
 
     // Test-only: process only the requested ad_id (BROWSER_ONLY_AD_ID).
     if (ONLY_AD_ID && adId !== ONLY_AD_ID) { skipped++; continue; }
+
+    // H.3b: tag any sidecar card rows recorded during this ad with its ad_id.
+    captureAdId = adId;
 
     console.log(`\n  Row ${rowNum} [${adId}] ${mt}`);
     console.log(`  URL: ${url}`);
@@ -1677,6 +1917,13 @@ async function main(): Promise<void> {
         continue;
       }
 
+      // H.3b: video gets a single frame-01 sidecar row (link-preview metadata
+      // shown below the video). Carousel cards are recorded inside captureCarousel;
+      // single images are not card-split, so no sidecar row is written for them.
+      if (mt !== 'CAROUSEL' && mt !== 'IMAGE') {
+        await recordCard(page, creativeBBox, 1, savedFiles[0]!, 'VIDEO_FRAME', dbg);
+      }
+
       await saveDebugInfo(page, adId, outDir, dbg);
 
       const relPath = path.relative(process.cwd(), outDir).replace(/\\/g, '/');
@@ -1707,6 +1954,12 @@ async function main(): Promise<void> {
   const outputFile = outputCsvPath(inputFile);
   fs.writeFileSync(outputFile, serializeCsv(headers, rows), 'utf-8');
 
+  // H.3b: write per-card metadata sidecar (CSV only — NO DB writes). First blank
+  // any metadata repeated across visually-distinct cards, to avoid false attribution.
+  dedupeSharedCardMeta(cardRows);
+  const cardsFile = cardsCsvPath(inputFile);
+  fs.writeFileSync(cardsFile, serializeCardsCsv(cardRows), 'utf-8');
+
   console.log('\n' + '═'.repeat(64));
   console.log(`  READY rows:           ${readyRows.length}`);
   console.log(`  Captured:             ${captured}`);
@@ -1717,6 +1970,7 @@ async function main(): Promise<void> {
   console.log(`  Non-READY:            ${skipped}`);
   console.log('─'.repeat(64));
   console.log(`  Output CSV:       ${outputFile}`);
+  console.log(`  Cards CSV:        ${cardsFile} (${cardRows.length} card row(s))`);
   console.log(`  Asset folder:     ${path.resolve(ASSET_BASE)}`);
   if (DEBUG_CAPTURE_GLOBAL) console.log('  Debug mode:       ON (debug-* files saved per ad)');
   console.log('═'.repeat(64) + '\n');
@@ -1735,4 +1989,3 @@ main().catch((err: unknown) => {
   console.error(`\n❌ Fatal error: ${msg}`);
   process.exit(1);
 });
-

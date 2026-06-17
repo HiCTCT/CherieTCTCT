@@ -94,11 +94,35 @@ model Ad {
 
   analysis         AdAnalysis?
   adScanRecords    AdScanRecord[]
+  creativeCards    AdCreativeCard[]
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 
   @@index([qualified, score])
   @@index([competitorId, competitorBenchmarkScore])
+}
+
+// ── Phase H.3: per-card / per-frame creative metadata (additive) ──────────────
+// One row per captured carousel card (card-01, card-02, …) or per video frame.
+// Ad.headline/description remain the overall/fallback values and are untouched.
+// All metadata fields are nullable — left blank when not confidently extractable.
+model AdCreativeCard {
+  id          String   @id @default(cuid())
+  adId        String
+  ad          Ad       @relation(fields: [adId], references: [id])
+  cardIndex   Int      // 1-based: card-01 → 1, frame-01 → 1
+  assetPath   String?  // relative path to the card/frame image
+  mediaType   String   // CAROUSEL_CARD | VIDEO_FRAME | CREATIVE_IMAGE
+  headline    String?
+  description String?
+  cta         String?
+  displayUrl  String?
+  landingUrl  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([adId, cardIndex])
+  @@index([adId])
 }
 
 model AdAnalysis {
