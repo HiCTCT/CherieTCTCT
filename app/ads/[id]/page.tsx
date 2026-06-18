@@ -511,6 +511,100 @@ export default async function AdDetailPage({
         </div>
       )}
 
+      {/* ── Creative Cards (Phase H.3d) ── */}
+      {ad.creativeCards.length > 0 && (
+        <div className="card">
+          <h2>Creative Cards</h2>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+              gap: '16px',
+              marginTop: '8px',
+            }}
+          >
+            {ad.creativeCards.map((card) => {
+              const hasMeta = !!(card.headline || card.description || card.displayUrl || card.landingUrl);
+              const imgHref = card.assetPath
+                ? `/api/captured-asset?path=${encodeURIComponent(card.assetPath)}`
+                : null;
+              return (
+                <figure
+                  key={card.id}
+                  style={{
+                    margin: 0,
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '8px',
+                    padding: '12px',
+                  }}
+                >
+                  <p className="section-label" style={{ marginTop: 0 }}>
+                    Card {String(card.cardIndex).padStart(2, '0')}
+                  </p>
+                  {imgHref && (
+                    <a href={imgHref} target="_blank" rel="noreferrer" title="Open full size">
+                      <img
+                        src={imgHref}
+                        alt={`Creative card ${card.cardIndex}`}
+                        style={{
+                          width: '100%',
+                          height: 'auto',
+                          borderRadius: '6px',
+                          border: '1px solid #e2e8f0',
+                          display: 'block',
+                        }}
+                      />
+                    </a>
+                  )}
+                  <p className="muted" style={{ fontSize: '12px', marginTop: '6px' }}>
+                    {card.mediaType}
+                  </p>
+
+                  {card.headline && (
+                    <>
+                      <p className="section-label">Headline</p>
+                      <div className="copy-block">{card.headline}</div>
+                    </>
+                  )}
+                  {card.description && (
+                    <>
+                      <p className="section-label">Description</p>
+                      <div className="copy-block">{card.description}</div>
+                    </>
+                  )}
+
+                  {!hasMeta && (
+                    <p className="muted" style={{ fontSize: '13px', marginTop: '6px' }}>
+                      No card-specific headline/link captured. Shared metadata was blanked to
+                      avoid false attribution.
+                    </p>
+                  )}
+
+                  {card.cta && (
+                    <p style={{ marginTop: '8px' }}>
+                      <strong>CTA:</strong> {card.cta}
+                    </p>
+                  )}
+                  {card.displayUrl && (
+                    <p style={{ fontSize: '13px', marginTop: '4px' }}>
+                      <strong>Display URL:</strong> {card.displayUrl}
+                    </p>
+                  )}
+                  {card.landingUrl && (
+                    <p style={{ fontSize: '13px', marginTop: '4px' }}>
+                      <strong>Landing:</strong>{' '}
+                      <a href={card.landingUrl} target="_blank" rel="noreferrer">
+                        {card.landingUrl} ↗
+                      </a>
+                    </p>
+                  )}
+                </figure>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* ── 3. Original Ad Content ── */}
       {(ad.primaryCopy || ad.headline || ad.description) && (
         <div className="card">

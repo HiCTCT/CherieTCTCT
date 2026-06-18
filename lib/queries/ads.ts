@@ -40,6 +40,8 @@ export function getAdById(id: string) {
       client: true,
       competitor: true,
       analysis: true,
+      // Phase H.3d: per-card creative metadata, shown on the ad detail page.
+      creativeCards: { orderBy: { cardIndex: 'asc' } },
     },
   });
 }
