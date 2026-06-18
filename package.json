@@ -26,6 +26,7 @@
     "browser:preview": "tsx scripts/preview-browser-collected-ads.ts",
     "browser:ingest": "tsx scripts/ingest-browser-collected-ads.ts",
     "browser:capture-assets": "tsx scripts/capture-browser-ad-assets.ts",
+    "browser:ingest-cards": "tsx scripts/ingest-ad-creative-cards.ts",
     "browser:create-csv": "tsx scripts/create-browser-ads-csv-from-meta-page.ts",
     "browser:workflow-one": "tsx scripts/run-one-competitor-browser-workflow.ts",
     "browser:workflow-db-one": "tsx scripts/run-db-competitor-browser-workflow.ts",
