@@ -137,8 +137,9 @@ function cardsCsvPath(inputFile: string): string {
 // per-card) — blank headline/description/displayUrl/landingUrl for those rows. The
 // CTA is kept if present. Blank beats wrong card attribution.
 // Brand / display / platform text that is NOT a real ad description or headline.
-// Matched only when the WHOLE field equals one of these (or is a bare domain), so a
-// genuine multi-word headline like "Dalton Storage Bed | Castlery Singapore" survives.
+// Matched when the WHOLE field equals a known noise token, is a bare domain, or
+// matches a Meta ad-status / date line. A genuine multi-word headline like
+// "Dalton Storage Bed | Castlery Singapore" survives.
 function isWeakMeta(s: string | null | undefined): boolean {
   const t = (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (!t) return true;                                   // blank
@@ -151,6 +152,11 @@ function isWeakMeta(s: string | null | undefined): boolean {
   if (NOISE.has(t)) return true;
   // Bare display URL / domain only (no descriptive text, no real path).
   if (/^(https?:\/\/)?(www\.)?[a-z0-9-]+\.(com\.sg|com|sg|net|org)\/?$/.test(t)) return true;
+  // Meta ad-status / date lines — regex, so dynamic dates and IDs are caught too.
+  if (/^started running\b/.test(t)) return true;          // "Started running on 11 May 2025" / "Started running 11 May 2025"
+  if (/^library id\b/.test(t)) return true;               // "Library ID: 123456789012345"
+  if (/^(active|inactive)\b/.test(t)) return true;        // "Active", "Inactive", "Active since ..."
+  if (/^\d{1,2}\s+[a-z]+\s+\d{4}$/.test(t)) return true;  // bare date "11 may 2025"
   return false;
 }
 
@@ -160,7 +166,7 @@ function normHeadlineKey(s: string | null | undefined): string {
 }
 
 function dedupeSharedCardMeta(rows: CardSidecarRow[]): void {
-  // Group CAROUSEL_CARD rows per ad.
+  // ── Pass 1: blank headline+link repeated across 2+ visually-distinct cards ──
   const byAd = new Map<string, CardSidecarRow[]>();
   for (const r of rows) {
     if (r.media_type !== 'CAROUSEL_CARD') continue;
@@ -173,62 +179,130 @@ function dedupeSharedCardMeta(rows: CardSidecarRow[]): void {
     if (cards.length < 2) continue;
 
     // Group ONLY by headline (normalised). Two or more visually-distinct cards
-    // sharing the same non-empty headline is itself strong evidence the headline
-    // (and its landing link) is global/shared, not card-specific. Description and
-    // landingUrl are deliberately NOT part of the key, so weak text like "Castlery"
-    // vs blank — or a slightly different landing URL — can never split the group
-    // and block blanking.
+    // sharing the same non-empty headline is strong evidence the headline (and its
+    // landing link) is global/shared, not card-specific.
     const byHeadline = new Map<string, CardSidecarRow[]>();
     for (const c of cards) {
       const hk = normHeadlineKey(c.headline);
-      if (!hk) continue;                                 // no headline → nothing to dedupe here
+      if (!hk) continue;
       const arr = byHeadline.get(hk) ?? [];
       arr.push(c);
       byHeadline.set(hk, arr);
     }
 
     for (const group of byHeadline.values()) {
-      if (group.length < 2) continue;                    // headline not repeated → leave it
+      if (group.length < 2) continue;
 
-      // The ONLY thing that preserves a repeated headline is STRONG per-card
-      // metadata: every card having its own distinct, non-weak description. Weak
-      // text (brand, display URL, platform/UI, blank) never counts. We have no
-      // such proof yet, so repeated headlines are treated as shared and blanked.
+      // STRONG per-card metadata = every card has its own distinct, non-weak
+      // description. Weak text never counts; we have no such proof yet, so a
+      // repeated headline is treated as shared and blanked.
       const strongDescs = group
         .map((g) => (g.description ?? '').trim())
         .filter((d) => d && !isWeakMeta(d));
       const distinctStrong = new Set(strongDescs.map((d) => d.toLowerCase()));
       const hasStrongDifferentiator =
         strongDescs.length === group.length && distinctStrong.size === group.length;
-      if (hasStrongDifferentiator) continue;             // genuine per-card metadata → keep
+      if (hasStrongDifferentiator) continue;
 
-      const labels     = group.map((g) => `card-${String(g.card_index).padStart(2, '0')}`).join(', ');
+      const labels = group.map((g) => `card-${String(g.card_index).padStart(2, '0')}`).join(', ');
       const sharedHead = (group[0]!.headline ?? '').trim();
       const sharedLand = group.map((g) => (g.landing_url ?? '').trim()).find((l) => l) ?? '';
-      const seenDescs  = group.map((g) => (g.description ?? '').trim() || 'blank').join(' / ');
+      const seenDescs = group.map((g) => (g.description ?? '').trim() || 'blank').join(' / ');
       console.log(`    ⚠ metadata repeated across distinct cards: blanked shared headline/link for ${labels}`);
       console.log(`      shared headline "${sharedHead}" + landingUrl "${sharedLand}"`);
       console.log(`      weak descriptions ignored: ${seenDescs}`);
       for (const g of group) {
-        g.headline    = '';
+        g.headline = '';
         g.description = '';
         g.display_url = '';
         g.landing_url = '';
-        // CTA intentionally kept (e.g. "Shop Now") if confidently detected.
+        // CTA intentionally kept.
       }
     }
   }
 
-  // Final scrub: brand/display/platform/UI text must NEVER appear as a headline or
-  // description (covers single-card ads and any group rows left untouched above).
-  // display_url legitimately holds a domain, so it is not scrubbed here.
+  // ── Pass 2: anchor rule ──────────────────────────────────────────────────────
+  // A card's description / displayUrl / landingUrl are only trustworthy as
+  // card-specific metadata when the card has a STRONG, card-specific headline —
+  // non-empty AND not brand/display/platform/UI/status noise. If the only detected
+  // "headline" is UI/status text (e.g. "Started running on 11 May 2025"), or there
+  // is no headline at all, blank headline/description/displayUrl/landingUrl for that
+  // card. CTA is always kept if confidently detected.
   for (const r of rows) {
     if (r.media_type !== 'CAROUSEL_CARD') continue;
-    if (isWeakMeta(r.headline)) r.headline = '';
-    if ((r.description ?? '').trim() && isWeakMeta(r.description)) {
-      console.log(`    ⚠ weak description ignored: "${r.description}" — brand/display/UI text, not a real ad description; blanked`);
-      r.description = '';
+    const rawHeadline = (r.headline ?? '').trim();
+    const headlineStrong = rawHeadline !== '' && !isWeakMeta(rawHeadline);
+
+    if (headlineStrong) {
+      // Keep the strong headline; still drop a weak description so noise never shows.
+      if ((r.description ?? '').trim() && isWeakMeta(r.description)) {
+        console.log(`    ⚠ weak description ignored: "${r.description}" — brand/display/UI/status text; blanked`);
+        r.description = '';
+      }
+      continue;
     }
+
+    if (rawHeadline !== '' && isWeakMeta(rawHeadline)) {
+      console.log(`    ⚠ rejected Meta status text: "${rawHeadline}"`);
+    }
+    const hadAttribution =
+      rawHeadline !== '' ||
+      (r.description ?? '').trim() !== '' ||
+      (r.display_url ?? '').trim() !== '' ||
+      (r.landing_url ?? '').trim() !== '';
+    if (hadAttribution) {
+      console.log(`    ⚠ card-${String(r.card_index).padStart(2, '0')} metadata blanked because no strong card-specific headline remained (CTA kept)`);
+    }
+    r.headline = '';
+    r.description = '';
+    r.display_url = '';
+    r.landing_url = '';
+    // CTA kept.
+  }
+}
+
+// ── VIDEO_FRAME metadata sanitisation ─────────────────────────────────────────
+// A pure video duration / progress timecode, e.g. 0:14, 1:05, 01:05, 0:01:05,
+// 1:02:03. Used to reject playback-UI text that leaks into VIDEO_FRAME metadata.
+function isDurationText(s: string | null | undefined): boolean {
+  const t = (s ?? '').trim();
+  if (!t) return false;
+  return /^\d{1,2}(?::\d{2}){1,2}$/.test(t);
+}
+
+// Single VIDEO_FRAME rows are written straight from extractCardMeta, so the
+// carousel dedupe / anchor safeguards never see them. Apply the same noise
+// rejection here: blank a headline or description that is Meta status/date text
+// (via isWeakMeta) or a video duration timecode (via isDurationText). CTA,
+// displayUrl and landingUrl are the real single-ad link preview and are kept
+// where present. No shared-metadata blanking (there is only one frame), and a
+// headline is NEVER invented from the source CSV.
+function sanitizeVideoFrameMeta(rows: CardSidecarRow[]): void {
+  for (const r of rows) {
+    if (r.media_type !== 'VIDEO_FRAME') continue;
+
+    const h = (r.headline ?? '').trim();
+    if (h) {
+      if (isDurationText(h)) {
+        console.log(`    ⚠ rejected video duration text from VIDEO_FRAME headline: "${h}"`);
+        r.headline = '';
+      } else if (isWeakMeta(h)) {
+        console.log(`    ⚠ rejected Meta status text from VIDEO_FRAME headline: "${h}"`);
+        r.headline = '';
+      }
+    }
+
+    const d = (r.description ?? '').trim();
+    if (d) {
+      if (isDurationText(d)) {
+        console.log(`    ⚠ rejected video duration text from VIDEO_FRAME description: "${d}"`);
+        r.description = '';
+      } else if (isWeakMeta(d)) {
+        console.log(`    ⚠ rejected Meta status text from VIDEO_FRAME description: "${d}"`);
+        r.description = '';
+      }
+    }
+    // CTA, displayUrl, landingUrl kept — real single-ad link preview.
   }
 }
 
@@ -1957,6 +2031,7 @@ async function main(): Promise<void> {
   // H.3b: write per-card metadata sidecar (CSV only — NO DB writes). First blank
   // any metadata repeated across visually-distinct cards, to avoid false attribution.
   dedupeSharedCardMeta(cardRows);
+  sanitizeVideoFrameMeta(cardRows);
   const cardsFile = cardsCsvPath(inputFile);
   fs.writeFileSync(cardsFile, serializeCardsCsv(cardRows), 'utf-8');
 
