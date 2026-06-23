@@ -157,6 +157,17 @@ function isWeakMeta(s: string | null | undefined): boolean {
   if (/^library id\b/.test(t)) return true;               // "Library ID: 123456789012345"
   if (/^(active|inactive)\b/.test(t)) return true;        // "Active", "Inactive", "Active since ..."
   if (/^\d{1,2}\s+[a-z]+\s+\d{4}$/.test(t)) return true;  // bare date "11 may 2025"
+  if (isInstructionUiText(t)) return true;                 // "Use this creative and text", etc.
+  return false;
+}
+
+// Generic interface / instruction phrases that are never advertiser copy, e.g.
+// "Use this creative and text", "Use this template". Narrow to a "use this <noun>"
+// shape so a real advertiser headline like "Use this code for 20% off" is kept.
+function isInstructionUiText(s: string | null | undefined): boolean {
+  const t = (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!t) return false;
+  if (/^use this (creative|template|ad|design|image|video|post|format|copy|text)\b/.test(t)) return true;
   return false;
 }
 
@@ -286,6 +297,9 @@ function sanitizeVideoFrameMeta(rows: CardSidecarRow[]): void {
       if (isDurationText(h)) {
         console.log(`    ⚠ rejected video duration text from VIDEO_FRAME headline: "${h}"`);
         r.headline = '';
+      } else if (isInstructionUiText(h)) {
+        console.log(`    ⚠ rejected interface/instruction text from VIDEO_FRAME headline: "${h}"`);
+        r.headline = '';
       } else if (isWeakMeta(h)) {
         console.log(`    ⚠ rejected Meta status text from VIDEO_FRAME headline: "${h}"`);
         r.headline = '';
@@ -297,12 +311,163 @@ function sanitizeVideoFrameMeta(rows: CardSidecarRow[]): void {
       if (isDurationText(d)) {
         console.log(`    ⚠ rejected video duration text from VIDEO_FRAME description: "${d}"`);
         r.description = '';
+      } else if (isInstructionUiText(d)) {
+        console.log(`    ⚠ rejected interface/instruction text from VIDEO_FRAME description: "${d}"`);
+        r.description = '';
       } else if (isWeakMeta(d)) {
         console.log(`    ⚠ rejected Meta status text from VIDEO_FRAME description: "${d}"`);
         r.description = '';
       }
     }
     // CTA, displayUrl, landingUrl kept — real single-ad link preview.
+  }
+}
+
+// ── H.3f.1 Metadata Quality Gate ──────────────────────────────────────────────
+// Decides whether a captured headline/description is safe advertiser copy.
+// The system NEVER generates, rewrites, improves, or infers copy — it only accepts
+// the EXACT text captured from the public Meta Ad Library page. Three outcomes:
+//   ACCEPT — store verbatim
+//   REVIEW — plausible but uncertain → blank in .cards.csv, logged in audit
+//   REJECT — clear UI/status/date/duration/CTA/URL/instruction noise → blank
+// Decisions are recorded in <basename>.cards.audit.csv (diagnosis only, never
+// ingested or shown as advertiser copy). Reusable predicates below; isWeakMeta and
+// the carousel safeguards are left intact.
+
+type GateDecision = 'ACCEPT' | 'REVIEW' | 'REJECT';
+
+type CardAuditRow = {
+  ad_id: string; card_index: number; media_type: string; field: string;
+  raw_value: string; decision: GateDecision; reason: string; stored_value: string;
+};
+const auditRows: CardAuditRow[] = [];
+const CARDS_AUDIT_HEADER = ['ad_id', 'card_index', 'media_type', 'field', 'raw_value', 'decision', 'reason', 'stored_value'];
+
+function serializeAuditCsv(rows: CardAuditRow[]): string {
+  const lines = [CARDS_AUDIT_HEADER.join(',')];
+  for (const r of rows) {
+    lines.push([r.ad_id, String(r.card_index), r.media_type, r.field, r.raw_value, r.decision, r.reason, r.stored_value].map(csvEscape).join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
+function auditCsvPath(inputFile: string): string {
+  const dir = path.dirname(inputFile);
+  const base = path.basename(inputFile, '.csv');
+  return path.join(dir, `${base}.cards.audit.csv`);
+}
+
+// CTA-button phrases that are never a headline/description on their own.
+const CTA_PHRASES = [
+  'shop now', 'learn more', 'sign up', 'book now', 'order now', 'get offer',
+  'buy now', 'subscribe', 'download', 'contact us', 'send message', 'get quote',
+  'apply now', 'see more', 'shop', 'view', 'get directions', 'call now', 'message',
+];
+
+// Returns a specific reason string when the text is a HARD reject (UI/status/date/
+// duration/instruction/URL/domain/platform/CTA), or null when it is not. Reuses the
+// existing predicates; the noise token list mirrors isWeakMeta and is kept in sync.
+function hardRejectReason(raw: string, cta?: string | null): string | null {
+  const t = (raw ?? '').trim();
+  if (!t) return 'empty';
+  const low = t.toLowerCase().replace(/\s+/g, ' ');
+  if (isDurationText(t)) return 'video duration/timecode';
+  if (/^started running\b/.test(low)) return 'Meta ad-status text';
+  if (/^library id\b/.test(low)) return 'Meta Library ID label';
+  if (/^(active|inactive)\b/.test(low)) return 'Meta status label';
+  if (/^\d{1,2}\s+[a-z]+\s+\d{4}$/.test(low)) return 'date text';
+  if (isInstructionUiText(t)) return 'interface/instruction text';
+  if (/^https?:\/\//i.test(t)) return 'URL';
+  if (/^(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com\.sg|com|sg|net|org)\/?$/i.test(low)) return 'domain/display URL';
+  const NOISE = new Set([
+    'castlery', 'castlery.com', 'www.castlery.com', 'https://www.castlery.com',
+    'http://www.castlery.com', 'facebook', 'instagram', 'meta', 'sponsored',
+    'open drop-down', 'platforms',
+  ]);
+  if (NOISE.has(low)) return 'platform/brand/UI label';
+  const ctaLow = (cta ?? '').toLowerCase().trim();
+  if (ctaLow && low === ctaLow) return 'duplicate of CTA field';
+  if (CTA_PHRASES.includes(low)) return 'CTA-only text';
+  return null;
+}
+
+// Positive advertiser-copy signal: a natural multi-word phrase. Conservative — when
+// in doubt this returns false so the gate falls through to REVIEW rather than ACCEPT.
+function looksLikeAdvertiserCopy(raw: string): boolean {
+  const t = (raw ?? '').trim();
+  if (t.length < 6 || t.length > 200) return false;
+  if (!/[a-zA-Z]/.test(t)) return false;
+  const words = t.split(/\s+/).filter(Boolean);
+  return words.length >= 2;
+}
+
+function reviewReason(raw: string): string {
+  const t = (raw ?? '').trim();
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return 'single-token text — unclear if advertiser copy';
+  if (t.length < 6) return 'too short to confirm as advertiser copy';
+  return 'ambiguous generic phrase';
+}
+
+// The single decision point. No generation/inference — classify the captured text only.
+function classifyMetaText(raw: string, cta?: string | null): { decision: GateDecision; reason: string } {
+  const hr = hardRejectReason(raw, cta);
+  if (hr) return { decision: 'REJECT', reason: hr };
+  if (looksLikeAdvertiserCopy(raw)) return { decision: 'ACCEPT', reason: 'advertiser copy captured verbatim' };
+  return { decision: 'REVIEW', reason: reviewReason(raw) };
+}
+
+// Applies the gate to headline + description AFTER the carousel/video safeguards have
+// run. rawMeta holds the originally-captured values (pre-blanking) so the audit can
+// explain decisions even for values a safeguard already blanked. Only ACCEPT values
+// remain in .cards.csv; REVIEW/REJECT are blanked. CTA / display_url / landing_url
+// are never touched here.
+function applyMetadataQualityGate(rows: CardSidecarRow[], rawMeta: { headline: string; description: string }[]): void {
+  let nAccept = 0, nReview = 0, nReject = 0;
+  const FIELDS: ('headline' | 'description')[] = ['headline', 'description'];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]!;
+    const raw = rawMeta[i] ?? { headline: '', description: '' };
+    for (const field of FIELDS) {
+      const rawVal = (raw[field] ?? '').trim();
+      if (!rawVal) continue;                       // nothing was captured → no decision to record
+      const current = (r[field] ?? '').trim();
+      const cls = classifyMetaText(rawVal, r.cta);
+      let decision: GateDecision = cls.decision;
+      let reason = cls.reason;
+      let stored = '';
+
+      if (decision === 'ACCEPT' && current === '') {
+        // The text itself reads like copy, but a safeguard already blanked it
+        // (carousel shared-metadata / anchor rule). Respect that: REVIEW, stays blank.
+        decision = 'REVIEW';
+        reason = r.media_type === 'CAROUSEL_CARD'
+          ? 'repeated/shared across carousel cards — weak card attribution'
+          : 'blanked by capture safeguard before quality gate';
+        r[field] = '';
+      } else if (decision === 'ACCEPT') {
+        stored = rawVal;
+        r[field] = rawVal;                         // store the exact captured text
+      } else {
+        r[field] = '';                             // REVIEW / REJECT must be blank
+      }
+
+      if (decision === 'ACCEPT') nAccept++;
+      else if (decision === 'REVIEW') nReview++;
+      else nReject++;
+
+      auditRows.push({
+        ad_id: r.ad_id, card_index: r.card_index, media_type: r.media_type, field,
+        raw_value: rawVal, decision, reason, stored_value: stored,
+      });
+
+      if (decision !== 'ACCEPT') {
+        console.log(`    ${decision === 'REJECT' ? '✗' : '?'} gate ${field} ${decision}: "${rawVal.slice(0, 60)}" — ${reason}`);
+      }
+    }
+  }
+  if (nAccept + nReview + nReject > 0) {
+    console.log(`    quality gate: ${nAccept} accepted, ${nReview} review, ${nReject} rejected (audit rows: ${auditRows.length})`);
   }
 }
 
@@ -2030,10 +2195,15 @@ async function main(): Promise<void> {
 
   // H.3b: write per-card metadata sidecar (CSV only — NO DB writes). First blank
   // any metadata repeated across visually-distinct cards, to avoid false attribution.
+  // H.3f.1: snapshot raw captured metadata BEFORE any blanking, for the quality-gate audit.
+  const rawMeta = cardRows.map((r) => ({ headline: r.headline, description: r.description }));
   dedupeSharedCardMeta(cardRows);
   sanitizeVideoFrameMeta(cardRows);
+  applyMetadataQualityGate(cardRows, rawMeta);
   const cardsFile = cardsCsvPath(inputFile);
   fs.writeFileSync(cardsFile, serializeCardsCsv(cardRows), 'utf-8');
+  const auditFile = auditCsvPath(inputFile);
+  fs.writeFileSync(auditFile, serializeAuditCsv(auditRows), 'utf-8');
 
   console.log('\n' + '═'.repeat(64));
   console.log(`  READY rows:           ${readyRows.length}`);
@@ -2046,6 +2216,7 @@ async function main(): Promise<void> {
   console.log('─'.repeat(64));
   console.log(`  Output CSV:       ${outputFile}`);
   console.log(`  Cards CSV:        ${cardsFile} (${cardRows.length} card row(s))`);
+  console.log(`  Cards audit:      ${auditFile} (${auditRows.length} field decision(s))`);
   console.log(`  Asset folder:     ${path.resolve(ASSET_BASE)}`);
   if (DEBUG_CAPTURE_GLOBAL) console.log('  Debug mode:       ON (debug-* files saved per ad)');
   console.log('═'.repeat(64) + '\n');
