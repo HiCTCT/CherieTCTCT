@@ -111,9 +111,11 @@ function serializeCsv(headers: string[], rows: BrowserAdRow[]): string {
 type CardSidecarRow = {
   ad_id: string; card_index: number; asset_path: string; media_type: string;
   headline: string; description: string; cta: string; display_url: string; landing_url: string;
+  brand?: string;   // transient: advertiser/competitor name from the source CSV; NOT serialized to .cards.csv
 };
 const cardRows: CardSidecarRow[] = [];
 let captureAdId = '';
+let captureBrand = '';
 
 const CARDS_HEADER = ['ad_id', 'card_index', 'asset_path', 'media_type', 'headline', 'description', 'cta', 'display_url', 'landing_url'];
 
@@ -364,10 +366,16 @@ const CTA_PHRASES = [
   'apply now', 'see more', 'shop', 'view', 'get directions', 'call now', 'message',
 ];
 
+// Normalise a label for brand comparison: lowercase, punctuation -> space, collapse.
+// "W. Atelier" / "W Atelier" / "W.Atelier" all normalise to "w atelier".
+function normalizeLabel(s: string | null | undefined): string {
+  return (s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+}
+
 // Returns a specific reason string when the text is a HARD reject (UI/status/date/
 // duration/instruction/URL/domain/platform/CTA), or null when it is not. Reuses the
 // existing predicates; the noise token list mirrors isWeakMeta and is kept in sync.
-function hardRejectReason(raw: string, cta?: string | null): string | null {
+function hardRejectReason(raw: string, cta?: string | null, brand?: string | null): string | null {
   const t = (raw ?? '').trim();
   if (!t) return 'empty';
   const low = t.toLowerCase().replace(/\s+/g, ' ');
@@ -388,6 +396,9 @@ function hardRejectReason(raw: string, cta?: string | null): string | null {
   const ctaLow = (cta ?? '').toLowerCase().trim();
   if (ctaLow && low === ctaLow) return 'duplicate of CTA field';
   if (CTA_PHRASES.includes(low)) return 'CTA-only text';
+  // Source-aware: a value that is ONLY the advertiser/brand label is not card copy.
+  const nb = normalizeLabel(brand);
+  if (nb && normalizeLabel(t) === nb) return 'advertiser/brand label only';
   return null;
 }
 
@@ -410,8 +421,8 @@ function reviewReason(raw: string): string {
 }
 
 // The single decision point. No generation/inference — classify the captured text only.
-function classifyMetaText(raw: string, cta?: string | null): { decision: GateDecision; reason: string } {
-  const hr = hardRejectReason(raw, cta);
+function classifyMetaText(raw: string, cta?: string | null, brand?: string | null): { decision: GateDecision; reason: string } {
+  const hr = hardRejectReason(raw, cta, brand);
   if (hr) return { decision: 'REJECT', reason: hr };
   if (looksLikeAdvertiserCopy(raw)) return { decision: 'ACCEPT', reason: 'advertiser copy captured verbatim' };
   return { decision: 'REVIEW', reason: reviewReason(raw) };
@@ -432,7 +443,7 @@ function applyMetadataQualityGate(rows: CardSidecarRow[], rawMeta: { headline: s
       const rawVal = (raw[field] ?? '').trim();
       if (!rawVal) continue;                       // nothing was captured → no decision to record
       const current = (r[field] ?? '').trim();
-      const cls = classifyMetaText(rawVal, r.cta);
+      const cls = classifyMetaText(rawVal, r.cta, r.brand);
       let decision: GateDecision = cls.decision;
       let reason = cls.reason;
       let stored = '';
@@ -1827,6 +1838,7 @@ async function recordCard(page: Page, crop: BBox, cardIndex: number, assetFp: st
   cardRows.push({
     ad_id: captureAdId, card_index: cardIndex, asset_path, media_type: mediaType,
     headline: meta.headline, description: meta.description, cta: meta.cta, display_url: meta.displayUrl, landing_url: meta.landingUrl,
+    brand: captureBrand,
   });
   const label = mediaType === 'VIDEO_FRAME' ? 'frame-01' : `card-${String(cardIndex).padStart(2, '0')}`;
   dbg.notes.push(`card-meta ${label} candidates: ${meta.candidates}`);
@@ -2026,6 +2038,7 @@ async function main(): Promise<void> {
 
     // H.3b: tag any sidecar card rows recorded during this ad with its ad_id.
     captureAdId = adId;
+    captureBrand = name;   // advertiser/brand identity for the source-aware quality gate
 
     console.log(`\n  Row ${rowNum} [${adId}] ${mt}`);
     console.log(`  URL: ${url}`);
