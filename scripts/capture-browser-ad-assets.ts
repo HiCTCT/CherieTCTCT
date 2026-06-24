@@ -112,10 +112,12 @@ type CardSidecarRow = {
   ad_id: string; card_index: number; asset_path: string; media_type: string;
   headline: string; description: string; cta: string; display_url: string; landing_url: string;
   brand?: string;   // transient: advertiser/competitor name from the source CSV; NOT serialized to .cards.csv
+  strategy?: string; // transient: extraction strategy used (structured-footer/geometry-footer/legacy-fallback/carousel-column)
 };
 const cardRows: CardSidecarRow[] = [];
 let captureAdId = '';
 let captureBrand = '';
+let captureAdCard: BBox | null = null;
 
 const CARDS_HEADER = ['ad_id', 'card_index', 'asset_path', 'media_type', 'headline', 'description', 'cta', 'display_url', 'landing_url'];
 
@@ -340,15 +342,15 @@ type GateDecision = 'ACCEPT' | 'REVIEW' | 'REJECT';
 
 type CardAuditRow = {
   ad_id: string; card_index: number; media_type: string; field: string;
-  raw_value: string; decision: GateDecision; reason: string; stored_value: string;
+  raw_value: string; decision: GateDecision; reason: string; stored_value: string; strategy: string;
 };
 const auditRows: CardAuditRow[] = [];
-const CARDS_AUDIT_HEADER = ['ad_id', 'card_index', 'media_type', 'field', 'raw_value', 'decision', 'reason', 'stored_value'];
+const CARDS_AUDIT_HEADER = ['ad_id', 'card_index', 'media_type', 'field', 'raw_value', 'decision', 'reason', 'stored_value', 'strategy'];
 
 function serializeAuditCsv(rows: CardAuditRow[]): string {
   const lines = [CARDS_AUDIT_HEADER.join(',')];
   for (const r of rows) {
-    lines.push([r.ad_id, String(r.card_index), r.media_type, r.field, r.raw_value, r.decision, r.reason, r.stored_value].map(csvEscape).join(','));
+    lines.push([r.ad_id, String(r.card_index), r.media_type, r.field, r.raw_value, r.decision, r.reason, r.stored_value, r.strategy].map(csvEscape).join(','));
   }
   return lines.join('\n') + '\n';
 }
@@ -469,7 +471,7 @@ function applyMetadataQualityGate(rows: CardSidecarRow[], rawMeta: { headline: s
 
       auditRows.push({
         ad_id: r.ad_id, card_index: r.card_index, media_type: r.media_type, field,
-        raw_value: rawVal, decision, reason, stored_value: stored,
+        raw_value: rawVal, decision, reason, stored_value: stored, strategy: r.strategy ?? '',
       });
 
       if (decision !== 'ACCEPT') {
@@ -480,6 +482,29 @@ function applyMetadataQualityGate(rows: CardSidecarRow[], rawMeta: { headline: s
   if (nAccept + nReview + nReject > 0) {
     console.log(`    quality gate: ${nAccept} accepted, ${nReview} review, ${nReject} rejected (audit rows: ${auditRows.length})`);
   }
+}
+
+// Read-only extraction-coverage diagnostic for one capture run. Measures whether the
+// footer engine actually improved field coverage, before any DB update. No writes.
+function printCoverageReport(rows: CardSidecarRow[], audits: CardAuditRow[]): void {
+  const rejected = audits.filter((a) => a.decision === 'REJECT').length;
+  const review = audits.filter((a) => a.decision === 'REVIEW').length;
+  const reportFor = (mt: string): void => {
+    const sub = rows.filter((r) => r.media_type === mt);
+    if (sub.length === 0) return;
+    const accH = sub.filter((r) => (r.headline ?? '').trim() !== '').length;
+    const accD = sub.filter((r) => (r.description ?? '').trim() !== '').length;
+    const bothBlank = sub.filter((r) => !(r.headline ?? '').trim() && !(r.description ?? '').trim()).length;
+    const byStrat = (s: string): number => sub.filter((r) => (r.strategy ?? '') === s).length;
+    console.log(`  ${mt}: ${sub.length} row(s)`);
+    console.log(`     accepted headline: ${accH}   accepted description: ${accD}   both blank: ${bothBlank}`);
+    console.log(`     strategy -> structured-footer: ${byStrat('structured-footer')}  scoped-geometry-footer: ${byStrat('scoped-geometry-footer')}  no-safe-footer: ${byStrat('no-safe-footer')}  legacy-fallback: ${byStrat('legacy-fallback')}  carousel-column: ${byStrat('carousel-column')}`);
+  };
+  console.log('  -- Extraction coverage (read-only diagnostic) --');
+  reportFor('VIDEO_FRAME');
+  reportFor('CREATIVE_IMAGE');
+  reportFor('CAROUSEL_CARD');
+  console.log(`     quality-gate field decisions -> REJECT: ${rejected}  REVIEW: ${review}`);
 }
 
 function outputCsvPath(inputFile: string): string {
@@ -1831,16 +1856,318 @@ async function extractCardMeta(
   }
 }
 
+/**
+ * Layout-aware Meta Ad Library footer extraction engine with STRICT ad-card
+ * containment (reusable for VIDEO and static IMAGE; carousel keeps its column path).
+ *
+ * extractCardFooterRaw establishes a verified ad-card ROOT generically: it finds the
+ * creative-media node and the CTA node, then their nearest shared ancestor. It then
+ * harvests footer text candidates ONLY from descendants of that root, and reports the
+ * scope signals (root/creative/CTA bboxes, whether they share a root, every Library ID
+ * inside the root, ad-card-like count, per-candidate geometry/typography/role). All
+ * safety decisions are made Node-side in decideFooter, which fails closed (blank
+ * headline/description) on any contamination or unverified scope. No OCR, no inference.
+ * Inline-only evaluate (anonymous arrows) to avoid the tsx/esbuild __name injection.
+ */
+type FooterCandidate = { text: string; x: number; y: number; w: number; h: number; fontSize: number; fontWeight: number; tag: string; role: string; insideMedia: boolean; belowCreative: boolean };
+type Rect = { x: number; y: number; width: number; height: number };
+type FooterHarvest = {
+  rootFound: boolean;
+  rootBBox: Rect | null;
+  creativeBBox: Rect | null;
+  ctaBBox: Rect | null;
+  ctaText: string;
+  creativeAndCtaShareRoot: boolean;
+  libraryIds: string[];
+  adCardLikeCount: number;
+  candidates: FooterCandidate[];
+  landingUrl: string;
+};
+
+async function extractCardFooterRaw(
+  page: Page, media: BBox, adCard: BBox, adId: string,
+): Promise<FooterHarvest> {
+  const empty: FooterHarvest = { rootFound: false, rootBBox: null, creativeBBox: null, ctaBBox: null, ctaText: '', creativeAndCtaShareRoot: false, libraryIds: [], adCardLikeCount: 0, candidates: [], landingUrl: '' };
+  try {
+    return await page.evaluate((args) => {
+      const media = args.media, card = args.card;
+      const blocked = ['facebook.com', 'fb.com', 'fb.me', 'meta.com', 'metastatus.com', 'instagram.com', 'whatsapp.com', 'messenger.com', 'fbcdn.net', 'cdninstagram'];
+      const ctaWords = ['shop now', 'learn more', 'book now', 'sign up', 'contact us', 'send message', 'get quote', 'apply now', 'download', 'subscribe', 'order now', 'get offer', 'see menu', 'watch more', 'listen now', 'get directions', 'buy now'];
+      const cardMinX = card.x - 4, cardMaxX = card.x + card.width + 4, cardMinY = card.y - 4, cardMaxY = card.y + card.height + 4;
+      const mediaBottom = media.y + media.height;
+
+      // 1) creative node via point sampling, climb to nearest video/img
+      let creativeNode: Element | null = document.elementFromPoint(media.x + media.width / 2, media.y + media.height / 2);
+      let probe: Element | null = creativeNode;
+      let hops = 0;
+      while (probe && hops < 6) {
+        const tn = probe.tagName ? probe.tagName.toLowerCase() : '';
+        if (tn === 'video' || tn === 'img') { creativeNode = probe; break; }
+        probe = probe.parentElement; hops++;
+      }
+
+      // 2) CTA node: nearest CTA-phrase button/link below the creative, inside the card
+      let ctaNode: Element | null = null;
+      let ctaText = '';
+      let ctaBBox: { x: number; y: number; width: number; height: number } | null = null;
+      let bestDy = 1e9;
+      for (const el of Array.from(document.querySelectorAll('a, button, [role="button"]'))) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+        if (cx < cardMinX || cx > cardMaxX || cy < cardMinY || cy > cardMaxY) continue;
+        if (cy < mediaBottom - 2) continue;
+        let txt = '';
+        for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) txt += n.textContent || '';
+        txt = txt.replace(/\s+/g, ' ').trim();
+        if (!txt) txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const low = txt.toLowerCase();
+        let isCta = false;
+        for (const w of ctaWords) if (low === w) { isCta = true; break; }
+        if (!isCta) continue;
+        const dy = cy - mediaBottom;
+        if (dy < bestDy) { bestDy = dy; ctaNode = el; ctaText = txt; ctaBBox = { x: r.x, y: r.y, width: r.width, height: r.height }; }
+      }
+
+      // 3) nearest shared ancestor of creative + CTA
+      let root: Element | null = null;
+      let shareRoot = false;
+      if (creativeNode && ctaNode) {
+        const anc = new Set<Element>();
+        let n: Element | null = creativeNode;
+        while (n) { anc.add(n); n = n.parentElement; }
+        let m: Element | null = ctaNode;
+        while (m) { if (anc.has(m)) { root = m; break; } m = m.parentElement; }
+        shareRoot = !!root;
+      }
+
+      // landing URL: nearest non-blocked external anchor inside the card
+      let landingUrl = '';
+      for (const el of Array.from(document.querySelectorAll('a'))) {
+        if (landingUrl) break;
+        const r = el.getBoundingClientRect();
+        const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+        if (cx < cardMinX || cx > cardMaxX || cy < cardMinY || cy > cardMaxY) continue;
+        const href = el.getAttribute('href') || '';
+        let target = href;
+        const um = href.match(/[?&]u=([^&]+)/);
+        if (um) { try { target = decodeURIComponent(um[1]!); } catch (e) { /* keep */ } }
+        if (/^https?:\/\//.test(target)) {
+          let isB = false;
+          for (const d of blocked) if (target.toLowerCase().includes(d)) { isB = true; break; }
+          if (!isB) landingUrl = target;
+        }
+      }
+
+      const creativeBBox = creativeNode ? (function () { const r = creativeNode!.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })() : null;
+      if (!root) {
+        return { rootFound: false, rootBBox: null, creativeBBox, ctaBBox, ctaText, creativeAndCtaShareRoot: shareRoot, libraryIds: [], adCardLikeCount: 0, candidates: [], landingUrl };
+      }
+      const rr = root.getBoundingClientRect();
+      const rootBBox = { x: rr.x, y: rr.y, width: rr.width, height: rr.height };
+
+      // Library IDs inside the verified root
+      const rootText = (root.textContent || '');
+      const idMatches = rootText.match(/Library ID:\s*(\d+)/g) || [];
+      const libraryIds: string[] = [];
+      for (const m of idMatches) { const d = m.replace(/\D/g, ''); if (d) libraryIds.push(d); }
+
+      // ad-card-like count: number of sizeable creative media nodes inside the root
+      let adCardLikeCount = 0;
+      for (const el of Array.from(root.querySelectorAll('video, img'))) {
+        const r = el.getBoundingClientRect();
+        const src = ((el as HTMLImageElement).currentSrc || (el as HTMLImageElement).src || '').toLowerCase();
+        if (r.width >= 120 && r.height >= 120 && (src.includes('scontent') || src.includes('fbcdn') || el.tagName.toLowerCase() === 'video')) adCardLikeCount++;
+      }
+
+      // footer text candidates: descendants of the verified root only
+      const candidates: { text: string; x: number; y: number; w: number; h: number; fontSize: number; fontWeight: number; tag: string; role: string; insideMedia: boolean; belowCreative: boolean }[] = [];
+      const seenTxt = new Set<string>();
+      for (const el of Array.from(root.querySelectorAll('a, span, div, button, [role="button"]'))) {
+        if (candidates.length >= 80) break;
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        let direct = '';
+        for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) direct += n.textContent || '';
+        direct = direct.replace(/\s+/g, ' ').trim();
+        if (!direct || direct.length > 200) continue;
+        const key = direct.toLowerCase() + '@' + Math.round(r.y);
+        if (seenTxt.has(key)) continue;
+        seenTxt.add(key);
+        const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+        const insideMedia = cx >= media.x && cx <= media.x + media.width && cy >= media.y && cy <= mediaBottom - 2;
+        const belowCreative = cy >= mediaBottom - 2;
+        const cs = window.getComputedStyle(el as Element);
+        const fontSize = parseFloat(cs.fontSize) || 0;
+        const fwRaw = cs.fontWeight;
+        const fontWeight = parseInt(fwRaw, 10) || (fwRaw === 'bold' ? 700 : 400);
+        candidates.push({ text: direct, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), fontSize, fontWeight, tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '', insideMedia, belowCreative });
+      }
+
+      return { rootFound: true, rootBBox, creativeBBox, ctaBBox, ctaText, creativeAndCtaShareRoot: shareRoot, libraryIds, adCardLikeCount, candidates, landingUrl };
+    }, { media, card: adCard, adId });
+  } catch {
+    return empty;
+  }
+}
+
+// Domain / display-URL text (e.g. "WWW.CASTLERY.COM", "castlery.com").
+function isDomainText(s: string | null | undefined): boolean {
+  const t = (s ?? '').trim().toLowerCase();
+  return /^(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com\.sg|com|sg|net|org)\/?$/.test(t);
+}
+
+// Exact CTA-button phrase, reusing the quality-gate CTA list.
+function isCtaPhrase(s: string | null | undefined): boolean {
+  const t = (s ?? '').trim().toLowerCase();
+  return CTA_PHRASES.indexOf(t) >= 0;
+}
+
+// Meta chrome / status text that must never be footer headline or description.
+function isChromeText(s: string | null | undefined): boolean {
+  const t = (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!t) return true;
+  if (t === '​') return true;
+  const set = new Set(['active', 'inactive', 'platforms', 'open drop-down', 'open drop down', 'open drop-down menu', 'see ad details', 'see summary', 'see summary details', 'close', 'sponsored', 'see more', 'see less', 'why am i seeing this ad', 'about this advertiser']);
+  if (set.has(t)) return true;
+  if (/^library id\b/.test(t)) return true;
+  if (/^started running\b/.test(t)) return true;
+  return false;
+}
+
+function hostFromUrl(u: string): string {
+  try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+function bboxInside(inner: Rect | null, outer: BBox | Rect | null, tol: number): boolean {
+  if (!inner || !outer) return false;
+  return inner.x >= outer.x - tol && inner.y >= outer.y - tol &&
+    (inner.x + inner.width) <= (outer.x + outer.width) + tol &&
+    (inner.y + inner.height) <= (outer.y + outer.height) + tol;
+}
+
+function bbStr(b: Rect | BBox | null): string {
+  if (!b) return '(none)';
+  return `${Math.round(b.width)}x${Math.round(b.height)}@(${Math.round(b.x)},${Math.round(b.y)})`;
+}
+
+type CardMeta = { headline: string; description: string; cta: string; displayUrl: string; landingUrl: string; candidates: number; rejectedUi: string[]; reason: string };
+
+/**
+ * Decide the footer fields from a harvest, FAIL-CLOSED. Allowed strategies:
+ *   structured-footer       — verified root + a recognisable display-URL/link-preview anchor
+ *   scoped-geometry-footer  — verified root, geometry used only within that root
+ *   no-safe-footer          — root verification failed or contamination detected → blank
+ * CTA / display URL / landing URL are kept (they are individually card-scoped); only the
+ * headline/description are blanked on failure. No unscoped geometry is ever used.
+ */
+function decideFooter(
+  h: FooterHarvest, adId: string, adCard: BBox | null,
+): CardMeta & { found: boolean; strategy: string; contamination: string } {
+  const landing = h.landingUrl || '';
+  const distinctIds = Array.from(new Set((h.libraryIds || []).map((x) => x.replace(/\D/g, '')).filter(Boolean)));
+  const foreignIds = distinctIds.filter((id) => id !== adId);
+
+  const safeBlank = (strategy: string, contamination: string): CardMeta & { found: boolean; strategy: string; contamination: string } => ({
+    headline: '', description: '',
+    cta: (h.ctaText || '').trim(),
+    displayUrl: landing ? hostFromUrl(landing) : '',
+    landingUrl: landing,
+    candidates: (h.candidates || []).length, rejectedUi: [],
+    reason: contamination, found: false, strategy, contamination,
+  });
+
+  // ── Root verification (fail closed) ──
+  if (!adCard) return safeBlank('no-safe-footer', 'unverified footer scope (no ad-card bounds)');
+  if (!h.rootFound || !h.creativeAndCtaShareRoot || !h.rootBBox) return safeBlank('no-safe-footer', 'unverified footer scope');
+  if (!bboxInside(h.rootBBox, adCard, 8)) return safeBlank('no-safe-footer', 'unverified footer scope (root exceeds ad-card bounds)');
+
+  // ── Contamination tripwires ──
+  if (distinctIds.length > 1) return safeBlank('no-safe-footer', 'cross-card contamination (multiple Library IDs)');
+  if (foreignIds.length > 0) return safeBlank('no-safe-footer', 'cross-card contamination (foreign Library ID)');
+  if ((h.adCardLikeCount || 0) > 1) return safeBlank('no-safe-footer', 'cross-card contamination (multiple ad-card structures)');
+
+  const cand = h.candidates || [];
+  const outside = cand.filter((c) => !bboxInside({ x: c.x, y: c.y, width: c.w, height: c.h }, h.rootBBox!, 6));
+  if (outside.length > 0) return safeBlank('no-safe-footer', 'footer candidates outside verified root');
+
+  // ── In-root content selection (verified, no contamination) ──
+  const below = cand.filter((c) => !c.insideMedia && c.belowCreative);
+  const sorted = below.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+  const seen = new Set<string>();
+  const uniq: FooterCandidate[] = [];
+  for (const it of sorted) { const k = it.text.trim().toLowerCase(); if (!k || seen.has(k)) continue; seen.add(k); uniq.push(it); }
+
+  let displayUrl = '';
+  let domainInFooter = false;
+  let cta = (h.ctaText || '').trim();
+  const content: FooterCandidate[] = [];
+  for (const it of uniq) {
+    const t = it.text.trim(); const low = t.toLowerCase();
+    if (isChromeText(t)) continue;
+    if (isDurationText(t)) continue;
+    if (!displayUrl && isDomainText(t)) { displayUrl = t; domainInFooter = true; continue; }
+    if (isDomainText(t)) continue;
+    if (!cta && isCtaPhrase(low)) { cta = t; continue; }
+    if (isCtaPhrase(low)) continue;
+    if (/^\d+$/.test(t)) continue;
+    if (t.length < 3 || t.length > 200) continue;
+    content.push(it);
+  }
+  if (!displayUrl && landing) displayUrl = hostFromUrl(landing);
+
+  const ordered = content.slice();
+  if (ordered.length >= 2 && ordered[0]!.y === ordered[1]!.y) {
+    const a = ordered[0]!, c = ordered[1]!;
+    if ((c.fontSize * 1000 + c.fontWeight) > (a.fontSize * 1000 + a.fontWeight)) { ordered[0] = c; ordered[1] = a; }
+  }
+  const headline = ordered[0] ? ordered[0].text.trim() : '';
+  const description = (ordered[1] && ordered[1].text.trim() !== headline) ? ordered[1].text.trim() : '';
+  const strategy = domainInFooter ? 'structured-footer' : 'scoped-geometry-footer';
+  const found = !!(displayUrl || cta || content.length);
+  const reason = `${strategy} (verified ad-card root)`;
+  return { headline, description, cta, displayUrl, landingUrl: landing, candidates: uniq.length, rejectedUi: [], reason, found, strategy, contamination: '' };
+}
+
 /** Extract + record one card/frame metadata row to the sidecar accumulator (no DB). */
 async function recordCard(page: Page, crop: BBox, cardIndex: number, assetFp: string, mediaType: string, dbg: DebugState): Promise<void> {
-  const meta = await extractCardMeta(page, crop);
+  const label = mediaType === 'VIDEO_FRAME' ? 'frame-01' : mediaType === 'CREATIVE_IMAGE' ? 'image-01' : `card-${String(cardIndex).padStart(2, '0')}`;
+  let meta: CardMeta;
+  let strategy = 'legacy-fallback';
+  if (mediaType === 'VIDEO_FRAME' || mediaType === 'CREATIVE_IMAGE') {
+    const adCard = captureAdCard ?? crop;
+    const h = await extractCardFooterRaw(page, crop, adCard, captureAdId);
+    const dec = decideFooter(h, captureAdId, captureAdCard);
+    strategy = dec.strategy;
+    meta = dec;
+    // ── Debug: full root + scope + candidate diagnostics ──
+    dbg.notes.push(`footer ${label} strategy=${dec.strategy}  contamination=${dec.contamination || 'none'}`);
+    dbg.notes.push(`footer ${label} bbox root=${bbStr(h.rootBBox)} creative=${bbStr(h.creativeBBox)} cta=${bbStr(h.ctaBBox)} adCard=${bbStr(captureAdCard)}`);
+    dbg.notes.push(`footer ${label} creative&CTA share root=${h.creativeAndCtaShareRoot}  libraryIds=[${(h.libraryIds || []).join(', ') || 'none'}]  adCardLike=${h.adCardLikeCount}`);
+    dbg.notes.push(`footer ${label} candidates in-root: ${(h.candidates || []).length}`);
+    for (const c of (h.candidates || [])) {
+      dbg.notes.push(`footer-cand ${label}: "${c.text.slice(0, 50)}" x=${c.x} y=${c.y} w=${c.w} h=${c.h} ${Math.round(c.fontSize)}px/${c.fontWeight} <${c.tag}${c.role ? ' role=' + c.role : ''}> inMedia=${c.insideMedia} below=${c.belowCreative}`);
+    }
+    dbg.notes.push(`footer ${label} selected -> headline=${dec.headline ? '"' + dec.headline + '"' : '(blank)'} | description=${dec.description ? '"' + dec.description + '"' : '(blank)'} | cta=${dec.cta || '(blank)'} | displayUrl=${dec.displayUrl || '(blank)'} | landingUrl=${dec.landingUrl || '(blank)'}`);
+    dbg.notes.push(`footer ${label} contamination verdict: ${dec.contamination || 'clean'}`);
+    // ── Audit the blanked footer fields when scope is unverified / contaminated ──
+    if (dec.strategy === 'no-safe-footer') {
+      const decision: GateDecision = /contamination/.test(dec.contamination) ? 'REJECT' : 'REVIEW';
+      for (const fld of ['headline', 'description']) {
+        auditRows.push({ ad_id: captureAdId, card_index: cardIndex, media_type: mediaType, field: fld, raw_value: '(footer scope unverified)', decision, reason: dec.contamination, stored_value: '', strategy: dec.strategy });
+      }
+    }
+  } else {
+    meta = await extractCardMeta(page, crop);
+    strategy = 'carousel-column';
+  }
   const asset_path = path.relative(process.cwd(), assetFp).replace(/\\/g, '/');
   cardRows.push({
     ad_id: captureAdId, card_index: cardIndex, asset_path, media_type: mediaType,
     headline: meta.headline, description: meta.description, cta: meta.cta, display_url: meta.displayUrl, landing_url: meta.landingUrl,
-    brand: captureBrand,
+    brand: captureBrand, strategy,
   });
-  const label = mediaType === 'VIDEO_FRAME' ? 'frame-01' : `card-${String(cardIndex).padStart(2, '0')}`;
+  dbg.notes.push(`card-meta ${label} strategy: ${strategy}`);
   dbg.notes.push(`card-meta ${label} candidates: ${meta.candidates}`);
   if (meta.rejectedUi.length) dbg.notes.push(`card-meta ${label} rejected UI text: ${meta.rejectedUi.map((t) => '"' + t + '"').join(', ')}`);
   dbg.notes.push(`card-meta ${label} selected headline: ${meta.headline ? '"' + meta.headline + '"' : '(blank)'}`);
@@ -2124,6 +2451,7 @@ async function main(): Promise<void> {
       }
       console.log(`    ad card: ${Math.round(adCardBBox.width)}×${Math.round(adCardBBox.height)} at (${Math.round(adCardBBox.x)},${Math.round(adCardBBox.y)})`);
       dbg.notes.push(`ad card: ${Math.round(adCardBBox.width)}×${Math.round(adCardBBox.height)} at (${Math.round(adCardBBox.x)},${Math.round(adCardBBox.y)})`);
+      captureAdCard = adCardBBox;   // verified ad-card root bounds for the footer engine
 
       // ── 3. Creative area ─────────────────────────────────────────────────
       const { bbox: creativeBBox, notes: creativeNotes } = await findCreativeArea(page, adCardBBox, mt);
@@ -2169,10 +2497,12 @@ async function main(): Promise<void> {
         continue;
       }
 
-      // H.3b: video gets a single frame-01 sidecar row (link-preview metadata
-      // shown below the video). Carousel cards are recorded inside captureCarousel;
-      // single images are not card-split, so no sidecar row is written for them.
-      if (mt !== 'CAROUSEL' && mt !== 'IMAGE') {
+      // Per-card footer metadata (no DB). Carousel cards are recorded inside
+      // captureCarousel. Video -> one VIDEO_FRAME row; static image -> one
+      // CREATIVE_IMAGE row, both via the layout-aware footer engine.
+      if (mt === 'IMAGE') {
+        await recordCard(page, creativeBBox, 1, savedFiles[0]!, 'CREATIVE_IMAGE', dbg);
+      } else if (mt !== 'CAROUSEL') {
         await recordCard(page, creativeBBox, 1, savedFiles[0]!, 'VIDEO_FRAME', dbg);
       }
 
@@ -2230,6 +2560,7 @@ async function main(): Promise<void> {
   console.log(`  Output CSV:       ${outputFile}`);
   console.log(`  Cards CSV:        ${cardsFile} (${cardRows.length} card row(s))`);
   console.log(`  Cards audit:      ${auditFile} (${auditRows.length} field decision(s))`);
+  printCoverageReport(cardRows, auditRows);
   console.log(`  Asset folder:     ${path.resolve(ASSET_BASE)}`);
   if (DEBUG_CAPTURE_GLOBAL) console.log('  Debug mode:       ON (debug-* files saved per ad)');
   console.log('═'.repeat(64) + '\n');

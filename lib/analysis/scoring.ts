@@ -457,7 +457,7 @@ export function deriveRecommendations(
 
   const headlineRec =
     headlineScore === null
-      ? 'No headline provided. Add a headline that states the core outcome or pain point in under 10 words.'
+      ? 'Headline not captured from the Meta Ad Library page.'
       : headlineScore < 5
         ? 'The headline lacks clarity and conversion intent. Rewrite to lead with the single most important outcome or pain point. Use numbers or specifics where possible.'
         : headlineScore < 7
