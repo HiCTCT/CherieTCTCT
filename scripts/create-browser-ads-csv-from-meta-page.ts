@@ -470,15 +470,18 @@ async function main(): Promise<void> {
     }
 
     const known = info.mediaType === 'IMAGE' || info.mediaType === 'VIDEO' || info.mediaType === 'CAROUSEL';
-    const hasText = Boolean((info.copy && info.copy.trim()) || (info.headline && info.headline.trim()));
-    const ready = Boolean(id) && known && hasText;
+    // SAFETY: listing-stage headline is NOT proven scoped metadata for the main Ad
+    // record (Meta merges display URL / handle / title / price / CTA into one anchor),
+    // so it is NEVER written to the CSV below. READY depends on ad copy only.
+    const hasCopy = Boolean(info.copy && info.copy.trim());
+    const ready = Boolean(id) && known && hasCopy;
     const status = ready ? 'READY' : 'NEEDS_REVIEW';
     if (ready) readyCount++; else needsReviewCount++;
 
     const reasons: string[] = [];
     if (!id) reasons.push('no ad_id');
     if (!known) reasons.push(`media_type=${info.mediaType || 'UNKNOWN'}`);
-    if (!hasText) reasons.push('no copy/headline');
+    if (!hasCopy) reasons.push('no ad copy');
 
     note(`ad ${id}: media=${info.mediaType}, copy=${info.copy ? 'found' : 'none'}, headline=${info.headline ? 'found' : 'none'}, landing=${info.landing ? 'found' : 'none'} → ${status}${reasons.length ? ` (${reasons.join('; ')})` : ''}`);
 
@@ -492,7 +495,7 @@ async function main(): Promise<void> {
       publisher_platforms: '',
       ad_delivery_start_time: info.startDate || '',
       ad_copy: info.copy || '',
-      headline: info.headline || '',
+      headline: '',   // ALWAYS blank — unscoped listing headline excluded from the main Ad workflow
       description: '',
       landing_page_url: info.landing || '',
       notes: ready

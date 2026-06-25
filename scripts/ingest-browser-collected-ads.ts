@@ -198,14 +198,17 @@ function cleanAdCopy(raw: string): { cleanedCopy: string | undefined; wasContami
 
 function toExampleRow(row: BrowserAdRow, creative: CreativeContext): ExampleRow {
   // Strip comment-contaminated ad_copy before passing to scorer.
-  // cleanedCopy is undefined when the entire field is contaminated — scorer falls back to headline.
+  // cleanedCopy is undefined when the entire field is contaminated. Headline and
+  // description are also excluded (unscoped listing metadata), so there is no
+  // headline fallback — scoring relies on the available creative context and other valid fields.
   const { cleanedCopy } = cleanAdCopy(row.ad_copy);
   return {
     Product:             row.competitor_name.trim() || 'Unknown Advertiser',
     'Ad Link':           row.ad_library_url.trim()  || undefined,
     Copy:                cleanedCopy                 || undefined,
-    Headline:            row.headline.trim()         || undefined,
-    Description:         row.description.trim()      || undefined,
+    // Browser listing headline/description are UNSCOPED metadata — never scored.
+    Headline:            undefined,
+    Description:         undefined,
     'Active Since':      row.ad_delivery_start_time.trim() || undefined,
     Analysis:            creative.creative_notes      || undefined,
     'Creative Analysis': creative.visual_description  || undefined,
@@ -294,7 +297,7 @@ function printDryRunRow(
     console.log(`    metaAdId:        ${adId}`);
     console.log(`    Raw copy:        ${truncate(row.ad_copy, 80)}`);
     console.log(`    Cleaned copy:    (empty — entire field excluded; primaryCopy will be null in DB)`);
-    console.log(`    Scorer Copy:     (empty — scorer used Headline instead)`);
+    console.log(`    Scorer Copy:     (empty — headline and description are excluded; no listing-metadata fallback)`);
     console.log('');
   }
 
@@ -317,8 +320,8 @@ function printDryRunRow(
   console.log(`    capturedAssetType: ${capturedAssetType}`);
   console.log(`    activeSince:     ${activeSince ? activeSince.toISOString().slice(0, 10) : '(empty)'}`);
   console.log(`    primaryCopy:     ${cleanedCopy ? truncate(cleanedCopy, 80) : '(null — contaminated)'}`);
-  console.log(`    headline:        ${truncate(row.headline, 80)}`);
-  console.log(`    description:     ${truncate(row.description, 80)}`);
+  console.log(`    headline:        (blank — unscoped browser listing metadata excluded)`);
+  console.log(`    description:     (blank — unscoped browser listing metadata excluded)`);
   console.log(`    adLink:          ${truncate(row.ad_library_url, 80)}`);
   console.log(`    productOrService:${row.competitor_name.trim() || '(empty)'}`);
 
@@ -757,8 +760,9 @@ async function main(): Promise<void> {
               adLink:           r.row.ad_library_url.trim() || '',
               activeSince:      r.activeSince ?? undefined,
               primaryCopy:      cleanAdCopy(r.row.ad_copy).cleanedCopy || undefined,
-              headline:         r.row.headline.trim()     || undefined,
-              description:      r.row.description.trim()  || undefined,
+              // Always blank: unscoped browser listing headline/description are excluded from the Ad record.
+              headline:         undefined,
+              description:      undefined,
               metaAdId:         r.adId,
               adSource:         AD_SOURCE,
               reviewStatus:     'PENDING',

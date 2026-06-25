@@ -164,14 +164,18 @@ function deriveFormat(mediaType: string): FormatDerivation {
 // creative_notes     → 'Analysis'          → analysisNotes in scorer
 function toExampleRow(row: BrowserAdRow, creative: CreativeContext): ExampleRow {
   // Strip comment-contaminated ad_copy before passing to scorer.
-  // cleanedCopy is undefined when the entire field is contaminated — scorer falls back to headline.
+  // cleanedCopy is undefined when the entire field is contaminated. Headline and
+  // description are also excluded (unscoped listing metadata), so there is no
+  // headline fallback — scoring relies on the available creative context and other valid fields.
   const { cleanedCopy } = cleanAdCopy(row.ad_copy);
   return {
     Product:      row.competitor_name.trim() || 'Unknown Advertiser',
     'Ad Link':    row.ad_library_url.trim()  || undefined,
     Copy:         cleanedCopy                || undefined,
-    Headline:     row.headline.trim()        || undefined,
-    Description:  row.description.trim()     || undefined,
+    // Browser listing headline/description are UNSCOPED metadata (Meta merges display
+    // URL, handle, title, price, CTA into one anchor) — never pass them to the scorer.
+    Headline:     undefined,
+    Description:  undefined,
     'Active Since': row.ad_delivery_start_time.trim() || undefined,
     Analysis:            creative.creative_notes      || undefined,
     'Creative Analysis': creative.visual_description  || undefined,
@@ -337,7 +341,7 @@ async function main(): Promise<void> {
         format,
         analysis,
         benchmark,
-        copyPreview:          truncate(row.ad_copy.trim() || row.headline.trim(), 80),
+        copyPreview:          truncate(row.ad_copy.trim(), 80),
         visualDescPreview:    truncate(creative.visual_description, 80),
         creativeNotesPreview: truncate(creative.creative_notes, 80),
         // Capture the exact ExampleRow values sent to the scorer for debugging
@@ -415,8 +419,8 @@ async function main(): Promise<void> {
     console.log(`      Analysis:          ${truncate(exampleRowAnalysis, 120)}`);
     console.log(`      Creative Analysis: ${truncate(exampleRowCreativeAnalysis, 120)}`);
     console.log(`      Copy:              ${truncate(exampleRowCopy, 120)}`);
-    console.log(`      Headline:          ${truncate(exampleRowHeadline, 120)}`);
-    console.log(`      Description:       ${truncate(exampleRowDescription, 120)}`);
+    console.log(`      Headline:          (excluded — unscoped browser listing metadata, not scored)`);
+    console.log(`      Description:       (excluded — unscoped browser listing metadata, not scored)`);
     console.log('    ───────────────────────────────────────────────────────');
     console.log('');
     // ── Competitor benchmark (primary lens for competitor ads) ──
