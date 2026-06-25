@@ -135,6 +135,167 @@ function cardsCsvPath(inputFile: string): string {
   return path.join(dir, `${base}.cards.csv`);
 }
 
+// ── Ad-level VERIFIED metadata sidecar (separate from per-card .cards.csv) ─────
+// One row per ad, PER-FIELD verification. Carousel ads accept an ad-level field ONLY
+// when the same normalised value is proven across EVERY captured distinct card (with
+// compatible CTA/display/landing). Static/video use one individually verified footer.
+// Raw browser listing text is never used; missing evidence → blank.
+type VerifiedMetaRow = {
+  ad_id: string; verified_headline: string; verified_description: string;
+  cta: string; display_url: string; landing_url: string; capture_strategy: string;
+  headline_status: string; headline_reason: string;
+  description_status: string; description_reason: string;
+  verification_status: string; verification_reason: string; captured_at: string;
+};
+const verifiedMetaMap = new Map<string, VerifiedMetaRow>();   // keyed by ad_id; merge-safe across reruns
+const VERIFIED_META_HEADER = ['ad_id', 'verified_headline', 'verified_description', 'cta', 'display_url', 'landing_url', 'capture_strategy', 'headline_status', 'headline_reason', 'description_status', 'description_reason', 'verification_status', 'verification_reason', 'captured_at'];
+
+// Per-visible-card verified footer evidence, accumulated during a carousel capture and
+// combined into ONE ad-level row. Reset at the start of every ad.
+type FooterVerify = {
+  cardIndex: number; strategy: string; contamination: string;
+  headline: string; headlineStatus: GateDecision; headlineReason: string;
+  description: string; descriptionStatus: GateDecision; descriptionReason: string;
+  cta: string; displayUrl: string; landingUrl: string;
+};
+const carouselVerifiedResults: FooterVerify[] = [];
+
+function serializeVerifiedMetaCsv(rows: VerifiedMetaRow[]): string {
+  const lines = [VERIFIED_META_HEADER.join(',')];
+  for (const r of rows) {
+    lines.push([r.ad_id, r.verified_headline, r.verified_description, r.cta, r.display_url, r.landing_url, r.capture_strategy, r.headline_status, r.headline_reason, r.description_status, r.description_reason, r.verification_status, r.verification_reason, r.captured_at].map(csvEscape).join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
+// Canonical sidecar path: example.csv AND example.with-assets.csv both map to
+// example.verified-meta.csv (identical rule in capture, preview and ingest).
+function verifiedMetaPath(inputFile: string): string {
+  const dir = path.dirname(inputFile);
+  const base = path.basename(inputFile, '.csv').replace(/\.with-assets$/, '');
+  return path.join(dir, `${base}.verified-meta.csv`);
+}
+
+// Strict loader for an EXISTING verified sidecar (same 14-column contract as preview/
+// ingest). Returns the full rows so a rerun can preserve ads it does not re-capture.
+function loadExistingVerifiedRows(p: string): { map: Map<string, VerifiedMetaRow>; status: string; message: string } {
+  const map = new Map<string, VerifiedMetaRow>();
+  if (!fs.existsSync(p)) return { map, status: 'absent', message: `absent (${p})` };
+  let raw: string;
+  try { raw = fs.readFileSync(p, 'utf-8'); } catch (e) { return { map, status: 'unreadable', message: `unreadable: ${e instanceof Error ? e.message : String(e)}` }; }
+  let rows: Record<string, string>[];
+  try { rows = parse(raw, { columns: true, skip_empty_lines: true, trim: true }) as Record<string, string>[]; } catch (e) { return { map, status: 'malformed', message: `malformed CSV: ${e instanceof Error ? e.message : String(e)}` }; }
+  if (rows.length === 0) return { map, status: 'ok', message: 'present but empty' };
+  const cols = Object.keys(rows[0]!);
+  const missing = VERIFIED_META_HEADER.filter((c) => !cols.includes(c));
+  if (missing.length) return { map, status: 'malformed', message: `malformed header — missing columns: ${missing.join(', ')}` };
+  const counts = new Map<string, number>();
+  for (const r of rows) { const id = (r.ad_id ?? '').trim(); if (id) counts.set(id, (counts.get(id) ?? 0) + 1); }
+  const dups = Array.from(counts.entries()).filter(([, n]) => n > 1).map(([id]) => id);
+  if (dups.length) return { map, status: 'duplicates', message: `duplicate ad_id(s): ${dups.join(', ')}` };
+  for (const r of rows) {
+    const id = (r.ad_id ?? '').trim();
+    if (!id) continue;
+    map.set(id, {
+      ad_id: id, verified_headline: r.verified_headline ?? '', verified_description: r.verified_description ?? '',
+      cta: r.cta ?? '', display_url: r.display_url ?? '', landing_url: r.landing_url ?? '', capture_strategy: r.capture_strategy ?? '',
+      headline_status: r.headline_status ?? '', headline_reason: r.headline_reason ?? '',
+      description_status: r.description_status ?? '', description_reason: r.description_reason ?? '',
+      verification_status: r.verification_status ?? '', verification_reason: r.verification_reason ?? '', captured_at: r.captured_at ?? '',
+    });
+  }
+  return { map, status: 'ok', message: `ok — ${map.size} existing row(s)` };
+}
+
+// Duplicate non-empty READY ad_id values in the source CSV (must abort before writing).
+function duplicateReadyAdIds(rows: BrowserAdRow[]): string[] {
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    if ((r.collection_status ?? '').trim().toUpperCase() !== 'READY') continue;
+    const id = (r.ad_id ?? '').trim();
+    if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return Array.from(counts.entries()).filter(([, n]) => n > 1).map(([id]) => id);
+}
+
+function normVerifyText(s: string | null | undefined): string {
+  return (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// Pure cross-card combiner for one carousel field. ACCEPT only when EVERY captured card
+// accepted that field, all share one normalised value, and CTA/display/landing match.
+function combineCarouselField(
+  cards: FooterVerify[], which: 'headline' | 'description',
+  gate: { ok: boolean; status: GateDecision; reason: string },
+): { status: GateDecision; reason: string; value: string } {
+  if (!gate.ok) return { status: gate.status, reason: gate.reason, value: '' };
+  if (cards.length < 2) return { status: 'REVIEW', reason: `${which} cannot be proven shared across the carousel — fewer than two distinct captured cards (${cards.length})`, value: '' };
+  const valOf = (c: FooterVerify): string => which === 'headline' ? c.headline : c.description;
+  const statOf = (c: FooterVerify): GateDecision => which === 'headline' ? c.headlineStatus : c.descriptionStatus;
+  const accepted = cards.filter((c) => statOf(c) === 'ACCEPT' && valOf(c));
+  if (accepted.length !== cards.length) {
+    return { status: 'REVIEW', reason: `${which} accepted on only ${accepted.length}/${cards.length} captured card(s) — not shared across all`, value: '' };
+  }
+  if (new Set(cards.map((c) => normVerifyText(valOf(c)))).size !== 1) {
+    return { status: 'REVIEW', reason: `${which} differs across captured cards — not a shared ad-level value`, value: '' };
+  }
+  const ctaSet = new Set(cards.map((c) => normVerifyText(c.cta)));
+  const duSet = new Set(cards.map((c) => normVerifyText(c.displayUrl)));
+  const luSet = new Set(cards.map((c) => normVerifyText(c.landingUrl)));
+  if (ctaSet.size > 1 || duSet.size > 1 || luSet.size > 1) {
+    return { status: 'REVIEW', reason: `${which} shared but CTA/display/landing context differs across cards`, value: '' };
+  }
+  return { status: 'ACCEPT', reason: `shared across all ${cards.length} captured card(s)`, value: valOf(cards[0]!) };
+}
+
+// Context (CTA/display/landing) is retained ONLY when it matches across EVERY captured
+// carousel card. If any card differs, all three are blanked so no single card's context
+// is attributed to the whole ad.
+function combineCarouselContext(cards: FooterVerify[], gate: { ok: boolean; status: GateDecision; reason: string }): { cta: string; displayUrl: string; landingUrl: string; match: boolean; note: string } {
+  if (!gate.ok) return { cta: '', displayUrl: '', landingUrl: '', match: false, note: `context blanked — exact Library ID unverified: ${gate.reason}` };
+  if (cards.length < 2) return { cta: '', displayUrl: '', landingUrl: '', match: false, note: `context blanked — fewer than two distinct captured cards (${cards.length}); shared carousel attribution cannot be proven` };
+  if (cards.some((c) => c.strategy === 'no-safe-footer')) return { cta: '', displayUrl: '', landingUrl: '', match: false, note: 'context blanked — one or more cards had an unverified footer scope' };
+  const match = new Set(cards.map((c) => normVerifyText(c.cta))).size === 1
+    && new Set(cards.map((c) => normVerifyText(c.displayUrl))).size === 1
+    && new Set(cards.map((c) => normVerifyText(c.landingUrl))).size === 1;
+  if (!match) return { cta: '', displayUrl: '', landingUrl: '', match: false, note: 'CTA/display/landing differ across captured cards — context blanked' };
+  return { cta: cards[0]!.cta || '', displayUrl: cards[0]!.displayUrl || '', landingUrl: cards[0]!.landingUrl || '', match: true, note: '' };
+}
+
+// No-clobber merge rule. An existing row is preserved UNCHANGED unless the new capture
+// produced at least one independently ACCEPTED field (a fully-verified result). A blank
+// REVIEW/REJECT recapture never erases a previously accepted row. With no prior row, the
+// new (even diagnostic) row is written so the sidecar records the current safe outcome.
+function mergeDecision(existing: VerifiedMetaRow | undefined, newRow: VerifiedMetaRow): { write: boolean; action: string } {
+  const newAccepted = newRow.headline_status === 'ACCEPT' || newRow.description_status === 'ACCEPT';
+  if (existing && !newAccepted) return { write: false, action: 'preserved (recapture produced no ACCEPTED field — prior row kept unchanged)' };
+  if (existing) return { write: true, action: 'replaced (newly ACCEPTED metadata)' };
+  return { write: true, action: newAccepted ? 'created (ACCEPTED)' : 'created (diagnostic REVIEW/REJECT — no prior row)' };
+}
+
+// Build the overall summary + push one verified-meta row.
+function pushVerifiedRow(
+  adId: string,
+  hVal: string, hStatus: GateDecision, hReason: string,
+  dVal: string, dStatus: GateDecision, dReason: string,
+  cta: string, displayUrl: string, landingUrl: string,
+  strategy: string, dbg: DebugState, ctx: string,
+): void {
+  const overall = (hStatus === 'ACCEPT' || dStatus === 'ACCEPT') ? 'ACCEPT'
+    : (hStatus === 'REJECT' || dStatus === 'REJECT') ? 'REJECT' : 'REVIEW';
+  const newRow: VerifiedMetaRow = {
+    ad_id: adId, verified_headline: hVal, verified_description: dVal,
+    cta, display_url: displayUrl, landing_url: landingUrl, capture_strategy: strategy,
+    headline_status: hStatus, headline_reason: hReason,
+    description_status: dStatus, description_reason: dReason,
+    verification_status: overall, verification_reason: ctx, captured_at: new Date().toISOString(),
+  };
+  const decision = mergeDecision(verifiedMetaMap.get(adId), newRow);
+  if (decision.write) verifiedMetaMap.set(adId, newRow);
+  console.log(`    verified-meta [${adId}]: ${decision.action}`);
+  dbg.notes.push(`verified-meta ad ${adId}: ${decision.action} | overall=${overall} | headline=${hStatus}${hVal ? ` "${hVal}"` : ''} (${hReason}) | description=${dStatus}${dVal ? ` "${dVal}"` : ''} (${dReason}) | strategy=${strategy} | ${ctx}`);
+}
+
 // Post-processing safeguard (no DB): if 2+ visually-distinct CAROUSEL_CARD rows for
 // the same ad carry the EXACT same headline + landingUrl AND have no per-card
 // description/CTA difference, the metadata is shared/low-confidence (not truly
@@ -2129,6 +2290,100 @@ function decideFooter(
   return { headline, description, cta, displayUrl, landingUrl: landing, candidates: uniq.length, rejectedUi: [], reason, found, strategy, contamination: '' };
 }
 
+/**
+ * Collect every "Library ID: <n>" within the ad-card bounds. Proves the verified footer
+ * belongs to the EXACT ad (own id present, no other). Inline-only evaluate.
+ */
+async function collectAdCardLibraryIds(page: Page, card: BBox): Promise<string[]> {
+  try {
+    return await page.evaluate((c) => {
+      const ids: string[] = [];
+      const seen = new Set<string>();
+      for (const el of Array.from(document.querySelectorAll('span, div, a'))) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+        if (cx < c.x - 4 || cx > c.x + c.width + 4 || cy < c.y - 4 || cy > c.y + c.height + 4) continue;
+        let t = '';
+        for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) t += n.textContent || '';
+        const m = t.match(/Library ID:\s*(\d+)/);
+        if (m && m[1] && !seen.has(m[1])) { seen.add(m[1]); ids.push(m[1]); }
+      }
+      return ids;
+    }, card);
+  } catch {
+    return [];
+  }
+}
+
+// Confirm the ad-card holds the exact own Library ID and no other (foreign → REJECT,
+// none → REVIEW). Computed once per ad; shared by static/video and carousel paths.
+async function adCardLibraryGate(page: Page): Promise<{ ok: boolean; status: GateDecision; reason: string }> {
+  const adCard = captureAdCard;
+  const ids = adCard ? await collectAdCardLibraryIds(page, adCard) : [];
+  const distinct = Array.from(new Set(ids));
+  const foreign = distinct.filter((id) => id !== captureAdId);
+  const own = distinct.indexOf(captureAdId) >= 0;
+  if (foreign.length > 0 || distinct.length > 1) {
+    return { ok: false, status: 'REJECT', reason: `cross-card contamination — ad-card Library IDs: [${distinct.join(', ') || 'none'}] (expected only ${captureAdId})` };
+  }
+  if (!own) {
+    return { ok: false, status: 'REVIEW', reason: `exact Library ID not confirmed inside ad-card — attribution unproven` };
+  }
+  return { ok: true, status: 'ACCEPT', reason: `ad-card Library ID ${captureAdId} confirmed; no foreign id` };
+}
+
+// Run the verified footer engine for one media region and gate each field independently.
+async function verifyFooter(page: Page, media: BBox, cardIndex: number): Promise<FooterVerify> {
+  const adCard = captureAdCard;
+  const harvest = await extractCardFooterRaw(page, media, adCard ?? media, captureAdId);
+  const dec = decideFooter(harvest, captureAdId, adCard);
+  if (dec.strategy === 'no-safe-footer') {
+    const st: GateDecision = /contamination/.test(dec.contamination) ? 'REJECT' : 'REVIEW';
+    const reason = dec.contamination || 'unverified footer scope';
+    return { cardIndex, strategy: dec.strategy, contamination: dec.contamination, headline: '', headlineStatus: st, headlineReason: reason, description: '', descriptionStatus: st, descriptionReason: reason, cta: dec.cta || '', displayUrl: dec.displayUrl || '', landingUrl: dec.landingUrl || '' };
+  }
+  const hCls = dec.headline ? classifyMetaText(dec.headline, dec.cta, captureBrand) : { decision: 'REVIEW' as GateDecision, reason: 'no headline in verified footer' };
+  const dCls = dec.description ? classifyMetaText(dec.description, dec.cta, captureBrand) : { decision: 'REVIEW' as GateDecision, reason: 'no description in verified footer' };
+  return { cardIndex, strategy: dec.strategy, contamination: '', headline: hCls.decision === 'ACCEPT' ? dec.headline : '', headlineStatus: hCls.decision, headlineReason: hCls.reason, description: dCls.decision === 'ACCEPT' ? dec.description : '', descriptionStatus: dCls.decision, descriptionReason: dCls.reason, cta: dec.cta || '', displayUrl: dec.displayUrl || '', landingUrl: dec.landingUrl || '' };
+}
+
+// Pure ad-level decision for a single (static/video) footer. When the exact-ad Library ID
+// gate fails OR the footer scope is unverified (no-safe-footer), ALL ad-level fields —
+// headline, description AND context (cta/display/landing) — are blanked. The ad-level
+// verified sidecar never carries context from an unverified footer root.
+function decideAdLevelSingle(
+  gate: { ok: boolean; status: GateDecision; reason: string }, fv: FooterVerify,
+): { hVal: string; hStatus: GateDecision; hReason: string; dVal: string; dStatus: GateDecision; dReason: string; cta: string; displayUrl: string; landingUrl: string; reason: string } {
+  if (!gate.ok) {
+    return { hVal: '', hStatus: gate.status, hReason: gate.reason, dVal: '', dStatus: gate.status, dReason: gate.reason, cta: '', displayUrl: '', landingUrl: '', reason: `single-footer; ALL ad-level metadata (incl. CTA/display/landing) blanked — exact Library ID unverified: ${gate.reason}` };
+  }
+  if (fv.strategy === 'no-safe-footer') {
+    return { hVal: '', hStatus: fv.headlineStatus, hReason: fv.headlineReason, dVal: '', dStatus: fv.descriptionStatus, dReason: fv.descriptionReason, cta: '', displayUrl: '', landingUrl: '', reason: `single-footer; context blanked — unverified footer scope (${fv.contamination || 'no-safe-footer'})` };
+  }
+  return { hVal: fv.headlineStatus === 'ACCEPT' ? fv.headline : '', hStatus: fv.headlineStatus, hReason: fv.headlineReason, dVal: fv.descriptionStatus === 'ACCEPT' ? fv.description : '', dStatus: fv.descriptionStatus, dReason: fv.descriptionReason, cta: fv.cta, displayUrl: fv.displayUrl, landingUrl: fv.landingUrl, reason: `single-footer; ${gate.reason}` };
+}
+
+// Static-image / video: ONE individually verified footer for the whole ad (per-field).
+async function recordVerifiedAdMeta(page: Page, media: BBox, dbg: DebugState): Promise<void> {
+  const gate = await adCardLibraryGate(page);
+  const fv = await verifyFooter(page, media, 1);
+  const r = decideAdLevelSingle(gate, fv);
+  pushVerifiedRow(captureAdId, r.hVal, r.hStatus, r.hReason, r.dVal, r.dStatus, r.dReason, r.cta, r.displayUrl, r.landingUrl, fv.strategy, dbg, r.reason);
+}
+
+// Carousel: accept an ad-level field ONLY when proven shared across EVERY captured card.
+async function recordVerifiedCarouselMeta(page: Page, dbg: DebugState): Promise<void> {
+  const gate = await adCardLibraryGate(page);
+  const cards = carouselVerifiedResults.slice();
+  const h = combineCarouselField(cards, 'headline', gate);
+  const d = combineCarouselField(cards, 'description', gate);
+  const ctx = combineCarouselContext(cards, gate);
+  const strategy = cards.length ? `carousel-x${cards.length}(${cards[0]!.strategy})` : 'carousel(no-cards)';
+  const reason = `carousel; captured ${cards.length} card(s)${ctx.note ? `; ${ctx.note}` : ''}; ${gate.reason}`;
+  pushVerifiedRow(captureAdId, h.value, h.status, h.reason, d.value, d.status, d.reason, ctx.cta, ctx.displayUrl, ctx.landingUrl, strategy, dbg, reason);
+}
+
 /** Extract + record one card/frame metadata row to the sidecar accumulator (no DB). */
 async function recordCard(page: Page, crop: BBox, cardIndex: number, assetFp: string, mediaType: string, dbg: DebugState): Promise<void> {
   const label = mediaType === 'VIDEO_FRAME' ? 'frame-01' : mediaType === 'CREATIVE_IMAGE' ? 'image-01' : `card-${String(cardIndex).padStart(2, '0')}`;
@@ -2160,6 +2415,9 @@ async function recordCard(page: Page, crop: BBox, cardIndex: number, assetFp: st
   } else {
     meta = await extractCardMeta(page, crop);
     strategy = 'carousel-column';
+    // Ad-level verified-footer evidence for THIS carousel card; combined later across
+    // ALL captured cards into one ad-level verified-meta row (never per card).
+    carouselVerifiedResults.push(await verifyFooter(page, crop, cardIndex));
   }
   const asset_path = path.relative(process.cwd(), assetFp).replace(/\\/g, '/');
   cardRows.push({
@@ -2325,6 +2583,27 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // ── Verified-meta safety: never clobber existing valid metadata on a rerun ──
+  // 1) Abort on duplicate READY ad_id in the source CSV (would create a sidecar that
+  //    preview/ingest later invalidate).
+  const dupReady = duplicateReadyAdIds(rows);
+  if (dupReady.length > 0) {
+    console.error(`\n❌ Duplicate READY ad_id(s) in source CSV: ${dupReady.join(', ')}`);
+    console.error('   Refusing to capture — split/clean the CSV so each ad_id is unique before re-running.');
+    process.exit(1);
+  }
+  // 2) Load and strictly validate any existing verified sidecar; seed the merge map.
+  const verifiedFilePath = verifiedMetaPath(inputFile);
+  const existingVerified = loadExistingVerifiedRows(verifiedFilePath);
+  if (existingVerified.status === 'unreadable' || existingVerified.status === 'malformed' || existingVerified.status === 'duplicates') {
+    console.error(`\n❌ Existing verified sidecar is ${existingVerified.status}: ${existingVerified.message}`);
+    console.error(`   ${verifiedFilePath}`);
+    console.error('   Refusing to capture so the existing file is NOT overwritten. Repair it, or delete it to deliberately regenerate.');
+    process.exit(1);
+  }
+  for (const [k, v] of existingVerified.map) verifiedMetaMap.set(k, v);
+  console.log(`  Verified sidecar: ${existingVerified.status.toUpperCase()} — ${existingVerified.message} (preserved + merged)`);
+
   const browser: Browser = await chromium.launch({
     headless: HEADLESS,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -2452,6 +2731,7 @@ async function main(): Promise<void> {
       console.log(`    ad card: ${Math.round(adCardBBox.width)}×${Math.round(adCardBBox.height)} at (${Math.round(adCardBBox.x)},${Math.round(adCardBBox.y)})`);
       dbg.notes.push(`ad card: ${Math.round(adCardBBox.width)}×${Math.round(adCardBBox.height)} at (${Math.round(adCardBBox.x)},${Math.round(adCardBBox.y)})`);
       captureAdCard = adCardBBox;   // verified ad-card root bounds for the footer engine
+      carouselVerifiedResults.length = 0;   // reset per-ad carousel verified-footer evidence
 
       // ── 3. Creative area ─────────────────────────────────────────────────
       const { bbox: creativeBBox, notes: creativeNotes } = await findCreativeArea(page, adCardBBox, mt);
@@ -2506,6 +2786,15 @@ async function main(): Promise<void> {
         await recordCard(page, creativeBBox, 1, savedFiles[0]!, 'VIDEO_FRAME', dbg);
       }
 
+      // Ad-level VERIFIED metadata (separate sidecar). One proven row per ad. Carousel
+      // requires the SAME verified footer proven across every captured card; static/video
+      // use one individually verified footer.
+      if (mt === 'CAROUSEL') {
+        await recordVerifiedCarouselMeta(page, dbg);
+      } else {
+        await recordVerifiedAdMeta(page, creativeBBox, dbg);
+      }
+
       await saveDebugInfo(page, adId, outDir, dbg);
 
       const relPath = path.relative(process.cwd(), outDir).replace(/\\/g, '/');
@@ -2547,6 +2836,9 @@ async function main(): Promise<void> {
   fs.writeFileSync(cardsFile, serializeCardsCsv(cardRows), 'utf-8');
   const auditFile = auditCsvPath(inputFile);
   fs.writeFileSync(auditFile, serializeAuditCsv(auditRows), 'utf-8');
+  const verifiedFile = verifiedMetaPath(inputFile);
+  const verifiedAll = Array.from(verifiedMetaMap.values());
+  fs.writeFileSync(verifiedFile, serializeVerifiedMetaCsv(verifiedAll), 'utf-8');
 
   console.log('\n' + '═'.repeat(64));
   console.log(`  READY rows:           ${readyRows.length}`);
@@ -2560,6 +2852,7 @@ async function main(): Promise<void> {
   console.log(`  Output CSV:       ${outputFile}`);
   console.log(`  Cards CSV:        ${cardsFile} (${cardRows.length} card row(s))`);
   console.log(`  Cards audit:      ${auditFile} (${auditRows.length} field decision(s))`);
+  console.log(`  Verified meta:    ${verifiedFile} (${verifiedAll.length} ad row(s) merged, ${verifiedAll.filter((r) => r.verification_status === 'ACCEPT').length} ACCEPT)`);
   printCoverageReport(cardRows, auditRows);
   console.log(`  Asset folder:     ${path.resolve(ASSET_BASE)}`);
   if (DEBUG_CAPTURE_GLOBAL) console.log('  Debug mode:       ON (debug-* files saved per ad)');

@@ -113,6 +113,13 @@ type ProcessedRow = {
   benchmark: CompetitorBenchmark;
   capturedAssetPath: string;
   capturedAssetType: string;
+  verifiedHeadline: string;
+  verifiedDescription: string;
+  verifiedHeadlineStatus: string;
+  verifiedDescriptionStatus: string;
+  verifiedStatus: string;
+  verifiedStrategy: string;
+  verifiedReason: string;
 };
 
 type ErroredRow = {
@@ -196,7 +203,61 @@ function cleanAdCopy(raw: string): { cleanedCopy: string | undefined; wasContami
 // visual_description → 'Creative Analysis' → creativeAnalysisText in scorer
 // creative_notes     → 'Analysis'          → analysisNotes in scorer
 
-function toExampleRow(row: BrowserAdRow, creative: CreativeContext): ExampleRow {
+// ── Verified ad-level metadata sidecar (read-only join, fail-closed) ──────────
+// Produced by browser:capture-assets. Canonical name: example.csv and
+// example.with-assets.csv BOTH map to example.verified-meta.csv. A field is usable only
+// when its own status is ACCEPT (headline_status / description_status independently).
+// Absent / malformed / unreadable / duplicate-ad_id sidecars yield NO verified values
+// for the affected ad/file; raw browser CSV headline/description are never used.
+type VerifiedMeta = {
+  headline: string; headlineStatus: string; headlineReason: string;
+  description: string; descriptionStatus: string; descriptionReason: string;
+  cta: string; displayUrl: string; landingUrl: string; strategy: string;
+  status: string; reason: string;
+};
+type VerifiedMetaLoad = { map: Map<string, VerifiedMeta>; status: string; message: string };
+
+function verifiedMetaPathFor(inputFile: string): string {
+  const dir = path.dirname(inputFile);
+  const base = path.basename(inputFile, '.csv').replace(/\.with-assets$/, '');
+  return path.join(dir, `${base}.verified-meta.csv`);
+}
+
+const VERIFIED_REQUIRED_COLS = ['ad_id', 'verified_headline', 'verified_description', 'cta', 'display_url', 'landing_url', 'capture_strategy', 'headline_status', 'headline_reason', 'description_status', 'description_reason', 'verification_status', 'verification_reason', 'captured_at'];
+
+function loadVerifiedMeta(inputFile: string): VerifiedMetaLoad {
+  const map = new Map<string, VerifiedMeta>();
+  const p = verifiedMetaPathFor(inputFile);
+  if (!fs.existsSync(p)) return { map, status: 'absent', message: `absent — no sidecar at ${p}` };
+  let raw: string;
+  try { raw = fs.readFileSync(p, 'utf-8'); } catch (e) { return { map, status: 'unreadable', message: `unreadable: ${e instanceof Error ? e.message : String(e)}` }; }
+  let rows: Record<string, string>[];
+  try { rows = parse(raw, { columns: true, skip_empty_lines: true, trim: true }) as Record<string, string>[]; } catch (e) { return { map, status: 'malformed', message: `malformed CSV: ${e instanceof Error ? e.message : String(e)}` }; }
+  if (rows.length === 0) return { map, status: 'empty', message: 'present but contains no data rows' };
+  const cols = Object.keys(rows[0]!);
+  const missing = VERIFIED_REQUIRED_COLS.filter((c) => !cols.includes(c));
+  if (missing.length) return { map, status: 'malformed', message: `malformed header — missing columns: ${missing.join(', ')}` };
+  // Any duplicate non-empty ad_id invalidates the ENTIRE sidecar (fail closed): return an
+  // empty map so NO ad from this file contributes verified headline/description.
+  const counts = new Map<string, number>();
+  for (const r of rows) { const id = (r.ad_id ?? '').trim(); if (id) counts.set(id, (counts.get(id) ?? 0) + 1); }
+  const dups = Array.from(counts.entries()).filter(([, n]) => n > 1).map(([id]) => id);
+  if (dups.length) return { map, status: 'duplicates', message: `duplicate ad_id(s) — entire sidecar ignored (fail closed): ${dups.join(', ')}` };
+  for (const r of rows) {
+    const id = (r.ad_id ?? '').trim();
+    if (!id) continue;
+    map.set(id, {
+      headline:    (r.verified_headline ?? '').trim(),    headlineStatus:    (r.headline_status ?? '').trim().toUpperCase(),    headlineReason:    (r.headline_reason ?? '').trim(),
+      description: (r.verified_description ?? '').trim(), descriptionStatus: (r.description_status ?? '').trim().toUpperCase(), descriptionReason: (r.description_reason ?? '').trim(),
+      cta:         (r.cta ?? '').trim(),                  displayUrl:        (r.display_url ?? '').trim(),                      landingUrl:        (r.landing_url ?? '').trim(),
+      strategy:    (r.capture_strategy ?? '').trim(),
+      status:      (r.verification_status ?? '').trim().toUpperCase(),  reason: (r.verification_reason ?? '').trim(),
+    });
+  }
+  return { map, status: 'ok', message: `ok — ${map.size} usable row(s)` };
+}
+
+function toExampleRow(row: BrowserAdRow, creative: CreativeContext, verified?: VerifiedMeta): ExampleRow {
   // Strip comment-contaminated ad_copy before passing to scorer.
   // cleanedCopy is undefined when the entire field is contaminated. Headline and
   // description are also excluded (unscoped listing metadata), so there is no
@@ -206,9 +267,10 @@ function toExampleRow(row: BrowserAdRow, creative: CreativeContext): ExampleRow 
     Product:             row.competitor_name.trim() || 'Unknown Advertiser',
     'Ad Link':           row.ad_library_url.trim()  || undefined,
     Copy:                cleanedCopy                 || undefined,
-    // Browser listing headline/description are UNSCOPED metadata — never scored.
-    Headline:            undefined,
-    Description:         undefined,
+    // Verified ad-level metadata is the ONLY accepted source of headline/description,
+    // gated PER FIELD. Raw browser listing headline/description are never used.
+    Headline:            (verified && verified.headlineStatus === 'ACCEPT' && verified.headline) ? verified.headline : undefined,
+    Description:         (verified && verified.descriptionStatus === 'ACCEPT' && verified.description) ? verified.description : undefined,
     'Active Since':      row.ad_delivery_start_time.trim() || undefined,
     Analysis:            creative.creative_notes      || undefined,
     'Creative Analysis': creative.visual_description  || undefined,
@@ -320,8 +382,9 @@ function printDryRunRow(
   console.log(`    capturedAssetType: ${capturedAssetType}`);
   console.log(`    activeSince:     ${activeSince ? activeSince.toISOString().slice(0, 10) : '(empty)'}`);
   console.log(`    primaryCopy:     ${cleanedCopy ? truncate(cleanedCopy, 80) : '(null — contaminated)'}`);
-  console.log(`    headline:        (blank — unscoped browser listing metadata excluded)`);
-  console.log(`    description:     (blank — unscoped browser listing metadata excluded)`);
+  console.log(`    headline:        ${r.verifiedHeadline ? `"${truncate(r.verifiedHeadline, 80)}" (headline ${r.verifiedHeadlineStatus})` : `(blank — headline ${r.verifiedHeadlineStatus})`}`);
+  console.log(`    description:     ${r.verifiedDescription ? `"${truncate(r.verifiedDescription, 80)}" (description ${r.verifiedDescriptionStatus})` : `(blank — description ${r.verifiedDescriptionStatus})`}`);
+  console.log(`    verified-meta:   overall=${r.verifiedStatus} strategy=${r.verifiedStrategy || 'n/a'} reason=${truncate(r.verifiedReason, 80)}`);
   console.log(`    adLink:          ${truncate(row.ad_library_url, 80)}`);
   console.log(`    productOrService:${row.competitor_name.trim() || '(empty)'}`);
 
@@ -585,6 +648,13 @@ async function main(): Promise<void> {
     benchmark: CompetitorBenchmark;
     capturedAssetPath: string;
     capturedAssetType: string;
+    verifiedHeadline: string;
+    verifiedDescription: string;
+    verifiedHeadlineStatus: string;
+    verifiedDescriptionStatus: string;
+    verifiedStatus: string;
+    verifiedStrategy: string;
+    verifiedReason: string;
   };
 
   type PreErrorRow = {
@@ -596,6 +666,14 @@ async function main(): Promise<void> {
 
   const scored: ScoredRow[]    = [];
   const preErrors: PreErrorRow[] = [];
+
+  // Verified ad-level metadata sidecar (read-only, fail-closed). Per-field ACCEPT is the
+  // only source of headline/description; raw CSV headline/description are ignored entirely.
+  const verifiedLoad = loadVerifiedMeta(filePath);
+  const verifiedMeta = verifiedLoad.map;
+  console.log(`  Verified-meta sidecar: ${verifiedMetaPathFor(filePath)}`);
+  console.log(`    status: ${verifiedLoad.status.toUpperCase()} — ${verifiedLoad.message}`);
+  if (verifiedLoad.status !== 'ok') console.log('    ⚠  No verified headline/description will be used from this sidecar (fail closed).');
   let staticCount = 0;
   let videoCount  = 0;
 
@@ -616,7 +694,13 @@ async function main(): Promise<void> {
       // Resolve creative context: ASSET (vision API) → MANUAL (CSV text) → FALLBACK
       const creative = await resolveCreativeContext(row, row.media_type);
 
-      const exampleRow = toExampleRow(row, creative);
+      const verified = verifiedMeta.get(row.ad_id.trim());
+      const vHAccept = !!(verified && verified.headlineStatus === 'ACCEPT' && verified.headline);
+      const vDAccept = !!(verified && verified.descriptionStatus === 'ACCEPT' && verified.description);
+      const verifiedHeadline    = vHAccept ? verified!.headline    : '';
+      const verifiedDescription = vDAccept ? verified!.description : '';
+      console.log(`  • verified-meta [${adId}]: ${verified ? `overall=${verified.status} strategy=${verified.strategy}` : 'NONE (no usable sidecar row)'} | headline ${vHAccept ? `ACCEPT used: "${truncate(verifiedHeadline, 60)}"` : `blank (${verified ? verified.headlineStatus : 'no row'})`} | description ${vDAccept ? `ACCEPT used: "${truncate(verifiedDescription, 60)}"` : `blank (${verified ? verified.descriptionStatus : 'no row'})`}`);
+      const exampleRow = toExampleRow(row, creative, verified);
       const analysis   = analyseAdRow(exampleRow, format);
       const benchmark  = scoreCompetitorBenchmarkAd(analysis, creative.source);
       const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
@@ -649,6 +733,13 @@ async function main(): Promise<void> {
         benchmark,
         capturedAssetPath,
         capturedAssetType,
+        verifiedHeadline,
+        verifiedDescription,
+        verifiedHeadlineStatus: verified ? verified.headlineStatus : 'NONE',
+        verifiedDescriptionStatus: verified ? verified.descriptionStatus : 'NONE',
+        verifiedStatus: verified ? verified.status : 'NONE',
+        verifiedStrategy: verified ? verified.strategy : '',
+        verifiedReason: verified ? verified.reason : 'no usable verified-meta sidecar row',
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -760,9 +851,10 @@ async function main(): Promise<void> {
               adLink:           r.row.ad_library_url.trim() || '',
               activeSince:      r.activeSince ?? undefined,
               primaryCopy:      cleanAdCopy(r.row.ad_copy).cleanedCopy || undefined,
-              // Always blank: unscoped browser listing headline/description are excluded from the Ad record.
-              headline:         undefined,
-              description:      undefined,
+              // Only verified ad-level metadata (ACCEPT) may populate the Ad record;
+              // raw browser listing headline/description are never used.
+              headline:         r.verifiedHeadline    || undefined,
+              description:      r.verifiedDescription || undefined,
               metaAdId:         r.adId,
               adSource:         AD_SOURCE,
               reviewStatus:     'PENDING',
