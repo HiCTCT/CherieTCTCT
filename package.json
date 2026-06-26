@@ -34,7 +34,10 @@
     "browser:plan-client-ingestion": "tsx scripts/plan-client-ingestion.ts",
     "browser:backfill-assets": "tsx scripts/backfill-browser-ad-assets.ts",
     "browser:backfill-headlines": "tsx scripts/backfill-browser-ad-headlines.ts",
-    "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts"
+    "benchmark:backfill": "tsx scripts/backfill-competitor-benchmark.ts",
+    "phase0:discover": "tsx scripts/create-browser-ads-csv-from-meta-page.ts",
+    "phase0:measure-captures": "tsx scripts/phase0-measure-captures.ts",
+    "phase0:browser-vs-api": "tsx scripts/phase0-browser-vs-api.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

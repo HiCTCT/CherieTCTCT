@@ -11,3 +11,6 @@ prisma/dev.db.backup*
 
 /data/creative-assets/
 data/imports/*.extraction-log.txt
+# Phase 0 local measurement artefacts (never commit)
+data/imports/*.discovery-run-log.json
+data/imports/phase0-reports/
