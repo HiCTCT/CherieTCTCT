@@ -226,9 +226,7 @@ function normVerifyText(s: string | null | undefined): string {
 // accepted that field, all share one normalised value, and CTA/display/landing match.
 function combineCarouselField(
   cards: FooterVerify[], which: 'headline' | 'description',
-  gate: { ok: boolean; status: GateDecision; reason: string },
 ): { status: GateDecision; reason: string; value: string } {
-  if (!gate.ok) return { status: gate.status, reason: gate.reason, value: '' };
   if (cards.length < 2) return { status: 'REVIEW', reason: `${which} cannot be proven shared across the carousel — fewer than two distinct captured cards (${cards.length})`, value: '' };
   const valOf = (c: FooterVerify): string => which === 'headline' ? c.headline : c.description;
   const statOf = (c: FooterVerify): GateDecision => which === 'headline' ? c.headlineStatus : c.descriptionStatus;
@@ -251,8 +249,7 @@ function combineCarouselField(
 // Context (CTA/display/landing) is retained ONLY when it matches across EVERY captured
 // carousel card. If any card differs, all three are blanked so no single card's context
 // is attributed to the whole ad.
-function combineCarouselContext(cards: FooterVerify[], gate: { ok: boolean; status: GateDecision; reason: string }): { cta: string; displayUrl: string; landingUrl: string; match: boolean; note: string } {
-  if (!gate.ok) return { cta: '', displayUrl: '', landingUrl: '', match: false, note: `context blanked — exact Library ID unverified: ${gate.reason}` };
+function combineCarouselContext(cards: FooterVerify[]): { cta: string; displayUrl: string; landingUrl: string; match: boolean; note: string } {
   if (cards.length < 2) return { cta: '', displayUrl: '', landingUrl: '', match: false, note: `context blanked — fewer than two distinct captured cards (${cards.length}); shared carousel attribution cannot be proven` };
   if (cards.some((c) => c.strategy === 'no-safe-footer')) return { cta: '', displayUrl: '', landingUrl: '', match: false, note: 'context blanked — one or more cards had an unverified footer scope' };
   const match = new Set(cards.map((c) => normVerifyText(c.cta))).size === 1
@@ -2030,8 +2027,16 @@ async function extractCardMeta(
  * headline/description) on any contamination or unverified scope. No OCR, no inference.
  * Inline-only evaluate (anonymous arrows) to avoid the tsx/esbuild __name injection.
  */
-type FooterCandidate = { text: string; x: number; y: number; w: number; h: number; fontSize: number; fontWeight: number; tag: string; role: string; insideMedia: boolean; belowCreative: boolean };
+type FooterCandidate = { text: string; x: number; y: number; w: number; h: number; fontSize: number; fontWeight: number; tag: string; role: string; insideMedia: boolean; belowCreative: boolean; attrProven: boolean; attrForeign: string[]; attrContainer: Rect | null; attrContainerExceedsCard: boolean; inCtaContainer: boolean };
 type Rect = { x: number; y: number; width: number; height: number };
+type VisExplain = { visible: boolean; reason: string; ancestorTag: string; ancestorBBox: Rect | null };
+type FooterDiag = {
+  creative: { fromPointTag: string; fromPointBBox: Rect | null; fromPointVisibility: VisExplain; nearestMediaTag: string; nearestMediaBBox: Rect | null; creativeNodeFound: boolean; creativeVisibility: VisExplain };
+  targetId: { rawMatchCount: number; insideCardCount: number; candidates: { tag: string; textPreview: string; bbox: Rect | null; visible: boolean; rejectReason: string; rejectAncestorTag: string }[]; selectedTag: string; selectedBBox: Rect | null };
+  cta: { phraseCandidates: { tag: string; text: string; bbox: Rect | null; inCard: boolean; belowCreative: boolean; visible: boolean; rejectReason: string }[]; selectedTag: string; selectedText: string; selectedBBox: Rect | null };
+  failReason: string;
+};
+
 type FooterHarvest = {
   rootFound: boolean;
   rootBBox: Rect | null;
@@ -2042,20 +2047,94 @@ type FooterHarvest = {
   libraryIds: string[];
   adCardLikeCount: number;
   candidates: FooterCandidate[];
-  landingUrl: string;
+  targetIdFound: boolean;
+  creativeFound: boolean;
+  // CTA-scoped provenance (replaces the old broad modal landingUrl):
+  ctaSourceTag: string;                 // tag of the CTA element (a | button | div | span ...)
+  ctaAnchorTag: string;                 // 'a' when an enclosing CTA anchor was resolved, else blank
+  ctaHref: string;                      // the CTA anchor's OWN external href (else '')
+  ctaContainer: Rect | null;            // bbox of the proven CTA attribution container
+  ctaContainerLandingUrls: string[];    // distinct eligible external URLs inside that container
+  ctaContainerExceedsCard: boolean;     // true when the CTA container box spills outside the ad-card
+  ctaAttrProven: boolean;
+  ctaAttrForeign: string[];
+  diag?: FooterDiag | null;             // DEBUG_CAPTURE-only diagnostic evidence (never affects decisions)
+  diagError?: string | null;            // DEBUG_CAPTURE-only: diagnostic-construction failure "name: message" (never erases a valid result)
+  evaluateError?: string;               // DEBUG_CAPTURE-only: page.evaluate failure "name: message[ | stack]" (never affects decisions)
 };
 
 async function extractCardFooterRaw(
   page: Page, media: BBox, adCard: BBox, adId: string,
 ): Promise<FooterHarvest> {
-  const empty: FooterHarvest = { rootFound: false, rootBBox: null, creativeBBox: null, ctaBBox: null, ctaText: '', creativeAndCtaShareRoot: false, libraryIds: [], adCardLikeCount: 0, candidates: [], landingUrl: '' };
+  const empty: FooterHarvest = { rootFound: false, rootBBox: null, creativeBBox: null, ctaBBox: null, ctaText: '', creativeAndCtaShareRoot: false, libraryIds: [], adCardLikeCount: 0, candidates: [], targetIdFound: false, creativeFound: false, ctaSourceTag: '', ctaAnchorTag: '', ctaHref: '', ctaContainer: null, ctaContainerLandingUrls: [], ctaContainerExceedsCard: false, ctaAttrProven: false, ctaAttrForeign: [], diag: null, diagError: null };
   try {
     return await page.evaluate((args) => {
-      const media = args.media, card = args.card;
+      const media = args.media, card = args.card; const adId = args.adId; const wantDiag = args.wantDiag;
       const blocked = ['facebook.com', 'fb.com', 'fb.me', 'meta.com', 'metastatus.com', 'instagram.com', 'whatsapp.com', 'messenger.com', 'fbcdn.net', 'cdninstagram'];
       const ctaWords = ['shop now', 'learn more', 'book now', 'sign up', 'contact us', 'send message', 'get quote', 'apply now', 'download', 'subscribe', 'order now', 'get offer', 'see menu', 'watch more', 'listen now', 'get directions', 'buy now'];
       const cardMinX = card.x - 4, cardMaxX = card.x + card.width + 4, cardMinY = card.y - 4, cardMaxY = card.y + card.height + 4;
       const mediaBottom = media.y + media.height;
+
+      // Reusable visibility guard. An element is rejected when IT OR ANY ANCESTOR up to
+      // the document root is display:none, visibility:hidden/collapse, opacity:0, or
+      // aria-hidden="true" — so an element that keeps a non-zero box and its own opacity:1
+      // while being hidden through a wrapper is still rejected. The own-box rule still
+      // applies: normal candidates require a non-zero box; allowZeroBox=true (used ONLY for
+      // an enclosing CTA anchor wrapping an already-visible CTA leaf) skips the box rule but
+      // STILL runs the full ancestor hidden-state walk. Defined as an anonymous IIFE-returned
+      // function to avoid the tsx/esbuild __name injection that breaks named/const-arrow
+      // helpers inside page.evaluate.
+      const isVisibleEl = (function () {
+        return function (el: Element | null, allowZeroBox: boolean): boolean {
+          if (!el) return false;
+          // own-box rule (cheap) — skipped only for an allow-zero-box enclosing anchor.
+          if (!allowZeroBox) {
+            const rr = el.getBoundingClientRect();
+            if (!rr.width || !rr.height) return false;
+          }
+          // hidden-state walk: the element itself and every ancestor to the document root.
+          let node: Element | null = el;
+          while (node) {
+            if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') return false;
+            const cs = window.getComputedStyle(node);
+            if (cs) {
+              if (cs.display === 'none') return false;
+              if (cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;
+              if (parseFloat(cs.opacity || '1') === 0) return false;
+            }
+            node = node.parentElement;
+          }
+          return true;
+        };
+      })();
+
+      // Diagnostic-only visibility companion (DEBUG_CAPTURE). Mirrors isVisibleEl exactly
+      // but REPORTS the first rejection reason and the rejecting ancestor. Its result is
+      // used ONLY for diagnostics and NEVER changes any decision.
+      const explainVisibility = (function () {
+        return function (el: Element | null, allowZeroBox: boolean): VisExplain {
+          if (!el) return { visible: false, reason: 'element is null', ancestorTag: '', ancestorBBox: null };
+          if (!allowZeroBox) {
+            const rr = el.getBoundingClientRect();
+            if (!rr.width || !rr.height) return { visible: false, reason: 'zero box', ancestorTag: el.tagName ? el.tagName.toLowerCase() : '', ancestorBBox: { x: rr.x, y: rr.y, width: rr.width, height: rr.height } };
+          }
+          let node: Element | null = el;
+          while (node) {
+            const tg = node.tagName ? node.tagName.toLowerCase() : '';
+            const nb = node.getBoundingClientRect();
+            const box = { x: nb.x, y: nb.y, width: nb.width, height: nb.height };
+            if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') return { visible: false, reason: 'aria-hidden=true', ancestorTag: tg, ancestorBBox: box };
+            const cs = window.getComputedStyle(node);
+            if (cs) {
+              if (cs.display === 'none') return { visible: false, reason: 'display:none', ancestorTag: tg, ancestorBBox: box };
+              if (cs.visibility === 'hidden' || cs.visibility === 'collapse') return { visible: false, reason: 'visibility:' + cs.visibility, ancestorTag: tg, ancestorBBox: box };
+              if (parseFloat(cs.opacity || '1') === 0) return { visible: false, reason: 'opacity:0', ancestorTag: tg, ancestorBBox: box };
+            }
+            node = node.parentElement;
+          }
+          return { visible: true, reason: 'visible', ancestorTag: '', ancestorBBox: null };
+        };
+      })();
 
       // 1) creative node via point sampling, climb to nearest video/img
       let creativeNode: Element | null = document.elementFromPoint(media.x + media.width / 2, media.y + media.height / 2);
@@ -2067,27 +2146,57 @@ async function extractCardFooterRaw(
         probe = probe.parentElement; hops++;
       }
 
-      // 2) CTA node: nearest CTA-phrase button/link below the creative, inside the card
+      // target Library ID element: the NARROWEST element whose text holds the exact
+      // "Library ID: <adId>", AND whose visible box lies fully inside the supplied adCard
+      // bounds (the existing small +/-4 tolerance). This bounding is a SCOPE GUARD so a
+      // large document/modal ancestor — whose combined text merely includes the ID — is
+      // never selected as the target ID element.
+      let targetIdEl: Element | null = null; let bestIdLen = 1e9;
+      const reTarget = new RegExp('Library ID:\\s*' + adId + '(?!\\d)');
+      for (const el of Array.from(document.querySelectorAll('span, div, a'))) {
+        const tt = el.textContent || '';
+        if (!reTarget.test(tt)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.x < cardMinX || r.y < cardMinY || r.x + r.width > cardMaxX || r.y + r.height > cardMaxY) continue;  // fully inside adCard (scope guard)
+        if (!isVisibleEl(el, false)) continue;                                                 // reject hidden / zero-box / aria-hidden duplicates
+        if (tt.length < bestIdLen) { bestIdLen = tt.length; targetIdEl = el; }
+      }
+      // creative ancestor set (for per-field DOM-ancestry attribution proofs)
+      const creativeAncestors = new Set<Element>();
+      { let cn: Element | null = creativeNode; while (cn) { creativeAncestors.add(cn); cn = cn.parentElement; } }
+      // The selected creative element must itself be visible for any per-field proof.
+      const creativeVisible = isVisibleEl(creativeNode, false);
+
+      // 2) CTA node: the NARROWEST visible element (a | button | [role="button"] | div |
+      //    span) whose OWN DIRECT text is exactly an approved CTA phrase, sitting below the
+      //    creative and inside the card. The live Castlery CTA renders as a bare
+      //    <div>Shop Now</div>, so div/span MUST be discoverable. DIRECT text only (text-node
+      //    children) — an ancestor is NEVER selected just because its combined descendant
+      //    text contains a CTA phrase. Among matches, the smallest box wins (closest-below
+      //    breaks ties), so the exact CTA leaf is preferred over any wrapper.
       let ctaNode: Element | null = null;
       let ctaText = '';
       let ctaBBox: { x: number; y: number; width: number; height: number } | null = null;
-      let bestDy = 1e9;
-      for (const el of Array.from(document.querySelectorAll('a, button, [role="button"]'))) {
+      let bestArea = 1e15; let bestDyTie = 1e9;
+      for (const el of Array.from(document.querySelectorAll('a, button, [role="button"], div, span'))) {
         const r = el.getBoundingClientRect();
-        if (!r.width || !r.height) continue;
         const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
-        if (cx < cardMinX || cx > cardMaxX || cy < cardMinY || cy > cardMaxY) continue;
-        if (cy < mediaBottom - 2) continue;
+        if (cx < cardMinX || cx > cardMaxX || cy < cardMinY || cy > cardMaxY) continue;   // inside the card
+        if (cy < mediaBottom - 2) continue;                                               // below the creative
         let txt = '';
         for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) txt += n.textContent || '';
-        txt = txt.replace(/\s+/g, ' ').trim();
-        if (!txt) txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        txt = txt.replace(/\s+/g, ' ').trim();                                            // OWN direct text only
+        if (!txt) continue;                                                               // no direct text → never use descendant text
         const low = txt.toLowerCase();
         let isCta = false;
-        for (const w of ctaWords) if (low === w) { isCta = true; break; }
+        for (const w of ctaWords) if (low === w) { isCta = true; break; }                 // exact approved CTA phrase
         if (!isCta) continue;
+        if (!isVisibleEl(el, false)) continue;                                            // reject hidden / zero-box / aria-hidden CTA duplicates
+        const area = r.width * r.height;
         const dy = cy - mediaBottom;
-        if (dy < bestDy) { bestDy = dy; ctaNode = el; ctaText = txt; ctaBBox = { x: r.x, y: r.y, width: r.width, height: r.height }; }
+        if (area < bestArea || (area === bestArea && dy < bestDyTie)) {                   // prefer the narrowest element
+          bestArea = area; bestDyTie = dy; ctaNode = el; ctaText = txt; ctaBBox = { x: r.x, y: r.y, width: r.width, height: r.height };
+        }
       }
 
       // 3) nearest shared ancestor of creative + CTA
@@ -2102,27 +2211,160 @@ async function extractCardFooterRaw(
         shareRoot = !!root;
       }
 
-      // landing URL: nearest non-blocked external anchor inside the card
-      let landingUrl = '';
-      for (const el of Array.from(document.querySelectorAll('a'))) {
-        if (landingUrl) break;
-        const r = el.getBoundingClientRect();
-        const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
-        if (cx < cardMinX || cx > cardMaxX || cy < cardMinY || cy > cardMaxY) continue;
-        const href = el.getAttribute('href') || '';
-        let target = href;
-        const um = href.match(/[?&]u=([^&]+)/);
-        if (um) { try { target = decodeURIComponent(um[1]!); } catch (e) { /* keep */ } }
-        if (/^https?:\/\//.test(target)) {
-          let isB = false;
-          for (const d of blocked) if (target.toLowerCase().includes(d)) { isB = true; break; }
-          if (!isB) landingUrl = target;
+      // ── DEBUG_CAPTURE-only diagnostic probe (read-only; never affects decisions) ──
+      let diag: FooterDiag | null = null;
+      let diagError: string | null = null;
+      if (wantDiag) {
+        try {
+        // Creative probe
+        const fp = document.elementFromPoint(media.x + media.width / 2, media.y + media.height / 2);
+        const fpTag = fp && fp.tagName ? fp.tagName.toLowerCase() : '(null)';
+        const fpBox = fp ? (function () { const r = fp!.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })() : null;
+        let climbD: Element | null = fp; let nearestMediaD: Element | null = null; let chD = 0;
+        while (climbD && chD < 6) { const tnD = climbD.tagName ? climbD.tagName.toLowerCase() : ''; if (tnD === 'video' || tnD === 'img') { nearestMediaD = climbD; break; } climbD = climbD.parentElement; chD++; }
+        const nmTag = nearestMediaD && nearestMediaD.tagName ? nearestMediaD.tagName.toLowerCase() : '(none)';
+        const nmBox = nearestMediaD ? (function () { const r = nearestMediaD!.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })() : null;
+
+        // Target Library ID probe (raw matches, in-card matches, per-candidate visibility)
+        const reTargetD = new RegExp('Library ID:\\s*' + adId + '(?!\\d)');
+        let rawCount = 0; let insideCount = 0;
+        const idCands: { tag: string; textPreview: string; bbox: Rect | null; visible: boolean; rejectReason: string; rejectAncestorTag: string }[] = [];
+        for (const el of Array.from(document.querySelectorAll('span, div, a'))) {
+          const tt = el.textContent || '';
+          if (!reTargetD.test(tt)) continue;
+          rawCount++;
+          const r = el.getBoundingClientRect();
+          const inC = r.x >= cardMinX && r.y >= cardMinY && r.x + r.width <= cardMaxX && r.y + r.height <= cardMaxY;
+          if (!inC) continue;
+          insideCount++;
+          if (idCands.length < 12) { const v = explainVisibility(el, false); idCands.push({ tag: el.tagName.toLowerCase(), textPreview: tt.replace(/\s+/g, ' ').slice(0, 80), bbox: { x: r.x, y: r.y, width: r.width, height: r.height }, visible: v.visible, rejectReason: v.reason, rejectAncestorTag: v.ancestorTag }); }
+        }
+
+        // CTA phrase probe (exact phrase candidates BEFORE visibility filtering)
+        const ctaCands: { tag: string; text: string; bbox: Rect | null; inCard: boolean; belowCreative: boolean; visible: boolean; rejectReason: string }[] = [];
+        for (const el of Array.from(document.querySelectorAll('a, button, [role="button"], div, span'))) {
+          if (ctaCands.length >= 12) break;
+          let txt = ''; for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) txt += n.textContent || '';
+          txt = txt.replace(/\s+/g, ' ').trim();
+          if (!txt) continue;
+          const low = txt.toLowerCase();
+          let isC = false; for (const w of ctaWords) if (low === w) { isC = true; break; }
+          if (!isC) continue;
+          const r = el.getBoundingClientRect();
+          const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+          const inC = cx >= cardMinX && cx <= cardMaxX && cy >= cardMinY && cy <= cardMaxY;
+          const v = explainVisibility(el, false);
+          ctaCands.push({ tag: el.tagName.toLowerCase(), text: txt, bbox: { x: r.x, y: r.y, width: r.width, height: r.height }, inCard: inC, belowCreative: cy >= mediaBottom - 2, visible: v.visible, rejectReason: v.reason });
+        }
+
+        // Footer-result cause (which prerequisite failed, in the order they are required)
+        let failReason = '';
+        if (!creativeNode) failReason = 'no visible creative (elementFromPoint climb found no video/img within 6 hops)';
+        else if (!targetIdEl) failReason = 'no bounded visible target Library ID';
+        else if (!ctaNode) failReason = 'no visible CTA';
+        else if (!root) failReason = 'no shared root (creative + CTA do not share an ancestor)';
+        else failReason = 'prerequisites met (footer proceeded to field-level proof)';
+
+        diag = {
+          creative: { fromPointTag: fpTag, fromPointBBox: fpBox, fromPointVisibility: explainVisibility(fp, false), nearestMediaTag: nmTag, nearestMediaBBox: nmBox, creativeNodeFound: !!creativeNode, creativeVisibility: explainVisibility(creativeNode, false) },
+          targetId: { rawMatchCount: rawCount, insideCardCount: insideCount, candidates: idCands, selectedTag: targetIdEl ? targetIdEl.tagName.toLowerCase() : '(none)', selectedBBox: targetIdEl ? (function () { const r = targetIdEl!.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })() : null },
+          cta: { phraseCandidates: ctaCands, selectedTag: ctaNode ? ctaNode.tagName.toLowerCase() : '(none)', selectedText: ctaText, selectedBBox: ctaBBox },
+          failReason: failReason,
+        };
+        } catch (de: unknown) {
+          // Diagnostic construction failed: keep the normal footer harvest intact (diag
+          // stays null) and record a short summary only. A diagnostic error must NEVER
+          // erase a valid extraction result.
+          const e = de as { name?: string; message?: string };
+          diagError = `${e && e.name ? e.name : 'Error'}: ${e && e.message ? e.message : String(de)}`.slice(0, 500);
+          diag = null;
         }
       }
 
+      // ── CTA-scoped attribution (replaces the old broad modal anchor search) ──
+      // The previous "first external anchor anywhere in the card/modal" landing search
+      // has been REMOVED: in a multi-ad modal that anchor can belong to a NEIGHBOURING
+      // ad. Landing and display provenance are now derived ONLY from the CTA's own
+      // exclusive attribution container (computed below).
       const creativeBBox = creativeNode ? (function () { const r = creativeNode!.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })() : null;
+
+      // CTA source element tag (a | button | div | span | ...). The selected CTA element
+      // is preserved as the source evidence regardless of how the landing href resolves.
+      const ctaSourceTag = ctaNode ? (ctaNode.tagName ? ctaNode.tagName.toLowerCase() : '') : '';
+
+      // Resolve the nearest ENCLOSING anchor of the selected CTA element (covers the common
+      // <a><div>Shop Now</div></a> shape where the CTA itself is a div/span). The anchor's
+      // href is USED later, and only when that anchor lies inside the proven CTA container.
+      let ctaAnchorEl: Element | null = null;
+      if (ctaNode) { let an: Element | null = ctaNode; while (an) { if (an.tagName && an.tagName.toLowerCase() === 'a') { ctaAnchorEl = an; break; } an = an.parentElement; } }
+      const ctaAnchorTag = ctaAnchorEl ? 'a' : '';
+
+      // CTA attribution container: narrowest ancestor of the CTA node that is also an
+      // ancestor of the creative AND contains the exact target Library ID element. This
+      // is the SAME exclusive container that proves creative + exact CTA + exact target
+      // Library ID; ctaAttrProven is true only when it has the target ID and NO foreign
+      // Library IDs.
+      let ctaContainerEl: Element | null = null;
+      let ctaContainer: { x: number; y: number; width: number; height: number } | null = null;
+      let ctaAttrProven = false; let ctaAttrForeign: string[] = [];
+      let ctaContainerExceedsCard = false;
+      if (ctaNode && creativeNode && targetIdEl) {
+        let cce2: Element | null = ctaNode;
+        while (cce2 && !creativeAncestors.has(cce2)) cce2 = cce2.parentElement;
+        let cont2: Element | null = cce2;
+        while (cont2 && !cont2.contains(targetIdEl)) cont2 = cont2.parentElement;
+        if (cont2) {
+          ctaContainerEl = cont2;
+          const ctxt2 = cont2.textContent || '';
+          const ids2: string[] = []; const seen2: { [k: string]: number } = {};
+          const re2 = /Library ID:\s*(\d+)/g; let m2: RegExpExecArray | null;
+          while ((m2 = re2.exec(ctxt2)) !== null) { if (!seen2[m2[1]!]) { seen2[m2[1]!] = 1; ids2.push(m2[1]!); } }
+          ctaAttrForeign = ids2.filter((x) => x !== adId);
+          const rc2 = cont2.getBoundingClientRect();
+          ctaContainer = { x: rc2.x, y: rc2.y, width: rc2.width, height: rc2.height };
+          // SCOPE GUARD: the CTA attribution container itself must lie inside the ad-card
+          // bounds (same +/-4 tolerance as the card). A container that climbs to a broad
+          // modal/document ancestor — even with no foreign Library ID — can still wrap
+          // unrelated external anchors, so it is NOT accepted as the exclusive proven
+          // container. When it exceeds the card, ctaAttrProven stays false.
+          const insideCard = rc2.x >= cardMinX && rc2.y >= cardMinY && rc2.x + rc2.width <= cardMaxX && rc2.y + rc2.height <= cardMaxY;
+          ctaContainerExceedsCard = !insideCard;
+          ctaAttrProven = ids2.indexOf(adId) >= 0 && ctaAttrForeign.length === 0 && insideCard;
+        }
+      }
+
+      // Resolve the CTA landing href ONLY from the enclosing CTA anchor, and ONLY when
+      // that anchor is inside the proven CTA attribution container. No arbitrary anchors
+      // outside the proven container are ever consulted.
+      let ctaHref = '';
+      if (ctaAnchorEl && ctaAttrProven && ctaContainerEl && ctaContainerEl.contains(ctaAnchorEl) && isVisibleEl(ctaAnchorEl, true)) {
+        const hrefC = ctaAnchorEl.getAttribute('href') || '';
+        let tC = hrefC; const umC = hrefC.match(/[?&]u=([^&]+)/);
+        if (umC) { try { tC = decodeURIComponent(umC[1]!); } catch (e) { /* keep */ } }
+        if (/^https?:\/\//.test(tC)) { let isB = false; for (const d of blocked) if (tC.toLowerCase().includes(d)) { isB = true; break; } if (!isB) ctaHref = tC; }
+      }
+
+      // CTA-scoped eligible landing URLs: ONLY when the CTA container is the exclusive
+      // proven one. Eligible = the resolved CTA-anchor href + every external, non-blocked
+      // <a> DESCENDANT of that proven container. Distinct only. NO broad modal search.
+      const ctaContainerLandingUrls: string[] = [];
+      if (ctaAttrProven && ctaContainerEl) {
+        const seenL: { [k: string]: number } = {};
+        if (ctaHref && !seenL[ctaHref]) { seenL[ctaHref] = 1; ctaContainerLandingUrls.push(ctaHref); }
+        for (const a of Array.from(ctaContainerEl.querySelectorAll('a'))) {
+          if (!isVisibleEl(a, false)) continue;                                           // skip hidden / zero-box anchors
+          const hrefA = a.getAttribute('href') || '';
+          let tA = hrefA; const umA = hrefA.match(/[?&]u=([^&]+)/);
+          if (umA) { try { tA = decodeURIComponent(umA[1]!); } catch (e) { /* keep */ } }
+          if (!/^https?:\/\//.test(tA)) continue;
+          let isB = false; for (const d of blocked) if (tA.toLowerCase().includes(d)) { isB = true; break; }
+          if (isB) continue;
+          if (!seenL[tA]) { seenL[tA] = 1; ctaContainerLandingUrls.push(tA); }
+        }
+      }
+
       if (!root) {
-        return { rootFound: false, rootBBox: null, creativeBBox, ctaBBox, ctaText, creativeAndCtaShareRoot: shareRoot, libraryIds: [], adCardLikeCount: 0, candidates: [], landingUrl };
+        return { rootFound: false, rootBBox: null, creativeBBox, ctaBBox, ctaText, creativeAndCtaShareRoot: shareRoot, libraryIds: [], adCardLikeCount: 0, candidates: [], targetIdFound: !!targetIdEl, creativeFound: !!creativeNode, ctaSourceTag, ctaAnchorTag, ctaHref, ctaContainer, ctaContainerLandingUrls, ctaContainerExceedsCard, ctaAttrProven, ctaAttrForeign, diag, diagError };
       }
       const rr = root.getBoundingClientRect();
       const rootBBox = { x: rr.x, y: rr.y, width: rr.width, height: rr.height };
@@ -2142,12 +2384,12 @@ async function extractCardFooterRaw(
       }
 
       // footer text candidates: descendants of the verified root only
-      const candidates: { text: string; x: number; y: number; w: number; h: number; fontSize: number; fontWeight: number; tag: string; role: string; insideMedia: boolean; belowCreative: boolean }[] = [];
+      const candidates: { text: string; x: number; y: number; w: number; h: number; fontSize: number; fontWeight: number; tag: string; role: string; insideMedia: boolean; belowCreative: boolean; attrProven: boolean; attrForeign: string[]; attrContainer: { x: number; y: number; width: number; height: number } | null; attrContainerExceedsCard: boolean; inCtaContainer: boolean }[] = [];
       const seenTxt = new Set<string>();
       for (const el of Array.from(root.querySelectorAll('a, span, div, button, [role="button"]'))) {
         if (candidates.length >= 80) break;
         const r = el.getBoundingClientRect();
-        if (!r.width || !r.height) continue;
+        if (!isVisibleEl(el, false)) continue;                                            // reject hidden / zero-box / aria-hidden candidates
         let direct = '';
         for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) direct += n.textContent || '';
         direct = direct.replace(/\s+/g, ' ').trim();
@@ -2162,13 +2404,55 @@ async function extractCardFooterRaw(
         const fontSize = parseFloat(cs.fontSize) || 0;
         const fwRaw = cs.fontWeight;
         const fontWeight = parseInt(fwRaw, 10) || (fwRaw === 'bold' ? 700 : 400);
-        candidates.push({ text: direct, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), fontSize, fontWeight, tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '', insideMedia, belowCreative });
+        let attrProven = false; let attrForeign: string[] = []; let attrContainer: { x: number; y: number; width: number; height: number } | null = null;
+        let attrContainerExceedsCard = false;
+        if (creativeNode && targetIdEl) {
+          let cce: Element | null = el;
+          while (cce && !creativeAncestors.has(cce)) cce = cce.parentElement;
+          let cont: Element | null = cce;
+          while (cont && !cont.contains(targetIdEl)) cont = cont.parentElement;
+          if (cont) {
+            const ctxt = cont.textContent || '';
+            const idsC: string[] = []; const seenC: { [k: string]: number } = {};
+            const reC = /Library ID:\s*(\d+)/g; let mc: RegExpExecArray | null;
+            while ((mc = reC.exec(ctxt)) !== null) { if (!seenC[mc[1]!]) { seenC[mc[1]!] = 1; idsC.push(mc[1]!); } }
+            attrForeign = idsC.filter((x) => x !== adId);
+            const rc = cont.getBoundingClientRect();
+            attrContainer = { x: rc.x, y: rc.y, width: rc.width, height: rc.height };
+            // SCOPE GUARD (per candidate): the candidate's OWN attribution container must lie
+            // inside the ad-card bounds (same +/-4 tolerance). Without this a direct footer
+            // candidate (e.g. the live <div>Shop Now</div>) could prove against a broad
+            // ancestor container and bypass the CTA-container bound. When it exceeds the card,
+            // attrProven stays false so headline/description/CTA/display all fail closed.
+            const insideCard = rc.x >= cardMinX && rc.y >= cardMinY && rc.x + rc.width <= cardMaxX && rc.y + rc.height <= cardMaxY;
+            attrContainerExceedsCard = !insideCard;
+            attrProven = idsC.indexOf(adId) >= 0 && attrForeign.length === 0 && insideCard && creativeVisible;
+          }
+        }
+        // Is this candidate element a descendant of the proven CTA container? (display provenance)
+        const inCtaContainer = ctaContainerEl ? ctaContainerEl.contains(el) : false;
+        candidates.push({ text: direct, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), fontSize, fontWeight, tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '', insideMedia, belowCreative, attrProven, attrForeign, attrContainer, attrContainerExceedsCard, inCtaContainer });
       }
 
-      return { rootFound: true, rootBBox, creativeBBox, ctaBBox, ctaText, creativeAndCtaShareRoot: shareRoot, libraryIds, adCardLikeCount, candidates, landingUrl };
-    }, { media, card: adCard, adId });
-  } catch {
-    return empty;
+      return { rootFound: true, rootBBox, creativeBBox, ctaBBox, ctaText, creativeAndCtaShareRoot: shareRoot, libraryIds, adCardLikeCount, candidates, targetIdFound: !!targetIdEl, creativeFound: !!creativeNode, ctaSourceTag, ctaAnchorTag, ctaHref, ctaContainer, ctaContainerLandingUrls, ctaContainerExceedsCard, ctaAttrProven, ctaAttrForeign, diag, diagError };
+    }, { media, card: adCard, adId, wantDiag: DEBUG_CAPTURE_GLOBAL });
+  } catch (err: unknown) {
+    // Fail-closed unchanged: still return the EMPTY harvest. The captured error is
+    // diagnostic-only and never causes any field to be accepted, preserved or blanked
+    // differently. Keep it short and free of page HTML / cookies / tokens / URLs / DOM text.
+    let info = 'unknown evaluate error';
+    try {
+      const e = err as { name?: string; message?: string; stack?: string };
+      const name = e && e.name ? String(e.name) : 'Error';
+      const msg = e && e.message ? String(e.message) : String(err);
+      let out = `${name}: ${msg}`;
+      if (e && e.stack) {
+        const fr = String(e.stack).split('\n').map((x) => x.trim()).filter((x) => x.indexOf('at ') === 0).slice(0, 2).join(' | ');
+        if (fr) out += ` | ${fr}`;
+      }
+      info = out.slice(0, 1500);
+    } catch { info = 'unknown evaluate error'; }
+    return { ...empty, evaluateError: info };
   }
 }
 
@@ -2219,23 +2503,42 @@ type CardMeta = { headline: string; description: string; cta: string; displayUrl
  *   structured-footer       — verified root + a recognisable display-URL/link-preview anchor
  *   scoped-geometry-footer  — verified root, geometry used only within that root
  *   no-safe-footer          — root verification failed or contamination detected → blank
- * CTA / display URL / landing URL are kept (they are individually card-scoped); only the
- * headline/description are blanked on failure. No unscoped geometry is ever used.
+ * CTA is kept only when the CTA element's own attribution is proven. Display URL is kept
+ * only when its OWN selected element is attribution-proven OR sits inside the proven CTA
+ * container. Landing URL is kept only when a single eligible external URL exists inside the
+ * proven CTA container (ambiguous/none -> blank). No unscoped geometry, no broad-modal
+ * anchor borrowing, no host-from-landing fallback. Headline/description blank on failure.
  */
 function decideFooter(
   h: FooterHarvest, adId: string, adCard: BBox | null,
-): CardMeta & { found: boolean; strategy: string; contamination: string } {
-  const landing = h.landingUrl || '';
+): CardMeta & { found: boolean; strategy: string; contamination: string; proof: {
+  targetIdFound: boolean; creativeFound: boolean;
+  headline: { proven: boolean; foreign: string[]; tag: string; bbox: Rect | null; container: Rect | null; containerExceedsCard: boolean };
+  description: { proven: boolean; foreign: string[]; tag: string; bbox: Rect | null; container: Rect | null; containerExceedsCard: boolean };
+  cta: { proven: boolean; foreign: string[]; source: string; tag: string; text: string; anchorTag: string; resolvedHref: string; containerExceedsCard: boolean; bbox: Rect | null; container: Rect | null };
+  display: { proven: boolean; inCtaContainer: boolean; foreign: string[]; tag: string; bbox: Rect | null; container: Rect | null; containerExceedsCard: boolean; kept: boolean; reason: string };
+  landing: { source: string; candidates: string[]; chosen: string; kept: boolean; reason: string };
+} } {
   const distinctIds = Array.from(new Set((h.libraryIds || []).map((x) => x.replace(/\D/g, '')).filter(Boolean)));
   const foreignIds = distinctIds.filter((id) => id !== adId);
+  const emptyProof = {
+    targetIdFound: !!h.targetIdFound, creativeFound: !!h.creativeFound,
+    headline: { proven: false, foreign: [] as string[], tag: '', bbox: null as Rect | null, container: null as Rect | null, containerExceedsCard: false },
+    description: { proven: false, foreign: [] as string[], tag: '', bbox: null as Rect | null, container: null as Rect | null, containerExceedsCard: false },
+    cta: { proven: false, foreign: [] as string[], source: 'none', tag: '', text: '', anchorTag: '', resolvedHref: '', containerExceedsCard: false, bbox: null as Rect | null, container: null as Rect | null },
+    display: { proven: false, inCtaContainer: false, foreign: [] as string[], tag: '', bbox: null as Rect | null, container: null as Rect | null, containerExceedsCard: false, kept: false, reason: 'unverified footer scope' },
+    landing: { source: 'none', candidates: [] as string[], chosen: '', kept: false, reason: 'unverified footer scope' },
+  };
 
-  const safeBlank = (strategy: string, contamination: string): CardMeta & { found: boolean; strategy: string; contamination: string } => ({
+  // safeBlank blanks ALL context (cta blanked downstream in verifyFooter; display/landing
+  // blanked here) — an unverified/contaminated root must never carry a neighbour's URL.
+  const safeBlank = (strategy: string, contamination: string): CardMeta & { found: boolean; strategy: string; contamination: string; proof: typeof emptyProof } => ({
     headline: '', description: '',
     cta: (h.ctaText || '').trim(),
-    displayUrl: landing ? hostFromUrl(landing) : '',
-    landingUrl: landing,
+    displayUrl: '',
+    landingUrl: '',
     candidates: (h.candidates || []).length, rejectedUi: [],
-    reason: contamination, found: false, strategy, contamination,
+    reason: contamination, found: false, strategy, contamination, proof: emptyProof,
   });
 
   // ── Root verification (fail closed) ──
@@ -2243,7 +2546,7 @@ function decideFooter(
   if (!h.rootFound || !h.creativeAndCtaShareRoot || !h.rootBBox) return safeBlank('no-safe-footer', 'unverified footer scope');
   if (!bboxInside(h.rootBBox, adCard, 8)) return safeBlank('no-safe-footer', 'unverified footer scope (root exceeds ad-card bounds)');
 
-  // ── Contamination tripwires ──
+  // ── Contamination tripwires (root-level) ──
   if (distinctIds.length > 1) return safeBlank('no-safe-footer', 'cross-card contamination (multiple Library IDs)');
   if (foreignIds.length > 0) return safeBlank('no-safe-footer', 'cross-card contamination (foreign Library ID)');
   if ((h.adCardLikeCount || 0) > 1) return safeBlank('no-safe-footer', 'cross-card contamination (multiple ad-card structures)');
@@ -2253,99 +2556,176 @@ function decideFooter(
   if (outside.length > 0) return safeBlank('no-safe-footer', 'footer candidates outside verified root');
 
   // ── In-root content selection (verified, no contamination) ──
-  const below = cand.filter((c) => !c.insideMedia && c.belowCreative);
-  const sorted = below.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+  const belowC = cand.filter((c) => !c.insideMedia && c.belowCreative);
+  const sorted = belowC.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
   const seen = new Set<string>();
   const uniq: FooterCandidate[] = [];
   for (const it of sorted) { const k = it.text.trim().toLowerCase(); if (!k || seen.has(k)) continue; seen.add(k); uniq.push(it); }
 
   let displayUrl = '';
+  let duCand: FooterCandidate | null = null;        // exact candidate element that supplied the display URL
   let domainInFooter = false;
   let cta = (h.ctaText || '').trim();
+  let ctaCand: FooterCandidate | null = null;       // candidate that supplied the CTA (if any)
+  const ctaFromButton = !!cta;                       // CTA came from the harvested button (h.ctaText)
   const content: FooterCandidate[] = [];
   for (const it of uniq) {
     const t = it.text.trim(); const low = t.toLowerCase();
     if (isChromeText(t)) continue;
     if (isDurationText(t)) continue;
-    if (!displayUrl && isDomainText(t)) { displayUrl = t; domainInFooter = true; continue; }
+    if (!displayUrl && isDomainText(t)) { displayUrl = t; duCand = it; domainInFooter = true; continue; }
     if (isDomainText(t)) continue;
-    if (!cta && isCtaPhrase(low)) { cta = t; continue; }
+    if (!cta && isCtaPhrase(low)) { cta = t; ctaCand = it; continue; }
     if (isCtaPhrase(low)) continue;
     if (/^\d+$/.test(t)) continue;
     if (t.length < 3 || t.length > 200) continue;
     content.push(it);
   }
-  if (!displayUrl && landing) displayUrl = hostFromUrl(landing);
+  // NOTE: no host-from-landing fallback — display URL must have its own provenance.
 
   const ordered = content.slice();
   if (ordered.length >= 2 && ordered[0]!.y === ordered[1]!.y) {
     const a = ordered[0]!, c = ordered[1]!;
     if ((c.fontSize * 1000 + c.fontWeight) > (a.fontSize * 1000 + a.fontWeight)) { ordered[0] = c; ordered[1] = a; }
   }
-  const headline = ordered[0] ? ordered[0].text.trim() : '';
-  const description = (ordered[1] && ordered[1].text.trim() !== headline) ? ordered[1].text.trim() : '';
+  const hCand = ordered[0] || null;
+  const headline = hCand ? hCand.text.trim() : '';
+  const dCand = (ordered[1] && ordered[1].text.trim() !== headline) ? ordered[1] : null;
+  const description = dCand ? dCand.text.trim() : '';
   const strategy = domainInFooter ? 'structured-footer' : 'scoped-geometry-footer';
-  const found = !!(displayUrl || cta || content.length);
+
+  // ── Display-URL provenance (independent; never borrowed from CTA success) ──
+  // Keep the display URL ONLY when its exact selected element is itself attribution-proven
+  // to this Library ID, OR is a descendant of the proven CTA attribution container.
+  let displayKept = false; let displayReason = '';
+  if (!displayUrl) {
+    displayReason = 'no display-URL text in verified footer';
+  } else if (duCand && duCand.attrProven) {
+    displayKept = true; displayReason = `display proven independently to Library ID ${adId}`;
+  } else if (duCand && duCand.inCtaContainer && h.ctaAttrProven) {
+    displayKept = true; displayReason = 'display inside proven CTA attribution container';
+  } else if (duCand && duCand.attrForeign && duCand.attrForeign.length) {
+    displayReason = `display blanked — selected element shares a container with foreign Library IDs [${duCand.attrForeign.join(', ')}]`;
+  } else {
+    displayReason = 'display blanked — selected element not independently proven and not inside proven CTA container';
+  }
+  const displayUrlKept = displayKept ? displayUrl : '';
+
+  // ── Landing-URL provenance (CTA-scoped only) ──
+  // Eligible URLs were collected in-page ONLY from the proven CTA attribution container
+  // (the exact CTA anchor href + external anchors descending from that container). More
+  // than one distinct eligible URL → ambiguous → blank. None → blank.
+  const landCands = h.ctaAttrProven ? (h.ctaContainerLandingUrls || []) : [];
+  const landingSource = h.ctaHref ? 'cta-anchor+container' : 'cta-container';
+  let landingUrlKept = ''; let landingReason = '';
+  if (!h.ctaAttrProven) {
+    landingReason = h.ctaContainerExceedsCard
+      ? 'landing blanked — CTA attribution container exceeds ad-card bounds'
+      : 'landing blanked — CTA container not exclusively proven to this Library ID';
+  } else if (landCands.length === 1) {
+    landingUrlKept = landCands[0]!;
+    landingReason = 'landing kept — single eligible external URL inside proven CTA container';
+  } else if (landCands.length > 1) {
+    landingReason = `landing blanked — ambiguous: ${landCands.length} distinct eligible external URLs inside proven CTA container [${landCands.join(' | ')}]`;
+  } else {
+    landingReason = 'landing blanked — no eligible external URL inside proven CTA container';
+  }
+
+  const found = !!(displayUrlKept || cta || content.length);
   const reason = `${strategy} (verified ad-card root)`;
-  return { headline, description, cta, displayUrl, landingUrl: landing, candidates: uniq.length, rejectedUi: [], reason, found, strategy, contamination: '' };
+
+  const bb = (c: FooterCandidate | null): Rect | null => c ? { x: c.x, y: c.y, width: c.w, height: c.h } : null;
+  const proof = {
+    targetIdFound: !!h.targetIdFound, creativeFound: !!h.creativeFound,
+    headline: { proven: hCand ? hCand.attrProven : false, foreign: hCand ? hCand.attrForeign : [], tag: hCand ? hCand.tag : '', bbox: bb(hCand), container: hCand ? hCand.attrContainer : null, containerExceedsCard: hCand ? hCand.attrContainerExceedsCard : false },
+    description: { proven: dCand ? dCand.attrProven : false, foreign: dCand ? dCand.attrForeign : [], tag: dCand ? dCand.tag : '', bbox: bb(dCand), container: dCand ? dCand.attrContainer : null, containerExceedsCard: dCand ? dCand.attrContainerExceedsCard : false },
+    cta: ctaCand
+      ? { proven: ctaCand.attrProven, foreign: ctaCand.attrForeign, source: `candidate-${ctaCand.tag}`, tag: ctaCand.tag, text: ctaCand.text, anchorTag: '', resolvedHref: '', containerExceedsCard: ctaCand.attrContainerExceedsCard, bbox: bb(ctaCand), container: ctaCand.attrContainer }
+      : (ctaFromButton
+        ? { proven: !!h.ctaAttrProven, foreign: h.ctaAttrForeign || [], source: 'cta-button', tag: h.ctaSourceTag || '', text: (h.ctaText || '').trim(), anchorTag: h.ctaAnchorTag || '', resolvedHref: h.ctaHref || '', containerExceedsCard: !!h.ctaContainerExceedsCard, bbox: h.ctaBBox, container: h.ctaContainer }
+        : { proven: false, foreign: [] as string[], source: 'none', tag: '', text: '', anchorTag: '', resolvedHref: '', containerExceedsCard: false, bbox: null as Rect | null, container: null as Rect | null }),
+    display: { proven: duCand ? duCand.attrProven : false, inCtaContainer: duCand ? duCand.inCtaContainer : false, foreign: duCand ? duCand.attrForeign : [], tag: duCand ? duCand.tag : '', bbox: bb(duCand), container: duCand ? duCand.attrContainer : null, containerExceedsCard: duCand ? duCand.attrContainerExceedsCard : false, kept: displayKept, reason: displayReason },
+    landing: { source: landingSource, candidates: landCands, chosen: landingUrlKept, kept: !!landingUrlKept, reason: landingReason },
+  };
+
+  return { headline, description, cta, displayUrl: displayUrlKept, landingUrl: landingUrlKept, candidates: uniq.length, rejectedUi: [], reason, found, strategy, contamination: '', proof };
 }
 
-/**
- * Collect every "Library ID: <n>" within the ad-card bounds. Proves the verified footer
- * belongs to the EXACT ad (own id present, no other). Inline-only evaluate.
- */
-async function collectAdCardLibraryIds(page: Page, card: BBox): Promise<string[]> {
-  try {
-    return await page.evaluate((c) => {
-      const ids: string[] = [];
-      const seen = new Set<string>();
-      for (const el of Array.from(document.querySelectorAll('span, div, a'))) {
-        const r = el.getBoundingClientRect();
-        if (!r.width || !r.height) continue;
-        const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
-        if (cx < c.x - 4 || cx > c.x + c.width + 4 || cy < c.y - 4 || cy > c.y + c.height + 4) continue;
-        let t = '';
-        for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) t += n.textContent || '';
-        const m = t.match(/Library ID:\s*(\d+)/);
-        if (m && m[1] && !seen.has(m[1])) { seen.add(m[1]); ids.push(m[1]); }
-      }
-      return ids;
-    }, card);
-  } catch {
-    return [];
-  }
-}
-
-// Confirm the ad-card holds the exact own Library ID and no other (foreign → REJECT,
-// none → REVIEW). Computed once per ad; shared by static/video and carousel paths.
-async function adCardLibraryGate(page: Page): Promise<{ ok: boolean; status: GateDecision; reason: string }> {
-  const adCard = captureAdCard;
-  const ids = adCard ? await collectAdCardLibraryIds(page, adCard) : [];
-  const distinct = Array.from(new Set(ids));
-  const foreign = distinct.filter((id) => id !== captureAdId);
-  const own = distinct.indexOf(captureAdId) >= 0;
-  if (foreign.length > 0 || distinct.length > 1) {
-    return { ok: false, status: 'REJECT', reason: `cross-card contamination — ad-card Library IDs: [${distinct.join(', ') || 'none'}] (expected only ${captureAdId})` };
-  }
-  if (!own) {
-    return { ok: false, status: 'REVIEW', reason: `exact Library ID not confirmed inside ad-card — attribution unproven` };
-  }
-  return { ok: true, status: 'ACCEPT', reason: `ad-card Library ID ${captureAdId} confirmed; no foreign id` };
-}
-
-// Run the verified footer engine for one media region and gate each field independently.
-async function verifyFooter(page: Page, media: BBox, cardIndex: number): Promise<FooterVerify> {
+// Run the verified footer engine for one media region, then prove EACH field's exact
+// selected DOM element is tied to the target Library ID independently. A field ACCEPTs
+// only when its own evidence is co-contained with the creative and the target Library ID
+// element, with no foreign Library IDs. CTA is kept only when the CTA element's own
+// attribution is proven (a missing CTA element is never "contained"). Display URL and
+// landing URL are gated INDEPENDENTLY (display: own proof or inside the proven CTA
+// container; landing: single eligible URL inside the proven CTA container) — they are NOT
+// kept merely because CTA proof succeeded, and may be blank while CTA is kept.
+async function verifyFooter(page: Page, media: BBox, cardIndex: number, dbg?: DebugState): Promise<FooterVerify> {
   const adCard = captureAdCard;
   const harvest = await extractCardFooterRaw(page, media, adCard ?? media, captureAdId);
   const dec = decideFooter(harvest, captureAdId, adCard);
-  if (dec.strategy === 'no-safe-footer') {
-    const st: GateDecision = /contamination/.test(dec.contamination) ? 'REJECT' : 'REVIEW';
-    const reason = dec.contamination || 'unverified footer scope';
-    return { cardIndex, strategy: dec.strategy, contamination: dec.contamination, headline: '', headlineStatus: st, headlineReason: reason, description: '', descriptionStatus: st, descriptionReason: reason, cta: dec.cta || '', displayUrl: dec.displayUrl || '', landingUrl: dec.landingUrl || '' };
+  const p = dec.proof;
+
+  const gateField = (value: string, fieldProof: { proven: boolean; foreign: string[]; containerExceedsCard?: boolean }, label: string): { status: GateDecision; reason: string; val: string } => {
+    if (dec.strategy === 'no-safe-footer') {
+      const st: GateDecision = /contamination/.test(dec.contamination) ? 'REJECT' : 'REVIEW';
+      return { status: st, reason: dec.contamination || 'unverified footer scope', val: '' };
+    }
+    if (!value) return { status: 'REVIEW', reason: `no ${label} in verified footer`, val: '' };
+    const cls = classifyMetaText(value, dec.cta, captureBrand);
+    if (cls.decision !== 'ACCEPT') return { status: cls.decision, reason: cls.reason, val: '' };
+    if (!fieldProof.proven) {
+      if (fieldProof.foreign.length) return { status: 'REJECT', reason: `${label} attribution REJECT — selected element shares a container with foreign Library IDs [${fieldProof.foreign.join(', ')}]`, val: '' };
+      if (fieldProof.containerExceedsCard) return { status: 'REVIEW', reason: `${label} attribution unproven — candidate attribution container exceeds ad-card bounds`, val: '' };
+      return { status: 'REVIEW', reason: `${label} attribution unproven — selected element not tied to Library ID ${captureAdId} (targetIdFound=${p.targetIdFound})`, val: '' };
+    }
+    return { status: 'ACCEPT', reason: `${cls.reason}; attribution proven to Library ID ${captureAdId}`, val: value };
+  };
+
+  const hr = gateField(dec.headline, p.headline, 'headline');
+  const dr = gateField(dec.description, p.description, 'description');
+
+  // Field independence: CTA is kept only when the CTA element's OWN attribution is proven.
+  // Display URL and landing URL are NOT gated on CTA success — they were each independently
+  // provenance-gated inside decideFooter (display: own proof or descendant of the proven CTA
+  // container; landing: single eligible URL inside the proven CTA container). Each may be
+  // blank while CTA is kept, and vice-versa.
+  const ctaOk = dec.strategy !== 'no-safe-footer' && p.cta.proven;
+  const cta = ctaOk ? (dec.cta || '') : '';
+  const displayUrl = dec.displayUrl || '';
+  const landingUrl = dec.landingUrl || '';
+
+  if (dbg) {
+    const lab = cardIndex === 1 ? 'ad' : `card-${cardIndex}`;
+    if (harvest.evaluateError) dbg.notes.push(`footer ${lab} page.evaluate error: ${harvest.evaluateError}`);
+    if (harvest.diagError) dbg.notes.push(`footer ${lab} diagnostic error: ${harvest.diagError}`);
+    dbg.notes.push(`attribution ${captureAdId} (${lab}): targetIdFound=${p.targetIdFound} creativeFound=${p.creativeFound} strategy=${dec.strategy}`);
+    dbg.notes.push(`attribution ${captureAdId} headline: el=${p.headline.tag || '(none)'} ${bbStr(p.headline.bbox)} proven=${p.headline.proven} foreign=[${p.headline.foreign.join(', ')}] container=${bbStr(p.headline.container)} containerExceedsCard=${p.headline.containerExceedsCard} → ${hr.status} (${hr.reason})`);
+    if (p.headline.containerExceedsCard) dbg.notes.push(`attribution ${captureAdId} headline: candidate attribution container exceeds ad-card bounds`);
+    dbg.notes.push(`attribution ${captureAdId} description: el=${p.description.tag || '(none)'} ${bbStr(p.description.bbox)} proven=${p.description.proven} foreign=[${p.description.foreign.join(', ')}] container=${bbStr(p.description.container)} containerExceedsCard=${p.description.containerExceedsCard} → ${dr.status} (${dr.reason})`);
+    if (p.description.containerExceedsCard) dbg.notes.push(`attribution ${captureAdId} description: candidate attribution container exceeds ad-card bounds`);
+    dbg.notes.push(`attribution ${captureAdId} cta: source-el=${p.cta.tag || '(none)'} (${p.cta.source}) text="${p.cta.text}" ${bbStr(p.cta.bbox)} anchor=${p.cta.anchorTag || '(none)'} resolvedHref=${p.cta.resolvedHref || '(none)'} proven=${p.cta.proven} foreign=[${p.cta.foreign.join(', ')}] container=${bbStr(p.cta.container)} → ${ctaOk ? 'KEPT' : 'BLANKED'} (cta="${dec.cta || ''}")`);
+    if (p.cta.containerExceedsCard) dbg.notes.push(`attribution ${captureAdId} cta: candidate/CTA attribution container exceeds ad-card bounds`);
+    dbg.notes.push(`attribution ${captureAdId} displayUrl: el=${p.display.tag || '(none)'} ${bbStr(p.display.bbox)} proven=${p.display.proven} inCtaContainer=${p.display.inCtaContainer} foreign=[${p.display.foreign.join(', ')}] container=${bbStr(p.display.container)} containerExceedsCard=${p.display.containerExceedsCard} → ${p.display.kept ? 'KEPT' : 'BLANKED'} (${p.display.reason}; value="${displayUrl}")`);
+    if (p.display.containerExceedsCard) dbg.notes.push(`attribution ${captureAdId} displayUrl: candidate attribution container exceeds ad-card bounds`);
+    dbg.notes.push(`attribution ${captureAdId} landing: source=${p.landing.source} eligible=[${p.landing.candidates.join(' | ')}] container=${bbStr(p.cta.container)} → ${p.landing.kept ? 'KEPT' : 'BLANKED'} (${p.landing.reason}; value="${landingUrl}")`);
+    if (harvest.diag) {
+      const dg = harvest.diag;
+      const cr = dg.creative;
+      dbg.notes.push(`diag ${captureAdId} creative: fromPoint=<${cr.fromPointTag}> ${bbStr(cr.fromPointBBox)} fromPointVisible=${cr.fromPointVisibility.visible} (${cr.fromPointVisibility.reason}${cr.fromPointVisibility.ancestorTag ? ' @' + cr.fromPointVisibility.ancestorTag : ''}) nearestMedia=<${cr.nearestMediaTag}> ${bbStr(cr.nearestMediaBBox)} creativeFound=${cr.creativeNodeFound} creativeVisible=${cr.creativeVisibility.visible} (${cr.creativeVisibility.reason}${cr.creativeVisibility.ancestorTag ? ' @' + cr.creativeVisibility.ancestorTag : ''} ${bbStr(cr.creativeVisibility.ancestorBBox)})`);
+      dbg.notes.push(`diag ${captureAdId} targetId: rawMatches=${dg.targetId.rawMatchCount} insideCard=${dg.targetId.insideCardCount} selected=<${dg.targetId.selectedTag}> ${bbStr(dg.targetId.selectedBBox)}`);
+      for (const c of dg.targetId.candidates) dbg.notes.push(`diag ${captureAdId} targetId-cand: <${c.tag}> "${c.textPreview}" ${bbStr(c.bbox)} visible=${c.visible} reason=${c.rejectReason}${c.rejectAncestorTag ? ' @' + c.rejectAncestorTag : ''}`);
+      dbg.notes.push(`diag ${captureAdId} cta: selected=<${dg.cta.selectedTag}> text="${dg.cta.selectedText}" ${bbStr(dg.cta.selectedBBox)} phraseCandidates=${dg.cta.phraseCandidates.length}`);
+      for (const c of dg.cta.phraseCandidates) dbg.notes.push(`diag ${captureAdId} cta-cand: <${c.tag}> "${c.text}" ${bbStr(c.bbox)} inCard=${c.inCard} belowCreative=${c.belowCreative} visible=${c.visible} reason=${c.rejectReason}`);
+      dbg.notes.push(`diag ${captureAdId} footer-result: ${dg.failReason}`);
+    }
   }
-  const hCls = dec.headline ? classifyMetaText(dec.headline, dec.cta, captureBrand) : { decision: 'REVIEW' as GateDecision, reason: 'no headline in verified footer' };
-  const dCls = dec.description ? classifyMetaText(dec.description, dec.cta, captureBrand) : { decision: 'REVIEW' as GateDecision, reason: 'no description in verified footer' };
-  return { cardIndex, strategy: dec.strategy, contamination: '', headline: hCls.decision === 'ACCEPT' ? dec.headline : '', headlineStatus: hCls.decision, headlineReason: hCls.reason, description: dCls.decision === 'ACCEPT' ? dec.description : '', descriptionStatus: dCls.decision, descriptionReason: dCls.reason, cta: dec.cta || '', displayUrl: dec.displayUrl || '', landingUrl: dec.landingUrl || '' };
+
+  return {
+    cardIndex, strategy: dec.strategy, contamination: dec.contamination,
+    headline: hr.val, headlineStatus: hr.status, headlineReason: hr.reason,
+    description: dr.val, descriptionStatus: dr.status, descriptionReason: dr.reason,
+    cta, displayUrl, landingUrl,
+  };
 }
 
 // Pure ad-level decision for a single (static/video) footer. When the exact-ad Library ID
@@ -2353,34 +2733,28 @@ async function verifyFooter(page: Page, media: BBox, cardIndex: number): Promise
 // headline, description AND context (cta/display/landing) — are blanked. The ad-level
 // verified sidecar never carries context from an unverified footer root.
 function decideAdLevelSingle(
-  gate: { ok: boolean; status: GateDecision; reason: string }, fv: FooterVerify,
+  fv: FooterVerify,
 ): { hVal: string; hStatus: GateDecision; hReason: string; dVal: string; dStatus: GateDecision; dReason: string; cta: string; displayUrl: string; landingUrl: string; reason: string } {
-  if (!gate.ok) {
-    return { hVal: '', hStatus: gate.status, hReason: gate.reason, dVal: '', dStatus: gate.status, dReason: gate.reason, cta: '', displayUrl: '', landingUrl: '', reason: `single-footer; ALL ad-level metadata (incl. CTA/display/landing) blanked — exact Library ID unverified: ${gate.reason}` };
-  }
-  if (fv.strategy === 'no-safe-footer') {
-    return { hVal: '', hStatus: fv.headlineStatus, hReason: fv.headlineReason, dVal: '', dStatus: fv.descriptionStatus, dReason: fv.descriptionReason, cta: '', displayUrl: '', landingUrl: '', reason: `single-footer; context blanked — unverified footer scope (${fv.contamination || 'no-safe-footer'})` };
-  }
-  return { hVal: fv.headlineStatus === 'ACCEPT' ? fv.headline : '', hStatus: fv.headlineStatus, hReason: fv.headlineReason, dVal: fv.descriptionStatus === 'ACCEPT' ? fv.description : '', dStatus: fv.descriptionStatus, dReason: fv.descriptionReason, cta: fv.cta, displayUrl: fv.displayUrl, landingUrl: fv.landingUrl, reason: `single-footer; ${gate.reason}` };
+  // Per-field attribution + context gating already applied in verifyFooter. Each field is
+  // independent; CTA/display/landing are already blanked unless the CTA element was proven.
+  return { hVal: fv.headlineStatus === 'ACCEPT' ? fv.headline : '', hStatus: fv.headlineStatus, hReason: fv.headlineReason, dVal: fv.descriptionStatus === 'ACCEPT' ? fv.description : '', dStatus: fv.descriptionStatus, dReason: fv.descriptionReason, cta: fv.cta, displayUrl: fv.displayUrl, landingUrl: fv.landingUrl, reason: `single-footer; per-field attribution; ${fv.strategy}` };
 }
 
 // Static-image / video: ONE individually verified footer for the whole ad (per-field).
 async function recordVerifiedAdMeta(page: Page, media: BBox, dbg: DebugState): Promise<void> {
-  const gate = await adCardLibraryGate(page);
-  const fv = await verifyFooter(page, media, 1);
-  const r = decideAdLevelSingle(gate, fv);
+  const fv = await verifyFooter(page, media, 1, dbg);
+  const r = decideAdLevelSingle(fv);
   pushVerifiedRow(captureAdId, r.hVal, r.hStatus, r.hReason, r.dVal, r.dStatus, r.dReason, r.cta, r.displayUrl, r.landingUrl, fv.strategy, dbg, r.reason);
 }
 
 // Carousel: accept an ad-level field ONLY when proven shared across EVERY captured card.
 async function recordVerifiedCarouselMeta(page: Page, dbg: DebugState): Promise<void> {
-  const gate = await adCardLibraryGate(page);
   const cards = carouselVerifiedResults.slice();
-  const h = combineCarouselField(cards, 'headline', gate);
-  const d = combineCarouselField(cards, 'description', gate);
-  const ctx = combineCarouselContext(cards, gate);
+  const h = combineCarouselField(cards, 'headline');
+  const d = combineCarouselField(cards, 'description');
+  const ctx = combineCarouselContext(cards);
   const strategy = cards.length ? `carousel-x${cards.length}(${cards[0]!.strategy})` : 'carousel(no-cards)';
-  const reason = `carousel; captured ${cards.length} card(s)${ctx.note ? `; ${ctx.note}` : ''}; ${gate.reason}`;
+  const reason = `carousel; captured ${cards.length} card(s)${ctx.note ? `; ${ctx.note}` : ''}; per-field attribution`;
   pushVerifiedRow(captureAdId, h.value, h.status, h.reason, d.value, d.status, d.reason, ctx.cta, ctx.displayUrl, ctx.landingUrl, strategy, dbg, reason);
 }
 
@@ -2417,7 +2791,7 @@ async function recordCard(page: Page, crop: BBox, cardIndex: number, assetFp: st
     strategy = 'carousel-column';
     // Ad-level verified-footer evidence for THIS carousel card; combined later across
     // ALL captured cards into one ad-level verified-meta row (never per card).
-    carouselVerifiedResults.push(await verifyFooter(page, crop, cardIndex));
+    carouselVerifiedResults.push(await verifyFooter(page, crop, cardIndex, dbg));
   }
   const asset_path = path.relative(process.cwd(), assetFp).replace(/\\/g, '/');
   cardRows.push({
