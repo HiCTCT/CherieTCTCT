@@ -58,6 +58,7 @@ type BrowserObservation = {
   metaActiveStatus: string; // discovery-log observed_active_status ('' for CSV / none)
   metaAdType: string;       // discovery-log observed_ad_type ('' for CSV / none)
   metaObservedCountry: string; // discovery-log observed_country — the final-URL country used for eligibility
+  canonicalEmptyActiveScope: boolean; // discovery-log canonical_empty_active_scope_proven (scoped-empty success)
 };
 
 function parseCompetitors(): CompetitorInput[] {
@@ -96,12 +97,13 @@ function findDiscoveryLog(pageId: string): BrowserObservation | null {
     const metaActiveStatus = String(log.observed_active_status ?? '');
     const metaAdType = String(log.observed_ad_type ?? '');
     const metaObservedCountry = String(log.observed_country ?? '');
+    const canonicalEmptyActiveScope = log.canonical_empty_active_scope_proven === true;
     let key = 0;
     const ca = Date.parse(String(log.completed_at ?? ''));
     if (!Number.isNaN(ca)) key = ca;
     else { try { key = fs.statSync(full).mtimeMs; } catch { key = 0; } }
     if (!best || key > best.key) {
-      best = { key, obs: { count, status, source: path.basename(full), kind: 'discovery-log', metaPageId: pageId, metaCountry, stopCondition, capped, scopeConfirmed, metaActiveStatus, metaAdType, metaObservedCountry } };
+      best = { key, obs: { count, status, source: path.basename(full), kind: 'discovery-log', metaPageId: pageId, metaCountry, stopCondition, capped, scopeConfirmed, metaActiveStatus, metaAdType, metaObservedCountry, canonicalEmptyActiveScope } };
     }
   }
   return best ? best.obs : null;
@@ -129,7 +131,7 @@ function findCsvDistinctCount(pageId: string): BrowserObservation | null {
     let mtime = 0; try { mtime = fs.statSync(full).mtimeMs; } catch { mtime = 0; }
     if (best && mtime <= best.mtime) continue;   // keep the newest valid matching CSV
     const ids = new Set(matching.map((r) => (r.ad_id ?? '').trim()).filter(Boolean));
-    best = { mtime, obs: { count: ids.size, status: 'CSV_DISTINCT_AD_IDS', source: f, kind: 'csv', metaPageId: pageId, metaCountry: '', stopCondition: '', capped: false, scopeConfirmed: false, metaActiveStatus: '', metaAdType: '', metaObservedCountry: '' } };
+    best = { mtime, obs: { count: ids.size, status: 'CSV_DISTINCT_AD_IDS', source: f, kind: 'csv', metaPageId: pageId, metaCountry: '', stopCondition: '', capped: false, scopeConfirmed: false, metaActiveStatus: '', metaAdType: '', metaObservedCountry: '', canonicalEmptyActiveScope: false } };
   }
   return best ? best.obs : null;
 }
@@ -137,7 +139,7 @@ function findCsvDistinctCount(pageId: string): BrowserObservation | null {
 function getBrowserObservation(pageId: string): BrowserObservation {
   return findDiscoveryLog(pageId)
     ?? findCsvDistinctCount(pageId)
-    ?? { count: null, status: 'NO_BROWSER_OBSERVATION', source: '(none found)', kind: 'none', metaPageId: '', metaCountry: '', stopCondition: '', capped: false, scopeConfirmed: false, metaActiveStatus: '', metaAdType: '', metaObservedCountry: '' };
+    ?? { count: null, status: 'NO_BROWSER_OBSERVATION', source: '(none found)', kind: 'none', metaPageId: '', metaCountry: '', stopCondition: '', capped: false, scopeConfirmed: false, metaActiveStatus: '', metaAdType: '', metaObservedCountry: '', canonicalEmptyActiveScope: false };
 }
 
 // Decide whether a browser observation is eligible for an OFFICIAL count comparison.
@@ -165,7 +167,7 @@ function eligibility(b: BrowserObservation, pageId: string, country: string): st
   // the canonical active/all scope — otherwise the two views are not the same ad set.
   if (b.metaActiveStatus.toLowerCase() !== 'active' || b.metaAdType.toLowerCase() !== 'all') return 'INELIGIBLE_SCOPE_MISMATCH';
   if (API_ACTIVE_STATUS !== 'ACTIVE' || API_AD_TYPE !== 'ALL') return 'INELIGIBLE_SCOPE_MISMATCH';
-  if (b.stopCondition !== 'no_growth_limit' && b.stopCondition !== 'confirmed_no_active_ads') return 'INELIGIBLE_BROWSER_INCOMPLETE';
+  if (b.stopCondition !== 'no_growth_limit' && b.stopCondition !== 'confirmed_no_active_ads' && b.stopCondition !== 'confirmed_canonical_empty_active_scope') return 'INELIGIBLE_BROWSER_INCOMPLETE';
   return 'COMPARED';
 }
 
@@ -237,6 +239,14 @@ async function main(): Promise<void> {
     }
     const countDifference: number | null =
       (eligible && browser.count !== null && api.count !== null) ? browser.count - api.count : null;
+    // Scoped-empty observation: an eligible browser ZERO proven via the canonical empty-results
+    // container. count_difference (0 − API) is a DISCREPANCY SIGNAL only, never an inventory verdict.
+    const browserCanonicalEmptyActiveScope = browser.canonicalEmptyActiveScope === true;
+    const comparisonObservationKind = (eligible && browserCanonicalEmptyActiveScope && browser.count === 0)
+      ? 'CANONICAL_ACTIVE_SCOPE_EMPTY' : 'STANDARD';
+    const comparisonNote = comparisonObservationKind === 'CANONICAL_ACTIVE_SCOPE_EMPTY'
+      ? 'Browser observed zero ads within the exact canonical active/all/country scope. This is a scoped observation, not an advertiser inventory verdict.'
+      : '';
 
     console.log(`\n  ${c.name}  (page ${c.pageId})`);
     console.log(`    Browser observed count: ${browser.count ?? 'n/a'}  [from ${browser.source}, ${browser.kind}]`);
@@ -268,6 +278,9 @@ async function main(): Promise<void> {
       eligible_for_official_comparison: eligible,
       count_difference: eligible ? countDifference : null,   // null whenever ineligible
       comparison_status: comparisonStatus,
+      browser_canonical_empty_active_scope: browserCanonicalEmptyActiveScope,
+      comparison_observation_kind: comparisonObservationKind,
+      comparison_note: comparisonNote || null,
     });
   }
 

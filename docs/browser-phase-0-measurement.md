@@ -63,7 +63,7 @@ generic failure**: (1) `BLOCKED_DISCOVERY`, (2) `FAILED_DISCOVERY`,
 | `BLOCKED_DISCOVERY` | A challenge / login wall / CAPTCHA / rate-limit / security-check / unexpected interstitial was detected (the matched signal is recorded). Found IDs are preserved; the run is not treated as complete. **Always wins over failure.** |
 | `FAILED_DISCOVERY` | The listing never loaded or an unexpected error threw, **and** zero IDs were discovered. |
 | `PARTIAL_DISCOVERY` | Reaching the **`MAX_ADS` cap is ALWAYS partial** (a deliberate cap is never a complete count; `capped=true`, stop condition `max_ads_cap`), **or** some IDs found but the run did not finish cleanly (error after IDs, or the `MAX_SCROLLS` budget ran out while still growing). Never an official complete browser count. |
-| `SUCCESSFUL_DISCOVERY` | Either **(a) non-empty**: **observed final-URL canonical scope confirmed** (resolved URL whose path is **exactly** `/ads/library` (or `/ads/library/`) with each of `view_all_page_id`, `country`, `active_status=active`, `ad_type=all` present **exactly once**, optional Meta UI-default params allowed **only at their exact approved values**, and **no narrowing/unknown/duplicate params**), no blocker, no error, **not capped**, stable no-growth completion via stop condition `no_growth_limit`; or **(b) confirmed no-active-ads**: a **visible, explicit Meta page/advertiser "is not running ads" statement** detected (`no_active_ads_proven`, recorded with the matched approved phrase + element tag/box only), zero IDs, canonical scope confirmed, no blocker, no error, ended via stop condition `confirmed_no_active_ads`. |
+| `SUCCESSFUL_DISCOVERY` | Either **(a) non-empty**: **observed final-URL canonical scope confirmed** (resolved URL whose path is **exactly** `/ads/library` (or `/ads/library/`) with each of `view_all_page_id`, `country`, `active_status=active`, `ad_type=all` present **exactly once**, optional Meta UI-default params allowed **only at their exact approved values**, and **no narrowing/unknown/duplicate params**), no blocker, no error, **not capped**, stable no-growth completion via stop condition `no_growth_limit`; or **(b) confirmed no-active-ads**: a **visible, explicit Meta page/advertiser "is not running ads" statement** detected (`no_active_ads_proven`, recorded with the matched approved phrase + element tag/box only), zero IDs, canonical scope confirmed, no blocker, no error, ended via stop condition `confirmed_no_active_ads`; or **(c) canonical empty active-scope**: under confirmed canonical scope, zero IDs, no blocker/error, **not capped**, a **single shared visible empty-results container** proves `No ads match your search criteria` + `Remove or adjust any filters you've applied to get different results.` + a visible `Clear Filters` control (`canonical_empty_active_scope_proven`; `no_active_ads_proven` stays **false**), ended via stop condition `confirmed_canonical_empty_active_scope` — meaning zero ads **within that exact scope only**, never an inventory verdict. |
 | `INCOMPLETE_DISCOVERY` | Zero IDs **without** the explicit no-active-ads evidence above — ambiguous (no clear ad-card or no-results signal). |
 
 **Scope confirmation means the observed final browser scope, not configured inputs.**
@@ -128,10 +128,29 @@ no-active-ads evidence: canonical scope proof first, zero IDs, no blocker/error,
 (e.g. "this page isn't running ads", "this advertiser is not running ads"). The matched
 element and every ancestor to the document root must be visible (no `display:none`,
 `visibility:hidden`/`collapse`, `opacity:0`, `aria-hidden="true"`) and the element must have
-a non-zero box. Generic messages — `no ads match`, `no ads found`, `no ads to show`,
-`no results found for this search`, bare `0 results` / `no results` — are **not** accepted.
-Only the matched approved phrase, tag, and box are logged. Absent that explicit visible
-evidence, zero IDs stay `INCOMPLETE_DISCOVERY`.
+a non-zero box. Generic messages — `no ads found`, `no ads to show`,
+`no results found for this search`, bare `0 results` / `no results` — are **not** accepted as
+advertiser-no-ads proof. Only the matched approved phrase, tag, and box are logged.
+
+A **separate, scope-limited** success exists for Meta's *empty-results* state — stop condition
+`confirmed_canonical_empty_active_scope`, flag `canonical_empty_active_scope_proven`. It means
+**"Meta showed zero ads within this exact canonical active/all/country scope"** and is **never** a
+claim that the advertiser has no ads at all (other countries, inactive history, or any other
+scope). It requires, under already-confirmed canonical scope and zero IDs with no blocker/error
+and **not capped**, a **single shared visible empty-results container** that proves all three:
+the exact direct text `No ads match your search criteria`, the exact direct text `Remove or
+adjust any filters you've applied to get different results.`, and a visible control with direct
+text `Clear Filters`. The three must share a **real lowest common visible ancestor** (never
+`body`/`html`) with a non-zero box; that container, every matched element, and every ancestor to
+the document root must pass the visibility rules; and the `Clear Filters` control must be inside
+that same container. Generic page-wide text containing `No ads match your search criteria` is
+**insufficient** unless the complete shared container is proven. `no_active_ads_proven` stays
+`false` on this path, and only labels (`no_ads_match`, `remove_or_adjust_filters`,
+`clear_filters_control`, `shared_empty_results_container`), element tags, and bounding boxes are
+logged — never raw phrases, page text, URLs, or filter values.
+
+Absent **either** the advertiser-no-ads proof **or** the canonical empty-results proof, zero IDs
+stay `zero_cards` / `INCOMPLETE_DISCOVERY`.
 
 The challenge/block detector is conservative and text-signal only. When it fires,
 the run is **always** classified `BLOCKED_DISCOVERY` — **even where Library IDs were

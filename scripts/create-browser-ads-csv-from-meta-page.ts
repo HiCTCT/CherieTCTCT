@@ -133,6 +133,7 @@ type StopCondition =
   | 'max_scrolls_exhausted'
   | 'zero_cards'
   | 'confirmed_no_active_ads'
+  | 'confirmed_canonical_empty_active_scope'
   | 'none';
 
 type AdInfo = { mediaType: string; startDate: string; copy: string; headline: string; landing: string };
@@ -358,6 +359,80 @@ async function detectNoActiveAds(page: Page): Promise<{ proven: boolean; phrase:
   }
 }
 
+// DISTINCT scoped-empty proof. Proves Meta's shared EMPTY-RESULTS container — "No ads match
+// your search criteria" + "Remove or adjust any filters you've applied to get different
+// results." + a visible "Clear Filters" control — sharing a real lowest common visible
+// ancestor (never body/html). This means "zero ads within THIS exact canonical scope", NEVER
+// "the advertiser has no ads at all". Direct text only (no page-wide matching); whitespace +
+// straight/curly apostrophes normalised. Inline-only evaluate (anonymous IIFE helpers) to
+// avoid the tsx/esbuild __name injection. Returns labels + tags + boxes only.
+async function detectCanonicalEmptyResults(page: Page): Promise<{ proven: boolean; signal: string; evidence: { label: string; tag: string; bbox: { x: number; y: number; width: number; height: number } | null }[] }> {
+  try {
+    return await page.evaluate(() => {
+      const visibleAndBoxed = (function () {
+        return function (el: Element | null): boolean {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          if (!r.width || !r.height) return false;
+          let node: Element | null = el;
+          while (node) {
+            if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') return false;
+            const cs = window.getComputedStyle(node);
+            if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse' || parseFloat(cs.opacity || '1') === 0)) return false;
+            node = node.parentElement;
+          }
+          return true;
+        };
+      })();
+      const directNorm = (function () {
+        return function (el: Element): string {
+          let d = '';
+          for (const n of Array.from(el.childNodes)) if (n.nodeType === 3) d += n.textContent || '';
+          return d.replace(/\s+/g, ' ').trim().replace(/[‘’]/g, "'");
+        };
+      })();
+      const boxOf = (function () {
+        return function (el: Element): { x: number; y: number; width: number; height: number } {
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, width: r.width, height: r.height };
+        };
+      })();
+      const T_NO_ADS = 'no ads match your search criteria';
+      const T_REMOVE = "remove or adjust any filters you've applied to get different results.";
+      const T_CLEAR = 'clear filters';
+      let elNoAds: Element | null = null; let elRemove: Element | null = null; let elClear: Element | null = null;
+      for (const el of Array.from(document.querySelectorAll('div, span, a, button, [role="button"]'))) {
+        const low = directNorm(el).toLowerCase();
+        if (!low || low.length > 200) continue;
+        if (!elNoAds && low === T_NO_ADS && visibleAndBoxed(el)) { elNoAds = el; continue; }
+        if (!elRemove && low === T_REMOVE && visibleAndBoxed(el)) { elRemove = el; continue; }
+        if (!elClear && low === T_CLEAR && visibleAndBoxed(el)) { elClear = el; continue; }
+      }
+      if (!elNoAds || !elRemove || !elClear) return { proven: false, signal: 'one or more required empty-results elements missing or not visible', evidence: [] };
+      // Lowest common visible ancestor that contains all three (deepest first from elNoAds).
+      let container: Element | null = null;
+      let anc: Element | null = elNoAds;
+      while (anc) {
+        if (anc.contains(elRemove) && anc.contains(elClear)) { container = anc; break; }
+        anc = anc.parentElement;
+      }
+      if (!container) return { proven: false, signal: 'no shared container contains all three empty-results elements', evidence: [] };
+      const ctag = container.tagName ? container.tagName.toLowerCase() : '';
+      if (ctag === 'body' || ctag === 'html') return { proven: false, signal: 'shared container is body/html — not a specific empty-results container', evidence: [] };
+      if (!visibleAndBoxed(container)) return { proven: false, signal: 'shared empty-results container failed visibility/box check', evidence: [] };
+      const evidence = [
+        { label: 'no_ads_match', tag: elNoAds.tagName.toLowerCase(), bbox: boxOf(elNoAds) },
+        { label: 'remove_or_adjust_filters', tag: elRemove.tagName.toLowerCase(), bbox: boxOf(elRemove) },
+        { label: 'clear_filters_control', tag: elClear.tagName.toLowerCase(), bbox: boxOf(elClear) },
+        { label: 'shared_empty_results_container', tag: ctag, bbox: boxOf(container) },
+      ];
+      return { proven: true, signal: 'visible shared empty-results container proven (no-ads-match + remove-or-adjust-filters + clear-filters control)', evidence };
+    });
+  } catch {
+    return { proven: false, signal: 'canonical-empty detector error', evidence: [] };
+  }
+}
+
 // ─── Phase 0: discovery-run-log shape + classifier + writer ───────────────────
 
 type DiscoveryRunLog = {
@@ -396,6 +471,9 @@ type DiscoveryRunLog = {
   capped: boolean;                      // MAX_ADS cap hit — always implies PARTIAL, never complete
   no_active_ads_proven: boolean;        // a VISIBLE explicit Meta no-active-ads statement was detected
   no_active_ads_signal: string;         // short audit signal (matched phrase / element) for that proof
+  canonical_empty_active_scope_proven: boolean;   // zero ads within THIS exact canonical scope (NOT a global no-ads claim)
+  canonical_empty_active_scope_signal: string;    // short audit signal for that proof
+  canonical_empty_active_scope_evidence: { label: string; tag: string; bbox: { x: number; y: number; width: number; height: number } | null }[]; // labels + tags + boxes only
   scope_confirmed: boolean;             // proven from the FINAL resolved Ad Library URL (not env/input)
   expected_page_id: string;             // the requested META_PAGE_ID
   observed_page_id: string;             // view_all_page_id parsed from the final resolved URL
@@ -429,6 +507,7 @@ function classifyDiscovery(ev: {
   errorOccurred: boolean;
   capped: boolean;
   noActiveAdsProven: boolean;
+  canonicalEmptyActiveScopeProven: boolean;
   stopCondition: StopCondition;
   stopConditionReached: boolean;
 }): DiscoveryStatus {
@@ -458,6 +537,14 @@ function classifyDiscovery(ev: {
   if (ev.discoveredCount === 0 && ev.noActiveAdsProven && ev.pageLoaded && ev.scopeConfirmed &&
       !ev.challengeDetected && !ev.errorOccurred && ev.stopConditionReached &&
       ev.stopCondition === 'confirmed_no_active_ads') {
+    return 'SUCCESSFUL_DISCOVERY';
+  }
+  // 4c. Successful CONFIRMED CANONICAL EMPTY ACTIVE SCOPE: zero IDs within the exact canonical
+  //     active/all/country scope, proven via the shared visible empty-results container. This is
+  //     scope-limited; no_active_ads_proven stays false. Distinct from 4b — never a global claim.
+  if (ev.discoveredCount === 0 && ev.canonicalEmptyActiveScopeProven && !ev.noActiveAdsProven &&
+      ev.pageLoaded && ev.scopeConfirmed && !ev.challengeDetected && !ev.errorOccurred && !ev.capped &&
+      ev.stopConditionReached && ev.stopCondition === 'confirmed_canonical_empty_active_scope') {
     return 'SUCCESSFUL_DISCOVERY';
   }
   // 5. Zero IDs without sufficient evidence → ambiguous / incomplete.
@@ -681,6 +768,9 @@ async function main(): Promise<void> {
   let observedMetaUiParamValues: { name: string; count: number; values: string[] }[] | undefined = undefined; // diagnostic only (PHASE0_SCOPE_PROBE)
   let scopeReason = 'scope not evaluated';
   let noActiveAdsSignal = '';         // short audit signal for the confirmed-no-active-ads check
+  let canonicalEmptyActiveScopeProven = false; // scoped-empty success: zero ads within the exact canonical active/all/country scope
+  let canonicalEmptyActiveScopeSignal = '';
+  let canonicalEmptyEvidence: { label: string; tag: string; bbox: { x: number; y: number; width: number; height: number } | null }[] = [];
   const noteChallenge = (where: string, res: { blocked: boolean; signal: string }) => {
     if (res.blocked && !challengeDetected) {
       challengeDetected = true;
@@ -928,8 +1018,19 @@ async function main(): Promise<void> {
           stopCondition = 'confirmed_no_active_ads'; stopConditionReached = true;
           stopConditionNote = `confirmed no active ads — ${na.signal}` + (na.bbox ? ` [<${na.tag}> ${Math.round(na.bbox.width)}x${Math.round(na.bbox.height)}@(${Math.round(na.bbox.x)},${Math.round(na.bbox.y)})]` : '');
         } else {
-          stopCondition = 'zero_cards'; stopConditionReached = false;
-          stopConditionNote = `zero Library IDs and ${na.signal} — ambiguous (INCOMPLETE)`;
+          // Distinct scoped-empty success (no_active_ads_proven stays FALSE): Meta's shared empty-
+          // results container. NEVER a global advertiser-no-ads claim.
+          const ce = await detectCanonicalEmptyResults(page);
+          canonicalEmptyActiveScopeProven = ce.proven;
+          canonicalEmptyActiveScopeSignal = ce.signal;
+          canonicalEmptyEvidence = ce.evidence;
+          if (ce.proven) {
+            stopCondition = 'confirmed_canonical_empty_active_scope'; stopConditionReached = true;
+            stopConditionNote = 'Zero results within the exact canonical active-ads scope only. This is not a claim that the advertiser has no ads in other countries, inactive history, or any other scope.';
+          } else {
+            stopCondition = 'zero_cards'; stopConditionReached = false;
+            stopConditionNote = `zero Library IDs and ${na.signal}; ${ce.signal} — ambiguous (INCOMPLETE)`;
+          }
         }
       } else {
         noActiveAdsSignal = 'scope not confirmed — no-active-ads not evaluated';
@@ -1061,6 +1162,7 @@ async function main(): Promise<void> {
     errorOccurred: errorSummary !== '',
     capped,
     noActiveAdsProven,
+    canonicalEmptyActiveScopeProven,
     stopCondition,
     stopConditionReached,
   });
@@ -1098,6 +1200,9 @@ async function main(): Promise<void> {
     capped,
     no_active_ads_proven: noActiveAdsProven,
     no_active_ads_signal: noActiveAdsSignal,
+    canonical_empty_active_scope_proven: canonicalEmptyActiveScopeProven,
+    canonical_empty_active_scope_signal: canonicalEmptyActiveScopeSignal,
+    canonical_empty_active_scope_evidence: canonicalEmptyEvidence,
     scope_confirmed: scopeConfirmed,
     expected_page_id: pageId,
     observed_page_id: observedPageId,
