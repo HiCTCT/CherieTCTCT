@@ -717,50 +717,58 @@ function cleanGeneratedAssets(dir: string): void {
 // ─── Active-ad detection ──────────────────────────────────────────────────────
 
 /**
- * Phrases that definitively indicate the ad is unavailable or has ended.
- * Kept specific to avoid false positives on ad copy text.
+ * EXPLICIT, AD-SPECIFIC end-state phrases — each directly states that the TARGET ad
+ * is no longer available / running / active, has ended, or is not in the Ad Library.
+ * ONLY these produce an UNAVAILABLE output status.
+ *
+ * Deliberately EXCLUDED (must NEVER mark an ad UNAVAILABLE): generic technical-error
+ * and navigation strings such as "something went wrong" and "page not found", and
+ * generic non-ad-specific "content unavailable" messages. Those are not ad end-state
+ * evidence — a temporary Meta/browser failure must not look like an ended ad. They
+ * fall through to the generic NEEDS_REVIEW path instead.
  */
 const INACTIVE_PHRASES: string[] = [
   'this ad is no longer available',
   'this ad is no longer running',
-  "this content isn't available",
-  'this content is unavailable',
   'we could not find this ad',
   'ad is no longer active',
   'this ad has ended',
   "ad isn't in the ad library",   // Meta empty-state: ad removed / not yet in library
   'ad is not in the ad library',  // alternate phrasing
-  'something went wrong',
-  'page not found',
 ];
 
 /**
  * After page load, returns whether the ad appears to still be running.
  * A missing creative (no CDN images, no video) is treated as inactive.
  */
-async function checkAdActive(page: Page): Promise<{ active: boolean; reason: string }> {
+// `positiveInactive` is true ONLY for an explicit, definitive unavailable/inactive
+// signal (a matched INACTIVE_PHRASE). A missing creative or an unreadable page are
+// NOT positive signals — they stay `positiveInactive: false` so they are never
+// mislabelled UNAVAILABLE downstream.
+async function checkAdActive(page: Page): Promise<{ active: boolean; positiveInactive: boolean; reason: string }> {
   let bodyText = '';
   try {
     bodyText = (await page.innerText('body')).toLowerCase();
   } catch {
-    return { active: false, reason: 'could not read page text' };
+    return { active: false, positiveInactive: false, reason: 'could not read page text' };
   }
 
   for (const phrase of INACTIVE_PHRASES) {
     if (bodyText.includes(phrase)) {
-      return { active: false, reason: `page contains: "${phrase}"` };
+      return { active: false, positiveInactive: true, reason: `page contains: "${phrase}"` };
     }
   }
 
-  // If no CDN media at all, assume the ad is unavailable
+  // If no CDN media at all, assume the ad is unavailable. This is an INFERENCE,
+  // not a positive detection, so positiveInactive stays false.
   const hasMedia = !!(
     await page.$('img[src*="scontent"], img[src*="fbcdn.net"], video')
   );
   if (!hasMedia) {
-    return { active: false, reason: 'no creative media found on page' };
+    return { active: false, positiveInactive: false, reason: 'no creative media found on page' };
   }
 
-  return { active: true, reason: 'active' };
+  return { active: true, positiveInactive: false, reason: 'active' };
 }
 
 // ─── Page helpers ─────────────────────────────────────────────────────────────
@@ -3025,6 +3033,8 @@ async function main(): Promise<void> {
 
     if (!url) {
       console.log('    ❌ ad_library_url is blank — skipping');
+      // Generic data failure — ad state cannot be established. Not UNAVAILABLE.
+      row.collection_status = 'NEEDS_REVIEW';
       failed++;
       continue;
     }
@@ -3076,7 +3086,18 @@ async function main(): Promise<void> {
       console.log(`    active status: ${activeCheck.active ? 'ACTIVE' : 'INACTIVE'} — ${activeCheck.reason}`);
 
       if (!activeCheck.active) {
-        console.log('    SKIPPED — ad not active or unavailable');
+        // UNAVAILABLE only on POSITIVE, ad-specific end-state evidence (a matched
+        // INACTIVE_PHRASE). Any other inactive reason (no creative media, unreadable
+        // page) is a generic failure where the ad state cannot be safely established:
+        // mark NEEDS_REVIEW so the row is NOT left READY (and so cannot be ingested as
+        // ACTIVE) — but is NOT called UNAVAILABLE. Never touches the input CSV.
+        if (activeCheck.positiveInactive) {
+          row.collection_status = 'UNAVAILABLE';
+          console.log('    SKIPPED — positively detected UNAVAILABLE (output row marked UNAVAILABLE)');
+        } else {
+          row.collection_status = 'NEEDS_REVIEW';
+          console.log('    SKIPPED — ad state not establishable (output row marked NEEDS_REVIEW)');
+        }
         inactive++;
         await page.close();
         continue;
@@ -3098,6 +3119,8 @@ async function main(): Promise<void> {
         dbg.stopReason = 'ad card not found';
         await saveDebugInfo(page, adId, outDir, dbg);
         console.log('    SKIPPED — could not identify modal creative container');
+        // Generic creative-resolution failure — ad state not establishable. Not UNAVAILABLE.
+        row.collection_status = 'NEEDS_REVIEW';
         noContainer++;
         await page.close();
         continue;
@@ -3120,6 +3143,8 @@ async function main(): Promise<void> {
           ? 'SKIPPED — carousel creative area too small or uncertain'
           : `SKIPPED — could not identify real creative media inside modal (${mt || 'unknown'})`;
         console.log(`    ${skipMsg}`);
+        // Generic creative-resolution failure — ad state not establishable. Not UNAVAILABLE.
+        row.collection_status = 'NEEDS_REVIEW';
         noContainer++;
         await page.close();
         continue;
@@ -3146,6 +3171,8 @@ async function main(): Promise<void> {
         dbg.stopReason = dbg.stopReason || 'no real creative asset saved';
         await saveDebugInfo(page, adId, outDir, dbg);
         console.log('    SKIPPED — could not identify real creative media inside modal');
+        // Generic extraction failure — no asset saved, ad state not establishable. Not UNAVAILABLE.
+        row.collection_status = 'NEEDS_REVIEW';
         qualitySkipped++;
         await page.close();
         continue;
@@ -3184,6 +3211,9 @@ async function main(): Promise<void> {
       const msg   = err instanceof Error ? err.message : String(err);
       const short = msg.replace(/\n/g, ' ').slice(0, 140);
       console.log(`    ❌ Capture failed: ${short}`);
+      // Generic capture error (nav/timeout/extraction) — ad state not establishable.
+      // Mark NEEDS_REVIEW so the row is not left READY; never UNAVAILABLE.
+      row.collection_status = 'NEEDS_REVIEW';
       // Persist debug info on failure too, so failed rows are diagnosable.
       dbg.stopReason = dbg.stopReason || `capture error: ${short}`;
       dbg.notes.push(`ERROR: ${short}`);
