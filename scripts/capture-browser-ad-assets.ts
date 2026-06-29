@@ -3197,7 +3197,15 @@ async function main(): Promise<void> {
   await browser.close();
 
   const outputFile = outputCsvPath(inputFile);
-  fs.writeFileSync(outputFile, serializeCsv(headers, rows), 'utf-8');
+  // SAFETY (data rule #1): the raw browser-listing `headline` / `description` are
+  // UNSCOPED listing text and must never be propagated. Force them blank in the
+  // .with-assets.csv output regardless of any value a legacy input CSV may carry.
+  // This blanks ONLY the serialized output copies — it does not mutate the source
+  // rows and does not touch the verified extraction (.verified-meta.csv), the
+  // per-card .cards.csv / .cards.audit.csv, the no-clobber merge, creative_asset_path,
+  // ad_id, ad_copy, landing_page_url, CTA, or any other column.
+  const outputRows = rows.map((r) => ({ ...r, headline: '', description: '' }));
+  fs.writeFileSync(outputFile, serializeCsv(headers, outputRows), 'utf-8');
 
   // H.3b: write per-card metadata sidecar (CSV only — NO DB writes). First blank
   // any metadata repeated across visually-distinct cards, to avoid false attribution.
