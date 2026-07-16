@@ -62,7 +62,17 @@ type ContentBlock = ImageBlock | TextBlock;
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5';
 const MAX_TOKENS = 1024;
-const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+// Only the capture script's INTENDED creative outputs are eligible for Vision:
+//   IMAGE → image-NN.ext,  CAROUSEL → card-NN.ext,  VIDEO → frame-NN.ext.
+// Everything else in an asset folder — debug/audit/diagnostic/full-page/modal/
+// selected-creative/screenshot/raw/temp/support output (e.g. debug-*.png,
+// *-notes.txt, video.mp4) — is NEVER sent to Vision.
+const CREATIVE_ASSET_FILE_RE = /^(?:image|card|frame)-\d+\.(?:png|jpe?g|webp)$/i;
+
+/** True only for an intended creative asset file (image-/card-/frame-NN.ext). */
+export function isCreativeAssetFile(filePath: string): boolean {
+  return CREATIVE_ASSET_FILE_RE.test(path.basename(filePath));
+}
 // Anthropic rejects images whose longest side exceeds 8000px. Tall carousel-card
 // screenshots (deviceScaleFactor 2) can exceed this, so we downscale any creative
 // whose longest side is over this safe limit BEFORE sending it to Vision.
@@ -179,7 +189,7 @@ async function buildImageBlock(filePath: string): Promise<ImageBlock> {
 function collectImageFiles(folderPath: string): string[] {
   return fs
     .readdirSync(folderPath)
-    .filter((f) => SUPPORTED_EXTENSIONS.has(path.extname(f).toLowerCase()))
+    .filter((f) => isCreativeAssetFile(f))   // creative files only — no debug/support output
     .sort()
     .map((f) => path.join(folderPath, f));
 }
@@ -231,7 +241,15 @@ export async function analyseCreativeAsset(
     }
     content = [await buildImageBlock(frames[0]!), { type: 'text', text: IMAGE_PROMPT }];
   } else {
-    // Single image file (IMAGE or VIDEO frame)
+    // Single image file (IMAGE or VIDEO frame) — a DIRECT file path must pass the
+    // same creative allowlist as folder contents. Reject debug/full-page/screenshot
+    // or any other non-creative filename BEFORE reading bytes or calling Vision.
+    if (!isCreativeAssetFile(assetPath)) {
+      throw new Error(
+        `Not an eligible creative asset file: ${path.basename(assetPath)} ` +
+        '(expected image-NN / card-NN / frame-NN .png/.jpg/.jpeg/.webp)',
+      );
+    }
     content = [await buildImageBlock(assetPath), { type: 'text', text: IMAGE_PROMPT }];
   }
 

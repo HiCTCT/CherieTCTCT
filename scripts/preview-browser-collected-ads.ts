@@ -20,7 +20,7 @@ import * as path from 'path';
 
 import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
-import { resolveCreativeContext } from '@/lib/analysis/creativeAssetAnalyser';
+import { resolveCreativeContext, isCreativeAssetFile } from '@/lib/analysis/creativeAssetAnalyser';
 import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
 import { scoreCompetitorBenchmarkAd } from '@/lib/analysis/competitorScoring';
 import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
@@ -29,6 +29,48 @@ import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
 
 const DEFAULT_FILE = 'data/imports/castlery-browser-collected-ads-pilot-01.csv';
 const SCORE_THRESHOLD = 7.0;
+
+// ── AI-preview spend controls (Phase 1A) ─────────────────────────────────────
+// Local, env-driven guards for the (optional) paid Vision creative analysis this
+// preview can perform. Nothing here changes scoring, verified-metadata rules,
+// READY-only eligibility, or the no-DB / no-ingestion / no-browser guarantees.
+//
+//   AI_PREVIEW_PREFLIGHT=true       → no-spend workload report, then exit. Never
+//                                     reads ANTHROPIC_API_KEY, never calls Anthropic.
+//   AI_PREVIEW_MAX_ANALYSES=<int>   → hard cap on paid Vision requests (default 25).
+//   AI_PREVIEW_CONFIRM_SPEND=I_UNDERSTAND
+//                                   → explicit paid-spend confirmation, required IN
+//                                     ADDITION to the API key and the cap check.
+//   AI_PREVIEW_COST_PER_ANALYSIS=<num>  (optional)
+//                                   → operator-supplied unit for an ESTIMATE only;
+//                                     never live or hard-coded pricing.
+const AI_PREVIEW_PREFLIGHT       = process.env.AI_PREVIEW_PREFLIGHT === 'true';
+const AI_PREVIEW_SPEND_SENTINEL  = 'I_UNDERSTAND';
+const AI_PREVIEW_CONFIRM_SPEND   = process.env.AI_PREVIEW_CONFIRM_SPEND;
+const AI_PREVIEW_MAX_ANALYSES_DEFAULT = 25;
+// Strict cap parsing. UNSET → safe default. If EXPLICITLY supplied, the WHOLE string
+// must be a complete non-negative base-10 integer — no numeric-prefix parsing
+// ("999oops"), no signs ("-1"), no decimals ("1.5"), no blank, no unsafe magnitudes.
+// A malformed value is REJECTED (never silently replaced with the default).
+// 0 is valid and hard-disables paid analysis.
+type CapConfig = { ok: true; value: number } | { ok: false; reason: string };
+const AI_PREVIEW_MAX_ANALYSES_CONFIG: CapConfig = ((): CapConfig => {
+  const raw = process.env.AI_PREVIEW_MAX_ANALYSES;
+  if (raw === undefined) return { ok: true, value: AI_PREVIEW_MAX_ANALYSES_DEFAULT };
+  if (!/^\d+$/.test(raw)) {
+    return { ok: false, reason: `AI_PREVIEW_MAX_ANALYSES must be a whole non-negative integer (got "${raw}")` };
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) {
+    return { ok: false, reason: `AI_PREVIEW_MAX_ANALYSES is not a safe integer (got "${raw}")` };
+  }
+  return { ok: true, value: n };
+})();
+const AI_PREVIEW_COST_PER_ANALYSIS = ((): number | null => {
+  const raw = (process.env.AI_PREVIEW_COST_PER_ANALYSIS ?? '').trim();
+  const n = Number(raw);
+  return raw !== '' && Number.isFinite(n) && n >= 0 ? n : null;
+})();
 
 const EXPECTED_HEADER = [
   'collection_status',
@@ -277,11 +319,145 @@ function assertApiKeyIfAssets(
   }
 }
 
+// ── AI-preview workload counting (Phase 1A) ──────────────────────────────────
+// Counts the paid Vision workload for a file WITHOUT reading the API key, calling
+// Anthropic, scoring, or touching the DB. File selection mirrors
+// analyseCreativeAsset(): a CAROUSEL folder sends every card image in ONE request;
+// an IMAGE / VIDEO folder uses ONE frame; a single file is one file.
+type AdVisionUnit = { adId: string; mediaType: string; exists: boolean; eligibleFiles: number };
+type AiWorkload = {
+  readyWithPath: number;    // READY rows with a non-blank creative_asset_path
+  pathMissing: number;      // path set but not found on disk (→ manual fallback, no Vision)
+  noEligibleFiles: number;  // path found but 0 ELIGIBLE creative files → NOT sent to Vision
+  visionAnalyses: number;   // path found AND ≥1 eligible creative file → one Vision request each
+  assetFilesToRead: number; // total ELIGIBLE creative files Vision may read across those ads
+  units: AdVisionUnit[];
+};
+
+// Count only ELIGIBLE creative files, mirroring the analyser's collector after the
+// shared creative-file allowlist (isCreativeAssetFile): a CAROUSEL folder sends every
+// card image in ONE request; an IMAGE / VIDEO folder uses ONE frame; a single file is
+// one file. Debug / audit / diagnostic / full-page / modal / support files are excluded.
+function countEligibleCreativeFiles(resolvedPath: string, mediaType: string): number {
+  let st: fs.Stats;
+  try { st = fs.statSync(resolvedPath); } catch { return 0; }
+  // Direct single-file path: must pass the SAME shared allowlist as folder contents,
+  // exactly as the analyser now enforces before reading/sending it.
+  if (!st.isDirectory()) return isCreativeAssetFile(resolvedPath) ? 1 : 0;
+  let creatives: string[];
+  try {
+    creatives = fs.readdirSync(resolvedPath).filter((f) => isCreativeAssetFile(f));
+  } catch { return 0; }
+  if (creatives.length === 0) return 0;                  // no eligible creative → not Vision-eligible
+  return mediaType.trim().toUpperCase() === 'CAROUSEL' ? creatives.length : 1;
+}
+
+function computeAiWorkload(
+  readyRows: Array<{ row: BrowserAdRow; rowNumber: number }>,
+): AiWorkload {
+  const units: AdVisionUnit[] = [];
+  let readyWithPath = 0, pathMissing = 0, noEligibleFiles = 0, visionAnalyses = 0, assetFilesToRead = 0;
+  for (const { row } of readyRows) {
+    const assetPath = row.creative_asset_path?.trim() ?? '';
+    if (!assetPath) continue;
+    readyWithPath++;
+    const adId = row.ad_id.trim();
+    const mt = row.media_type.trim().toUpperCase();
+    const resolved = path.resolve(assetPath);
+    if (!fs.existsSync(resolved)) {
+      pathMissing++;
+      units.push({ adId, mediaType: mt, exists: false, eligibleFiles: 0 });
+      continue;
+    }
+    const eligible = countEligibleCreativeFiles(resolved, row.media_type);
+    if (eligible === 0) {
+      noEligibleFiles++;
+      units.push({ adId, mediaType: mt, exists: true, eligibleFiles: 0 });
+      continue;
+    }
+    visionAnalyses++;
+    assetFilesToRead += eligible;
+    units.push({ adId, mediaType: mt, exists: true, eligibleFiles: eligible });
+  }
+  return { readyWithPath, pathMissing, noEligibleFiles, visionAnalyses, assetFilesToRead, units };
+}
+
+function buildSkippedByStatus(rawRows: Record<string, string>[]): Array<{ status: string; count: number }> {
+  const m = new Map<string, number>();
+  for (const raw of rawRows) {
+    const s = (raw.collection_status ?? '').trim().toUpperCase();
+    if (s === 'READY') continue;
+    const key = s || '(blank)';
+    m.set(key, (m.get(key) ?? 0) + 1);
+  }
+  return Array.from(m.entries())
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => a.status.localeCompare(b.status));
+}
+
+function printAiPreflight(
+  LINE: string,
+  DIV: string,
+  filePath: string,
+  totalRows: number,
+  readyCount: number,
+  skipped: Array<{ status: string; count: number }>,
+  workload: AiWorkload,
+  cap: number,
+): void {
+  const allowed = workload.visionAnalyses <= cap;
+  console.log(`\n${LINE}`);
+  console.log('  AI PREVIEW PREFLIGHT — NO-SPEND WORKLOAD REPORT');
+  console.log(LINE);
+  console.log(`  File:                              ${filePath}`);
+  console.log(`  Total input rows:                  ${totalRows}`);
+  console.log(`  READY rows:                        ${readyCount}`);
+  console.log('  Skipped rows by status:');
+  if (skipped.length === 0) console.log('    (none)');
+  for (const s of skipped) console.log(`    ${s.status.padEnd(14)} ${s.count}`);
+  console.log(DIV);
+  console.log(`  READY rows with creative_asset_path:            ${workload.readyWithPath}`);
+  console.log(`    · asset path missing on disk:                 ${workload.pathMissing}  (manual fallback, no Vision)`);
+  console.log(`    · no eligible creative files (excluded):      ${workload.noEligibleFiles}  (not sent to Vision)`);
+  console.log(`  Logical ad analyses requiring Vision:           ${workload.visionAnalyses}  (one Vision request each)`);
+  console.log(`  Eligible creative files that may be read:       ${workload.assetFilesToRead}  (carousel = per card; image/video folder = 1 frame; debug/support excluded)`);
+  console.log(DIV);
+  console.log(`  Configured max analyses (AI_PREVIEW_MAX_ANALYSES): ${cap}`);
+  console.log(`  Cap decision (on analyses, not files):          ${allowed ? 'ALLOWED' : 'BLOCKED'}  (${workload.visionAnalyses} vs cap ${cap})`);
+  if (!allowed) {
+    console.log('    A paid run would FAIL CLOSED before any API call.');
+    console.log('    Reduce the input, or raise AI_PREVIEW_MAX_ANALYSES explicitly.');
+  }
+  if (workload.noEligibleFiles > 0) {
+    console.log(`  Batch gate:                        BLOCKED  (${workload.noEligibleFiles} READY row(s) have an asset path with no eligible creative file)`);
+    console.log('    A paid run would FAIL CLOSED for the WHOLE batch before any API call.');
+  }
+  if (AI_PREVIEW_COST_PER_ANALYSIS !== null) {
+    const est = (workload.visionAnalyses * AI_PREVIEW_COST_PER_ANALYSIS).toFixed(4);
+    console.log('  ESTIMATE (operator-configured unit, NOT live pricing):');
+    console.log(`    ${workload.visionAnalyses} × ${AI_PREVIEW_COST_PER_ANALYSIS} = ${est}  (from AI_PREVIEW_COST_PER_ANALYSIS)`);
+  }
+  console.log(DIV);
+  console.log('  NO Anthropic API call.  NO database write.  NO ingestion.  NO browser.');
+  console.log('  ANTHROPIC_API_KEY is NOT required and NOT read in preflight mode.');
+  console.log(LINE);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const LINE = '═'.repeat(63);
   const DIV  = '─'.repeat(63);
+
+  // ── AI-preview cap config (Phase 1A): reject a malformed value before anything ──
+  if (!AI_PREVIEW_MAX_ANALYSES_CONFIG.ok) {
+    console.error('\n❌ Invalid AI-preview configuration — refusing to run.');
+    console.error(`   ${AI_PREVIEW_MAX_ANALYSES_CONFIG.reason}`);
+    console.error(`   Accepted: unset (default ${AI_PREVIEW_MAX_ANALYSES_DEFAULT}), or a whole non-negative integer such as 0, 5, 25.`);
+    console.error('   0 hard-disables paid Vision analysis.');
+    process.exit(1);
+  }
+  const aiMaxAnalyses = AI_PREVIEW_MAX_ANALYSES_CONFIG.value;
 
   // ── Resolve file path ────────────────────────────────────────────────────────
   const filePath = path.resolve(process.env.BROWSER_ADS_FILE ?? DEFAULT_FILE);
@@ -357,8 +533,54 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ── API key guard ────────────────────────────────────────────────────────────
+  // ── AI-preview spend controls (Phase 1A) ─────────────────────────────────────
+  // Compute the paid Vision workload up front (no key read, no API call, no DB).
+  const aiWorkload = computeAiWorkload(readyRows);
+
+  // No-spend preflight: report the workload + cap decision and STOP. This path
+  // never reads ANTHROPIC_API_KEY, never calls Anthropic, and never scores.
+  if (AI_PREVIEW_PREFLIGHT) {
+    printAiPreflight(LINE, DIV, filePath, rawRows.length, readyRows.length, buildSkippedByStatus(rawRows), aiWorkload, aiMaxAnalyses);
+    console.log('');
+    printSafetyFooter(LINE);
+    return;
+  }
+
+  // ── Paid path — every gate below runs BEFORE any Anthropic call ──────────────
+  // 1) API key required when any READY row carries a creative_asset_path.
   assertApiKeyIfAssets(readyRows);
+  // 2) WHOLE-BATCH integrity gate: if ANY READY row has an asset path but no eligible
+  //    creative file after filtering, fail closed for the ENTIRE batch here — before
+  //    scoring — so a mixed batch can never spend on the valid rows and only then hit
+  //    an invalid one. Counts only; no secrets are printed.
+  if (aiWorkload.noEligibleFiles > 0) {
+    const badIds = aiWorkload.units.filter((u) => u.exists && u.eligibleFiles === 0).map((u) => u.adId);
+    console.error('\n❌ Batch blocked: READY row(s) have an asset path with no eligible creative file — no API call made.');
+    console.error(`   Affected rows: ${aiWorkload.noEligibleFiles} of ${aiWorkload.readyWithPath} READY row(s) with an asset path.`);
+    if (badIds.length > 0) console.error(`   Library ID(s): ${badIds.join(', ')}`);
+    console.error('   Eligible creative files are image-NN / card-NN / frame-NN images only.');
+    console.error('   Re-capture those ads, or clear their creative_asset_path, then re-run.');
+    console.error('   Inspect with the no-spend preflight:  AI_PREVIEW_PREFLIGHT=true');
+    process.exit(1);
+  }
+  // 3) Explicit spend confirmation + hard cap, but only when real Vision requests
+  //    would occur (assets present AND found on disk). Fail closed before scoring.
+  if (aiWorkload.visionAnalyses > 0) {
+    if (AI_PREVIEW_CONFIRM_SPEND !== AI_PREVIEW_SPEND_SENTINEL) {
+      console.error('\n❌ Paid Vision preview is not confirmed — no API call made.');
+      console.error(`   ${aiWorkload.visionAnalyses} READY ad(s) would each make one Vision request.`);
+      console.error('   Run the no-spend preflight first:   AI_PREVIEW_PREFLIGHT=true');
+      console.error(`   Then authorise paid analysis with:  AI_PREVIEW_CONFIRM_SPEND=${AI_PREVIEW_SPEND_SENTINEL}`);
+      process.exit(1);
+    }
+    if (aiWorkload.visionAnalyses > aiMaxAnalyses) {
+      console.error('\n❌ Vision analysis count exceeds the cap — failing closed before any API call.');
+      console.error(`   Analyses required: ${aiWorkload.visionAnalyses}   Cap (AI_PREVIEW_MAX_ANALYSES): ${aiMaxAnalyses}`);
+      if (aiMaxAnalyses === 0) console.error('   Cap is 0 — paid Vision analysis is hard-disabled.');
+      console.error('   Reduce the input, or raise AI_PREVIEW_MAX_ANALYSES explicitly to proceed.');
+      process.exit(1);
+    }
+  }
 
   // Verified ad-level metadata sidecar (read-only, fail-closed). Per-field ACCEPT is the
   // only source of headline/description; raw CSV headline/description are ignored entirely.
