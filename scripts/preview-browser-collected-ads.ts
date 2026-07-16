@@ -24,6 +24,13 @@ import { resolveCreativeContext, planVisionInputs, resolveVideoMaxFrames } from 
 import type { CreativeContext, CreativeSource, VisualConfidence } from '@/lib/analysis/creativeAssetAnalyser';
 import { scoreCompetitorBenchmarkAd } from '@/lib/analysis/competitorScoring';
 import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
+import {
+  BUNDLE_SCHEMA_VERSION, BUNDLE_PROMPT_VERSION, BUNDLE_PLANNER_VERSION,
+  buildAssetManifest, sha256File, writeBundleAtomic,
+} from '@/lib/analysis/browserAnalysisBundle';
+import type { BrowserAnalysisBundle, BundleRow } from '@/lib/analysis/browserAnalysisBundle';
+import { assembleBundleRows, decideHeldOnlyBundleOutput } from '@/lib/analysis/bundleAssembly';
+import type { BundleSuccessPayload } from '@/lib/analysis/bundleAssembly';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -134,6 +141,12 @@ type ScoredRow = {
   // Vision's own confidence in reading the supplied visual sequence (VIDEO only).
   // Deliberately SEPARATE from benchmark.confidence (evidence-source confidence).
   visualConfidence?: VisualConfidence;
+  // Phase 1 — inputs for the optional reusable analysis bundle. Recording only;
+  // these have no effect on scoring.
+  sourceStatus: string;
+  assetPath: string;
+  plannedAssetFiles: string[];
+  copyUsedForScoring: string;
   benchmark: CompetitorBenchmark;
   error: null;
 };
@@ -506,6 +519,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Opt-in reusable-bundle output. Resolved up front because a held-only scope must
+  // still be able to produce a requested bundle after the early returns below.
+  const bundleOut = (process.env.AI_PREVIEW_OUTPUT_FILE ?? '').trim();
+
   // ── Resolve file path ────────────────────────────────────────────────────────
   const filePath = path.resolve(process.env.BROWSER_ADS_FILE ?? DEFAULT_FILE);
 
@@ -576,6 +593,11 @@ async function main(): Promise<void> {
 
   if (readyRows.length === 0) {
     console.log('\n  ⚠  No READY rows found. Nothing to score.');
+    // A held-only scope is an honest result. When an output file was requested, record
+    // it rather than producing nothing — no READY row means no Anthropic call is needed.
+    if (decideHeldOnlyBundleOutput({ outputRequested: bundleOut !== '', preflight: AI_PREVIEW_PREFLIGHT }) === 'WRITE_HELD_ONLY') {
+      writeAnalysisBundle({ bundleOut, filePath, rawRows, idFilter, aiMaxVideoFrames, scored: [], errored: [], LINE });
+    }
     printSafetyFooter(LINE);
     return;
   }
@@ -601,6 +623,12 @@ async function main(): Promise<void> {
     if (notReady.length > 0)   console.log(`  ⚠  Present but not READY (skipped): ${notReady.join(', ')}`);
     if (workRows.length === 0) {
       console.log('\n  ⚠  No requested ID matched a READY row — nothing to process.');
+      // The requested ads exist but are all held/skipped/unavailable: record that
+      // honestly when an output file was requested. Requested IDs that are absent
+      // from the source still fail inside the writer.
+      if (decideHeldOnlyBundleOutput({ outputRequested: bundleOut !== '', preflight: AI_PREVIEW_PREFLIGHT }) === 'WRITE_HELD_ONLY') {
+        writeAnalysisBundle({ bundleOut, filePath, rawRows, idFilter, aiMaxVideoFrames, scored: [], errored: [], LINE });
+      }
       printSafetyFooter(LINE);
       return;
     }
@@ -715,6 +743,16 @@ async function main(): Promise<void> {
         rawAdCopy:            row.ad_copy.trim(),
         creativeSource:       creative.source,
         visualConfidence:     creative.visual_confidence,
+        sourceStatus:         (row.collection_status ?? '').trim(),
+        assetPath:            row.creative_asset_path?.trim() ?? '',
+        plannedAssetFiles:    (() => {
+          const p = row.creative_asset_path?.trim();
+          if (!p) return [] as string[];
+          const resolved = path.resolve(p);
+          if (!fs.existsSync(resolved)) return [] as string[];
+          return planVisionInputs(resolved, row.media_type, aiMaxVideoFrames).planned;
+        })(),
+        copyUsedForScoring:   exampleRow.Copy ?? '',
         error: null,
       });
     } catch (err: unknown) {
@@ -930,8 +968,141 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── Optional reusable analysis bundle (Phase 1) ──────────────────────────────
+  // Opt-in only. Never written during the no-spend preflight (that path returns
+  // earlier). Writing does not affect scoring and touches no database.
+  if (bundleOut) {
+    writeAnalysisBundle({ bundleOut, filePath, rawRows, idFilter, aiMaxVideoFrames, scored, errored, LINE });
+  }
+
   console.log('');
   printSafetyFooter(LINE);
+}
+
+/**
+ * Writes the opt-in reusable analysis bundle. Row assembly lives in the pure
+ * lib/analysis/bundleAssembly module, so the honesty contract is testable without
+ * running preview. Called for scored runs AND for held-only scopes (no READY rows),
+ * which are an honest result rather than a reason to produce nothing.
+ *
+ * A REQUESTED bundle that cannot be produced fails the command; it never warns.
+ */
+function writeAnalysisBundle(args: {
+  bundleOut: string;
+  filePath: string;
+  rawRows: Record<string, string>[];
+  idFilter: { ids: string[] | null };
+  aiMaxVideoFrames: number;
+  scored: ScoredRow[];
+  errored: ErroredRow[];
+  LINE: string;
+}): void {
+  const { bundleOut, filePath, rawRows, idFilter, aiMaxVideoFrames, scored, errored, LINE } = args;
+
+  console.log(`\n${LINE}`);
+  console.log('  REUSABLE ANALYSIS BUNDLE');
+  console.log(LINE);
+
+  const fail = (msg: string, details: string[] = []): never => {
+    console.error(`  ❌ ${msg}`);
+    for (const d of details) console.error(`     • ${d}`);
+    console.log(LINE);
+    process.exit(1);
+  };
+
+  const srcSum = sha256File(filePath);
+  const vmPath = verifiedMetaPathFor(filePath);
+  const vmSum  = fs.existsSync(vmPath) ? sha256File(vmPath) : null;
+  if (!srcSum) fail('Could not checksum the source CSV — bundle not written.');
+  // If the expected sidecar exists but could not be read, fail rather than
+  // recording it as absent.
+  if (fs.existsSync(vmPath) && !vmSum) fail(`Verified-metadata sidecar exists but could not be read: ${vmPath}`);
+
+  // Bundle scope: every source row, or exactly the requested IDs (any status).
+  // A selected ad is NEVER dropped because its analysis failed or never ran.
+  const success = new Map<string, BundleSuccessPayload>(scored.map((s) => [s.adId, {
+    creative_source: s.creativeSource,
+    assets: buildAssetManifest(s.plannedAssetFiles),
+    visual_description: s.exampleRowCreativeAnalysis === '(empty)' ? '' : s.exampleRowCreativeAnalysis,
+    visual_confidence: s.visualConfidence ?? null,
+    creative_notes: s.exampleRowAnalysis === '(empty)' ? '' : s.exampleRowAnalysis,
+    aida_scores: {
+      attention: s.analysis.aidaScores.attention,
+      interest:  s.analysis.aidaScores.interest,
+      desire:    s.analysis.aidaScores.desire,
+      action:    s.analysis.aidaScores.action,
+    },
+    component_scores: {
+      copy_score:        s.analysis.copyScore,
+      headline_score:    s.analysis.headlineScore,
+      description_score: s.analysis.descriptionScore,
+      creative_score:    s.analysis.creativeScore,
+      clarity_score:     s.analysis.clarityScore,
+      connection_score:  s.analysis.connectionScore,
+      conviction_score:  s.analysis.convictionScore,
+    },
+    internal_qa_score: s.analysis.overallScore,
+    internal_qa_verdict: s.analysis.finalVerdict,
+    qualified: s.analysis.qualified,
+    benchmark_score: s.benchmark.benchmarkScore,
+    benchmark_tier: s.benchmark.tierToken,
+    benchmark_confidence: s.benchmark.confidence,
+    funnel_stage: s.analysis.funnelStage,
+    race_stage: s.analysis.raceStage,
+    trust_funnel_stage: s.analysis.trustFunnelStage,
+    behavioural_triggers: s.analysis.behaviouralTriggers.map((t) => ({ name: t.name, strength: t.strength })),
+    strengths: s.analysis.strengths,
+  }]));
+
+  const assembled = assembleBundleRows({
+    rawRows,
+    scopeIds: idFilter.ids,
+    success,
+    errors: new Map(errored.map((e) => [e.adId, e.error])),
+  });
+  if (!assembled.ok) fail('Bundle NOT written — the source CSV could not be honestly represented.', assembled.errors);
+  const { rows, inputRows } = assembled as { ok: true; rows: BundleRow[]; inputRows: number };
+
+  const count = (s: string) => rows.filter((r) => r.analysis_status === s).length;
+  const bundle: BrowserAnalysisBundle = {
+    schema_version: BUNDLE_SCHEMA_VERSION,
+    created_at: new Date().toISOString(),
+    source_csv_path: path.relative(process.cwd(), filePath).replace(/\\/g, '/'),
+    source_csv_sha256: srcSum!,
+    verified_meta_path: vmSum ? path.relative(process.cwd(), vmPath).replace(/\\/g, '/') : null,
+    verified_meta_sha256: vmSum,
+    // No consumed asset means no Vision request happened, so no model is recorded.
+    analysis_model: rows.some((r) => r.creative_source === 'ASSET') ? (process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5') : null,
+    prompt_version: BUNDLE_PROMPT_VERSION,
+    planner_version: BUNDLE_PLANNER_VERSION,
+    ai_video_max_frames: aiMaxVideoFrames,
+    selected_ad_ids: rows.map((r) => r.ad_id),
+    excluded_ad_ids: [],
+    counts: {
+      input_rows: inputRows,
+      selected_rows: rows.length,
+      success: count('SUCCESS'),
+      review: count('REVIEW'),
+      skipped: count('SKIPPED'),
+      failed: count('ERROR'),   // derived from rows — never reset
+    },
+    rows,
+  };
+
+  const allowOverwrite = process.env.AI_PREVIEW_CONFIRM_OVERWRITE === 'I_UNDERSTAND';
+  const written = writeBundleAtomic(bundle, bundleOut, { allowOverwrite });
+  if (!written.ok) {
+    const hint = allowOverwrite ? [] : ['To replace an existing bundle set AI_PREVIEW_CONFIRM_OVERWRITE=I_UNDERSTAND'];
+    fail('Bundle NOT written — requested output failed.', [...written.errors, ...hint]);
+  } else {
+    console.log('  ✓ Bundle written (validated; temp file finalised atomically; final file re-read)');
+    console.log(`    Path    : ${written.path}`);
+    console.log(`    SHA-256 : ${written.sha256}`);
+    console.log(`    Bytes   : ${written.bytes}   Rows: ${rows.length}`);
+    console.log(`    SUCCESS ${bundle.counts.success}  REVIEW ${bundle.counts.review}  SKIPPED ${bundle.counts.skipped}  ERROR ${bundle.counts.failed}`);
+    console.log('    Contents are not printed. No database was written.');
+  }
+  console.log(LINE);
 }
 
 function printSafetyFooter(LINE: string): void {

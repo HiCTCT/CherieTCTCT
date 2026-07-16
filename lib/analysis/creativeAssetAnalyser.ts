@@ -22,6 +22,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { isCreativeAssetFile, creativeIndexOf } from './creativeAssetFiles';
+
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 export type CreativeSource = 'ASSET' | 'MANUAL' | 'FALLBACK';
@@ -68,17 +70,10 @@ type ContentBlock = ImageBlock | TextBlock;
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5';
 const MAX_TOKENS = 1024;
-// Only the capture script's INTENDED creative outputs are eligible for Vision:
-//   IMAGE → image-NN.ext,  CAROUSEL → card-NN.ext,  VIDEO → frame-NN.ext.
-// Everything else in an asset folder — debug/audit/diagnostic/full-page/modal/
-// selected-creative/screenshot/raw/temp/support output (e.g. debug-*.png,
-// *-notes.txt, video.mp4) — is NEVER sent to Vision.
-const CREATIVE_ASSET_FILE_RE = /^(?:image|card|frame)-\d+\.(?:png|jpe?g|webp)$/i;
-
-/** True only for an intended creative asset file (image-/card-/frame-NN.ext). */
-export function isCreativeAssetFile(filePath: string): boolean {
-  return CREATIVE_ASSET_FILE_RE.test(path.basename(filePath));
-}
+// The creative-file allowlist now lives in a PURE module (lib/analysis/creativeAssetFiles.ts)
+// so the bundle validator / planner can share the identical rule WITHOUT importing this
+// Anthropic-calling analyser. Re-exported here so existing importers keep working.
+export { isCreativeAssetFile, CREATIVE_ASSET_FILE_RE } from './creativeAssetFiles';
 
 // ── Video frame budget (Phase 1C) ────────────────────────────────────────────
 // AI_VIDEO_MAX_FRAMES: how many sequential frames ONE video ad may send inside its
@@ -263,12 +258,6 @@ async function buildImageBlock(filePath: string): Promise<ImageBlock> {
     type: 'image',
     source: { type: 'base64', media_type: mime, data: buf.toString('base64') },
   };
-}
-
-/** Numeric index of an allowlisted creative filename, so frame-2 sorts before frame-10. */
-function creativeIndexOf(filePath: string): number {
-  const m = /-(\d+)\.[^.]+$/.exec(path.basename(filePath));
-  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
 }
 
 function collectImageFiles(folderPath: string): string[] {
