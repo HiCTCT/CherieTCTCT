@@ -368,17 +368,33 @@ export function detectBehaviouralTriggers(
 
   return [
     { name: 'FOMO', strength: strength(/miss out|limited|running out|last chance|only \d+|expir|before it.s gone/i) },
-    { name: 'Urgency', strength: strength(/today|now|deadline|this week|hurry|act fast|limited time/i) },
+    // "now" alone is NOT urgency — "Shop now" is a CTA and "now available" is not
+    // time pressure. Bare "today"/"this week" are equally weak. Require an explicit
+    // deadline / time-pressure construction; otherwise report MISSING.
+    { name: 'Urgency', strength: strength(/\b(?:deadline|hurry|act fast|act now|limited time|last day|final hours|closing soon|order by|today only|this week only|ends (?:today|tonight|soon))\b/i) },
     { name: 'Social proof', strength: strength(/\d+[\w\s]*(client|customer|brand|business|review|user)|trusted by|as seen|Fortune|testimonial/i) },
     { name: 'Authority', strength: strength(/award|certif|expert|proven|industry|leader|accredited|recognised|fortune 100|fortune 500|authority/i) },
-    { name: 'Before and after', strength: strength(/before|after|transform|used to|now (i|we|they)|from .* to/i) },
+    // A lone "before" (or "after") is NOT a before/after claim. Require BOTH sides of
+    // a genuine comparison in proximity, or an explicit transformation construction.
+    { name: 'Before and after', strength: strength(/\bbefore\b[\s\S]{0,60}\bafter\b|\bafter\b[\s\S]{0,60}\bbefore\b|\bused to\b[\s\S]{0,60}\b(?:now|today)\b|\bwas\b[\s\S]{0,40}\bnow\b|\btransform(?:s|ed|ing|ation)?\b/i) },
     { name: 'Risk reduction', strength: strength(/no (risk|commitment|contract)|money.back|guarantee|cancel anytime|free trial/i) },
     { name: 'Convenience', strength: strength(/easy|simple|one.click|instant|quick|no hassle|effortless|done for you/i) },
     { name: 'Value', strength: strength(/save|free|bonus|value|included|worth|\$ off|% off|discount/i) },
-    { name: 'Fear of loss', strength: strength(/lose|losing|miss|fail|falling behind|at risk|don.t let|costly/i) },
+    // Unanchored "lose"/"miss"/"fail" also matched INSIDE ordinary words ("close",
+    // "mission", "dismiss", "failure"). Require a word-bounded construction that names
+    // actual loss, risk, harm, cost or a missed opportunity. Bare "don't let" is NOT
+    // evidence ("don't let the paint dry"), and bare "don't miss" is ambiguous.
+    { name: 'Fear of loss', strength: strength(/\b(?:miss(?:ing)? out|don.t lose|lose (?:your|out|access)|losing (?:your|out|access)|risk losing|at risk|falling behind|left behind|costly mistake|avoid (?:a |an )?costly|protect your \w+|before you lose)\b/i) },
     { name: 'Curiosity', strength: strength(/secret|discover|find out|what (most|nobody)|you didn.t know|surprising/i) },
-    { name: 'Status', strength: strength(/exclusive|elite|premium|top|best|leading|first class|vip|Fortune/i) },
-    { name: 'Belonging', strength: strength(/community|join|together|like.minded|tribe|members|network/i) },
+    // "premium"/"top"/"best"/"leading" are ordinary product styling, not status
+    // signalling — and unanchored "top" matched inside "stop"/"scroll-stopping"/"laptop".
+    // Require an explicit, word-bounded status cue.
+    { name: 'Status', strength: strength(/\b(?:exclusive|exclusively|elite|vip|first class|members only|invitation only|prestige)\b/i) },
+    // "join"/"together"/"network"/"members" alone are not belonging, and a generic
+    // "join us/our/the <anything>" CTA ("join us today", "join our newsletter",
+    // "join the waitlist") is not evidence either. Require an explicit community /
+    // membership construction. Missing an ambiguous phrase is safer than asserting one.
+    { name: 'Belonging', strength: strength(/(?:\bjoin (?:us|our|the)\s+(?:community|family|club|tribe|movement|circle)\b|\bwelcome to the (?:family|community|club|tribe)\b|\byou belong (?:here|with us)\b|\bbecome (?:a |an )?member of (?:our|the) \w+|\bmembers only\b|\bour (?:community|club|tribe)\b|\blike.minded\b|\bpart of (?:our|the) (?:community|family|club|tribe)\b)/i) },
     { name: 'Relief', strength: strength(/relief|finally|no more|stop (worrying|struggling)|peace of mind|stress.free/i) },
     { name: 'Instant gratification', strength: strength(/instantly|immediately|right now|in minutes|today|same day/i) },
     { name: 'Contrast', strength: strength(/vs\.|versus|unlike|compared to|instead of|better than|while others/i) },

@@ -20,7 +20,7 @@ import * as path from 'path';
 
 import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
-import { resolveCreativeContext, isCreativeAssetFile } from '@/lib/analysis/creativeAssetAnalyser';
+import { resolveCreativeContext, planVisionInputs, resolveVideoMaxFrames } from '@/lib/analysis/creativeAssetAnalyser';
 import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
 import { scoreCompetitorBenchmarkAd } from '@/lib/analysis/competitorScoring';
 import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
@@ -319,44 +319,39 @@ function assertApiKeyIfAssets(
   }
 }
 
-// ── AI-preview workload counting (Phase 1A) ──────────────────────────────────
+// ── AI-preview workload counting (Phase 1A / 1C) ─────────────────────────────
 // Counts the paid Vision workload for a file WITHOUT reading the API key, calling
 // Anthropic, scoring, or touching the DB. File selection mirrors
-// analyseCreativeAsset(): a CAROUSEL folder sends every card image in ONE request;
-// an IMAGE / VIDEO folder uses ONE frame; a single file is one file.
-type AdVisionUnit = { adId: string; mediaType: string; exists: boolean; eligibleFiles: number };
+// analyseCreativeAsset() via the shared planner: a CAROUSEL folder sends every card
+// image in ONE request; a VIDEO folder sends up to AI_VIDEO_MAX_FRAMES sequential
+// frames in ONE request; an IMAGE folder uses its one eligible image; a single file
+// is that one file. Every ad is exactly ONE logical Vision request.
+type AdVisionUnit = {
+  adId: string; mediaType: string; exists: boolean;
+  kind: string;           // CAROUSEL | VIDEO | IMAGE | SINGLE_FILE | NONE | MISSING
+  eligibleFiles: number;  // eligible creative files present at the path
+  plannedInputs: number;  // images actually sent in this ad's ONE request
+};
 type AiWorkload = {
-  readyWithPath: number;    // READY rows with a non-blank creative_asset_path
-  pathMissing: number;      // path set but not found on disk (→ manual fallback, no Vision)
-  noEligibleFiles: number;  // path found but 0 ELIGIBLE creative files → NOT sent to Vision
-  visionAnalyses: number;   // path found AND ≥1 eligible creative file → one Vision request each
-  assetFilesToRead: number; // total ELIGIBLE creative files Vision may read across those ads
+  readyWithPath: number;      // READY rows with a non-blank creative_asset_path
+  pathMissing: number;        // path set but not found on disk (→ manual fallback, no Vision)
+  noEligibleFiles: number;    // path found but 0 ELIGIBLE creative files → NOT sent to Vision
+  visionAnalyses: number;     // one Vision request each
+  eligibleFilesTotal: number; // eligible creative files present across Vision-eligible ads
+  plannedInputsTotal: number; // images that would ACTUALLY be sent
   units: AdVisionUnit[];
 };
 
-// Count only ELIGIBLE creative files, mirroring the analyser's collector after the
-// shared creative-file allowlist (isCreativeAssetFile): a CAROUSEL folder sends every
-// card image in ONE request; an IMAGE / VIDEO folder uses ONE frame; a single file is
-// one file. Debug / audit / diagnostic / full-page / modal / support files are excluded.
-function countEligibleCreativeFiles(resolvedPath: string, mediaType: string): number {
-  let st: fs.Stats;
-  try { st = fs.statSync(resolvedPath); } catch { return 0; }
-  // Direct single-file path: must pass the SAME shared allowlist as folder contents,
-  // exactly as the analyser now enforces before reading/sending it.
-  if (!st.isDirectory()) return isCreativeAssetFile(resolvedPath) ? 1 : 0;
-  let creatives: string[];
-  try {
-    creatives = fs.readdirSync(resolvedPath).filter((f) => isCreativeAssetFile(f));
-  } catch { return 0; }
-  if (creatives.length === 0) return 0;                  // no eligible creative → not Vision-eligible
-  return mediaType.trim().toUpperCase() === 'CAROUSEL' ? creatives.length : 1;
-}
-
+// Uses the SHARED planner (planVisionInputs) that the analyser itself uses to build a
+// request, so these counts are exactly the payload a paid run would send. Debug /
+// audit / diagnostic / full-page / modal / support files are excluded by the allowlist.
 function computeAiWorkload(
   readyRows: Array<{ row: BrowserAdRow; rowNumber: number }>,
+  maxVideoFrames: number,
 ): AiWorkload {
   const units: AdVisionUnit[] = [];
-  let readyWithPath = 0, pathMissing = 0, noEligibleFiles = 0, visionAnalyses = 0, assetFilesToRead = 0;
+  let readyWithPath = 0, pathMissing = 0, noEligibleFiles = 0, visionAnalyses = 0;
+  let eligibleFilesTotal = 0, plannedInputsTotal = 0;
   for (const { row } of readyRows) {
     const assetPath = row.creative_asset_path?.trim() ?? '';
     if (!assetPath) continue;
@@ -366,20 +361,40 @@ function computeAiWorkload(
     const resolved = path.resolve(assetPath);
     if (!fs.existsSync(resolved)) {
       pathMissing++;
-      units.push({ adId, mediaType: mt, exists: false, eligibleFiles: 0 });
+      units.push({ adId, mediaType: mt, exists: false, kind: 'MISSING', eligibleFiles: 0, plannedInputs: 0 });
       continue;
     }
-    const eligible = countEligibleCreativeFiles(resolved, row.media_type);
-    if (eligible === 0) {
+    const plan = planVisionInputs(resolved, row.media_type, maxVideoFrames);
+    if (plan.planned.length === 0) {
       noEligibleFiles++;
-      units.push({ adId, mediaType: mt, exists: true, eligibleFiles: 0 });
+      units.push({ adId, mediaType: mt, exists: true, kind: 'NONE', eligibleFiles: plan.eligible.length, plannedInputs: 0 });
       continue;
     }
     visionAnalyses++;
-    assetFilesToRead += eligible;
-    units.push({ adId, mediaType: mt, exists: true, eligibleFiles: eligible });
+    eligibleFilesTotal  += plan.eligible.length;
+    plannedInputsTotal  += plan.planned.length;
+    units.push({ adId, mediaType: mt, exists: true, kind: plan.kind, eligibleFiles: plan.eligible.length, plannedInputs: plan.planned.length });
   }
-  return { readyWithPath, pathMissing, noEligibleFiles, visionAnalyses, assetFilesToRead, units };
+  return { readyWithPath, pathMissing, noEligibleFiles, visionAnalyses, eligibleFilesTotal, plannedInputsTotal, units };
+}
+
+// ── Exact-ID preview filter (Phase 1C) ───────────────────────────────────────
+// AI_PREVIEW_ONLY_AD_IDS: comma-separated EXACT numeric Meta Library IDs. Absent →
+// the normal READY workload. Whitespace is trimmed; malformed / empty / duplicate
+// entries FAIL CLOSED. Matching is exact string equality — never partial/substring.
+type IdFilter = { ok: true; ids: string[] | null } | { ok: false; reason: string };
+function resolveOnlyAdIds(): IdFilter {
+  const raw = process.env.AI_PREVIEW_ONLY_AD_IDS;
+  if (raw === undefined) return { ok: true, ids: null };
+  const parts = raw.split(',').map((s) => s.trim());
+  const seen = new Set<string>();
+  for (const p of parts) {
+    if (p === '') return { ok: false, reason: 'AI_PREVIEW_ONLY_AD_IDS contains an empty entry (check stray or trailing commas)' };
+    if (!/^\d+$/.test(p)) return { ok: false, reason: `AI_PREVIEW_ONLY_AD_IDS contains a non-numeric entry ("${p}")` };
+    if (seen.has(p)) return { ok: false, reason: `AI_PREVIEW_ONLY_AD_IDS contains a duplicate id ("${p}")` };
+    seen.add(p);
+  }
+  return { ok: true, ids: Array.from(seen) };
 }
 
 function buildSkippedByStatus(rawRows: Record<string, string>[]): Array<{ status: string; count: number }> {
@@ -404,6 +419,7 @@ function printAiPreflight(
   skipped: Array<{ status: string; count: number }>,
   workload: AiWorkload,
   cap: number,
+  maxVideoFrames: number,
 ): void {
   const allowed = workload.visionAnalyses <= cap;
   console.log(`\n${LINE}`);
@@ -420,7 +436,16 @@ function printAiPreflight(
   console.log(`    · asset path missing on disk:                 ${workload.pathMissing}  (manual fallback, no Vision)`);
   console.log(`    · no eligible creative files (excluded):      ${workload.noEligibleFiles}  (not sent to Vision)`);
   console.log(`  Logical ad analyses requiring Vision:           ${workload.visionAnalyses}  (one Vision request each)`);
-  console.log(`  Eligible creative files that may be read:       ${workload.assetFilesToRead}  (carousel = per card; image/video folder = 1 frame; debug/support excluded)`);
+  console.log(`  Eligible creative files present:                ${workload.eligibleFilesTotal}  (debug/support excluded)`);
+  console.log(`  Planned image inputs to send:                   ${workload.plannedInputsTotal}  (actual Vision payload images)`);
+  console.log(`  Configured max video frames (AI_VIDEO_MAX_FRAMES): ${maxVideoFrames}`);
+  const videoUnits = workload.units.filter((u) => u.kind === 'VIDEO');
+  if (videoUnits.length > 0) {
+    console.log('  Video frames selected per video ad:');
+    for (const u of videoUnits) {
+      console.log(`    ${u.adId}   ${u.plannedInputs} of ${u.eligibleFiles} eligible frame(s)`);
+    }
+  }
   console.log(DIV);
   console.log(`  Configured max analyses (AI_PREVIEW_MAX_ANALYSES): ${cap}`);
   console.log(`  Cap decision (on analyses, not files):          ${allowed ? 'ALLOWED' : 'BLOCKED'}  (${workload.visionAnalyses} vs cap ${cap})`);
@@ -458,6 +483,25 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const aiMaxAnalyses = AI_PREVIEW_MAX_ANALYSES_CONFIG.value;
+
+  // ── Video frame budget: reject a malformed AI_VIDEO_MAX_FRAMES before anything ──
+  const videoFramesCfg = resolveVideoMaxFrames();
+  if (!videoFramesCfg.ok) {
+    console.error('\n❌ Invalid AI-preview configuration — refusing to run.');
+    console.error(`   ${videoFramesCfg.reason}`);
+    console.error('   Accepted: unset (default 4), or a whole integer >= 1. 0 is invalid for a paid video analysis.');
+    process.exit(1);
+  }
+  const aiMaxVideoFrames = videoFramesCfg.value;
+
+  // ── Exact-ID filter: reject a malformed AI_PREVIEW_ONLY_AD_IDS before anything ──
+  const idFilter = resolveOnlyAdIds();
+  if (!idFilter.ok) {
+    console.error('\n❌ Invalid AI-preview configuration — refusing to run.');
+    console.error(`   ${idFilter.reason}`);
+    console.error('   Accepted: unset, or a comma-separated list of exact numeric Library IDs.');
+    process.exit(1);
+  }
 
   // ── Resolve file path ────────────────────────────────────────────────────────
   const filePath = path.resolve(process.env.BROWSER_ADS_FILE ?? DEFAULT_FILE);
@@ -533,22 +577,48 @@ async function main(): Promise<void> {
     return;
   }
 
+  // ── Exact-ID selection (Phase 1C) ────────────────────────────────────────────
+  // The SAME filtered set is used by the preflight and by paid mode. Exact string
+  // equality only — no partial or substring matching.
+  let workRows = readyRows;
+  if (idFilter.ids) {
+    const wanted   = new Set(idFilter.ids);
+    const allIds   = new Set(rawRows.map((r) => (r.ad_id ?? '').trim()).filter(Boolean));
+    const readyIds = new Set(readyRows.map(({ row }) => row.ad_id.trim()));
+    workRows = readyRows.filter(({ row }) => wanted.has(row.ad_id.trim()));
+    const notPresent = idFilter.ids.filter((id) => !allIds.has(id));
+    const notReady   = idFilter.ids.filter((id) => allIds.has(id) && !readyIds.has(id));
+
+    console.log(`\n${DIV}`);
+    console.log('  Exact-ID filter (AI_PREVIEW_ONLY_AD_IDS)');
+    console.log(DIV);
+    console.log(`  Requested IDs:        ${idFilter.ids.length}  (${idFilter.ids.join(', ')})`);
+    console.log(`  Matched READY rows:   ${workRows.length}`);
+    if (notPresent.length > 0) console.log(`  ⚠  Not present in file: ${notPresent.join(', ')}`);
+    if (notReady.length > 0)   console.log(`  ⚠  Present but not READY (skipped): ${notReady.join(', ')}`);
+    if (workRows.length === 0) {
+      console.log('\n  ⚠  No requested ID matched a READY row — nothing to process.');
+      printSafetyFooter(LINE);
+      return;
+    }
+  }
+
   // ── AI-preview spend controls (Phase 1A) ─────────────────────────────────────
   // Compute the paid Vision workload up front (no key read, no API call, no DB).
-  const aiWorkload = computeAiWorkload(readyRows);
+  const aiWorkload = computeAiWorkload(workRows, aiMaxVideoFrames);
 
   // No-spend preflight: report the workload + cap decision and STOP. This path
   // never reads ANTHROPIC_API_KEY, never calls Anthropic, and never scores.
   if (AI_PREVIEW_PREFLIGHT) {
-    printAiPreflight(LINE, DIV, filePath, rawRows.length, readyRows.length, buildSkippedByStatus(rawRows), aiWorkload, aiMaxAnalyses);
+    printAiPreflight(LINE, DIV, filePath, rawRows.length, workRows.length, buildSkippedByStatus(rawRows), aiWorkload, aiMaxAnalyses, aiMaxVideoFrames);
     console.log('');
     printSafetyFooter(LINE);
     return;
   }
 
   // ── Paid path — every gate below runs BEFORE any Anthropic call ──────────────
-  // 1) API key required when any READY row carries a creative_asset_path.
-  assertApiKeyIfAssets(readyRows);
+  // 1) API key required when any selected READY row carries a creative_asset_path.
+  assertApiKeyIfAssets(workRows);
   // 2) WHOLE-BATCH integrity gate: if ANY READY row has an asset path but no eligible
   //    creative file after filtering, fail closed for the ENTIRE batch here — before
   //    scoring — so a mixed batch can never spend on the valid rows and only then hit
@@ -596,7 +666,7 @@ async function main(): Promise<void> {
   let videoCount   = 0;
   let invalidCount = 0;
 
-  for (const { row, rowNumber } of readyRows) {
+  for (const { row, rowNumber } of workRows) {
     const adId = row.ad_id.trim() || `(row ${rowNumber})`;
     const verified = verifiedMeta.get(row.ad_id.trim());
     const vUsedH = !!(verified && verified.headlineStatus === 'ACCEPT' && verified.headline);
@@ -778,7 +848,7 @@ async function main(): Promise<void> {
   console.log(`\n${LINE}`);
   console.log('  INTERNAL QA SUMMARY  (OOM internal scorer — for comparison only)');
   console.log(LINE);
-  console.log(`  READY rows:              ${readyRows.length}`);
+  console.log(`  READY rows processed:    ${workRows.length}`);
   console.log(`  Successfully scored:     ${totalScored}`);
   if (totalErrored > 0) {
     console.log(`  Errored (not scored):    ${totalErrored}`);

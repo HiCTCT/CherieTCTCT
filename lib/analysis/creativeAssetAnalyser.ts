@@ -73,6 +73,29 @@ const CREATIVE_ASSET_FILE_RE = /^(?:image|card|frame)-\d+\.(?:png|jpe?g|webp)$/i
 export function isCreativeAssetFile(filePath: string): boolean {
   return CREATIVE_ASSET_FILE_RE.test(path.basename(filePath));
 }
+
+// ── Video frame budget (Phase 1C) ────────────────────────────────────────────
+// AI_VIDEO_MAX_FRAMES: how many sequential frames ONE video ad may send inside its
+// single Vision request. Absent → 4. An explicitly supplied value is validated in
+// full: a whole integer >= 1 only. 0, negatives, decimals, blanks, junk and unsafe
+// magnitudes all FAIL CLOSED — never a silent fallback to the default.
+export const AI_VIDEO_MAX_FRAMES_DEFAULT = 4;
+export type VideoFramesConfig = { ok: true; value: number } | { ok: false; reason: string };
+export function resolveVideoMaxFrames(): VideoFramesConfig {
+  const raw = process.env.AI_VIDEO_MAX_FRAMES;
+  if (raw === undefined) return { ok: true, value: AI_VIDEO_MAX_FRAMES_DEFAULT };
+  if (!/^\d+$/.test(raw)) {
+    return { ok: false, reason: `AI_VIDEO_MAX_FRAMES must be a whole integer >= 1 (got "${raw}")` };
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) {
+    return { ok: false, reason: `AI_VIDEO_MAX_FRAMES is not a safe integer (got "${raw}")` };
+  }
+  if (n < 1) {
+    return { ok: false, reason: `AI_VIDEO_MAX_FRAMES must be at least 1 for a paid video analysis (got "${raw}")` };
+  }
+  return { ok: true, value: n };
+}
 // Anthropic rejects images whose longest side exceeds 8000px. Tall carousel-card
 // screenshots (deviceScaleFactor 2) can exceed this, so we downscale any creative
 // whose longest side is over this safe limit BEFORE sending it to Vision.
@@ -102,6 +125,21 @@ Describe the carousel as a unit: products or services shown across all cards, se
 CREATIVE_NOTES:
 First line only: "Attention X/10. Interest X/10. Desire X/10. Action X/10." (score the carousel as a unit, 1-10 each).
 Then 2-3 sentences covering: the funnel stage this carousel appears to target (TOFU/MOFU/BOFU), first-card hook strength, whether the sequence tells a coherent story or shows product variety, whether the final card drives action, and one key strength and one key weakness of this carousel.
+
+Respond with only the two labelled sections. No preamble or commentary.`;
+}
+
+function buildVideoPrompt(frameCount: number): string {
+  return `You are analysing ${frameCount} still frame(s) sampled in order from ONE Meta Ad Library VIDEO ad for a competitor advertiser. The advertiser may be in any industry and may sell a product or a service. Describe only what is actually visible in these frames; do not assume an industry or category, do not compare it to any other brand or product type, and do not infer audio, voiceover, music, or motion you cannot see. If something is not visible, state that it is not visible rather than guessing. Your output will be used to score the ad's marketing effectiveness.
+
+Provide exactly two sections:
+
+VISUAL_DESCRIPTION:
+Describe the video as a unit across the frames: product or service shown, setting or background, human presence (yes/no), text overlays visible (yes/no and what they say if clear), price or discount visible (yes/no), CTA button or text visible (yes/no and wording if clear), brand or logo visible (yes/no), opening-frame visual strength (strong/moderate/weak), and what changes across the frames (if anything).
+
+CREATIVE_NOTES:
+First line only: "Attention X/10. Interest X/10. Desire X/10. Action X/10." (score the video as a unit, 1-10 each, based solely on what is observable in these frames).
+Then 2-3 sentences covering: the funnel stage this video appears to target (TOFU/MOFU/BOFU), the opening-frame hook strength, the ad's primary message or offer, any trust signals visible, and one key strength and one key weakness.
 
 Respond with only the two labelled sections. No preamble or commentary.`;
 }
@@ -186,12 +224,56 @@ async function buildImageBlock(filePath: string): Promise<ImageBlock> {
   };
 }
 
+/** Numeric index of an allowlisted creative filename, so frame-2 sorts before frame-10. */
+function creativeIndexOf(filePath: string): number {
+  const m = /-(\d+)\.[^.]+$/.exec(path.basename(filePath));
+  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+}
+
 function collectImageFiles(folderPath: string): string[] {
   return fs
     .readdirSync(folderPath)
     .filter((f) => isCreativeAssetFile(f))   // creative files only — no debug/support output
-    .sort()
-    .map((f) => path.join(folderPath, f));
+    .map((f) => path.join(folderPath, f))
+    .sort((a, b) => creativeIndexOf(a) - creativeIndexOf(b) || a.localeCompare(b));
+}
+
+// ── Shared Vision input planner (Phase 1C) ───────────────────────────────────
+// Single source of truth for WHICH files a paid request would send, used by both
+// analyseCreativeAsset() and the no-spend preflight, so the preflight's reported
+// counts are exactly the payload a paid run would build.
+export type VisionPlanKind = 'CAROUSEL' | 'VIDEO' | 'IMAGE' | 'SINGLE_FILE' | 'NONE';
+export type VisionPlan = {
+  kind: VisionPlanKind;
+  eligible: string[];   // every eligible creative file found at the path
+  planned: string[];    // exactly the files sent in this ad's ONE request
+};
+
+export function planVisionInputs(
+  assetPath: string,
+  mediaType: string,
+  maxVideoFrames: number,
+): VisionPlan {
+  const none: VisionPlan = { kind: 'NONE', eligible: [], planned: [] };
+  let st: fs.Stats;
+  try { st = fs.statSync(assetPath); } catch { return none; }
+  const mt = mediaType.trim().toUpperCase();
+
+  // Direct single-file path must pass the same allowlist as folder contents.
+  if (!st.isDirectory()) {
+    if (!isCreativeAssetFile(assetPath)) return none;
+    return { kind: 'SINGLE_FILE', eligible: [assetPath], planned: [assetPath] };
+  }
+
+  let eligible: string[];
+  try { eligible = collectImageFiles(assetPath); } catch { return none; }
+  if (eligible.length === 0) return none;
+
+  if (mt === 'CAROUSEL') return { kind: 'CAROUSEL', eligible, planned: eligible };
+  // VIDEO: send up to AI_VIDEO_MAX_FRAMES sequential frames in the SAME request.
+  if (mt === 'VIDEO') return { kind: 'VIDEO', eligible, planned: eligible.slice(0, Math.max(1, maxVideoFrames)) };
+  // IMAGE folder: its eligible image file.
+  return { kind: 'IMAGE', eligible, planned: [eligible[0]!] };
 }
 
 // ─── Response parsing ─────────────────────────────────────────────────────────
@@ -220,38 +302,30 @@ export async function analyseCreativeAsset(
   assetPath: string,
   mediaType: string,
 ): Promise<{ visual_description: string; creative_notes: string }> {
-  const mt   = mediaType.trim().toUpperCase();
-  const stat = fs.statSync(assetPath);
+  // Frame budget is validated BEFORE any request is built — fail closed on a
+  // malformed AI_VIDEO_MAX_FRAMES rather than silently defaulting.
+  const framesCfg = resolveVideoMaxFrames();
+  if (!framesCfg.ok) throw new Error(framesCfg.reason);
 
-  let content: ContentBlock[];
-
-  if (mt === 'CAROUSEL' && stat.isDirectory()) {
-    const frames = collectImageFiles(assetPath);
-    if (frames.length === 0) {
-      throw new Error(`No image files found in carousel folder: ${assetPath}`);
-    }
-    const imageBlocks: ImageBlock[] = [];
-    for (const f of frames) imageBlocks.push(await buildImageBlock(f)); // sequential: avoids concurrent browser launches
-    content = [...imageBlocks, { type: 'text', text: buildCarouselPrompt(frames.length) }];
-  } else if (stat.isDirectory()) {
-    // VIDEO Phase 1 or IMAGE folder fallback — use first frame
-    const frames = collectImageFiles(assetPath);
-    if (frames.length === 0) {
-      throw new Error(`No image files found in folder: ${assetPath}`);
-    }
-    content = [await buildImageBlock(frames[0]!), { type: 'text', text: IMAGE_PROMPT }];
-  } else {
-    // Single image file (IMAGE or VIDEO frame) — a DIRECT file path must pass the
-    // same creative allowlist as folder contents. Reject debug/full-page/screenshot
-    // or any other non-creative filename BEFORE reading bytes or calling Vision.
-    if (!isCreativeAssetFile(assetPath)) {
-      throw new Error(
-        `Not an eligible creative asset file: ${path.basename(assetPath)} ` +
-        '(expected image-NN / card-NN / frame-NN .png/.jpg/.jpeg/.webp)',
-      );
-    }
-    content = [await buildImageBlock(assetPath), { type: 'text', text: IMAGE_PROMPT }];
+  // Plan the payload with the SAME shared planner the no-spend preflight reports on.
+  const plan = planVisionInputs(assetPath, mediaType, framesCfg.value);
+  if (plan.planned.length === 0) {
+    throw new Error(
+      `No eligible creative asset file for Vision at: ${assetPath} ` +
+      '(expected image-NN / card-NN / frame-NN .png/.jpg/.jpeg/.webp)',
+    );
   }
+
+  // ONE logical Vision request per ad, however many images it carries:
+  //   CAROUSEL → every eligible card;  VIDEO → up to AI_VIDEO_MAX_FRAMES frames;
+  //   IMAGE / single file → its one eligible image.
+  const imageBlocks: ImageBlock[] = [];
+  for (const f of plan.planned) imageBlocks.push(await buildImageBlock(f)); // sequential: avoids concurrent browser launches
+  const prompt =
+    plan.kind === 'CAROUSEL' ? buildCarouselPrompt(plan.planned.length) :
+    plan.kind === 'VIDEO'    ? buildVideoPrompt(plan.planned.length)    :
+                               IMAGE_PROMPT;
+  const content: ContentBlock[] = [...imageBlocks, { type: 'text', text: prompt }];
 
   const apiResponse = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
