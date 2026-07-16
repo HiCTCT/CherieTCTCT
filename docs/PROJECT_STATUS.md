@@ -11,6 +11,201 @@ the tracked repository. Status is based on that evidence — **not** on the mere
 
 ---
 
+## 0. Session handover — READ FIRST
+
+_Last updated: 2026-07-17. Written after the final Codex re-review returned **PASS** and Phase 1 part 1
+was committed locally as `3cedf83`._
+
+### 0.1 What is complete
+
+- **Frozen and proven** (see §4, §14): Phase 0 discovery safety, capped `PARTIAL_DISCOVERY`, canonical
+  empty active scope, footer provenance, raw headline/description exclusion, image/carousel/video-frame
+  capture, UNAVAILABLE-vs-NEEDS_REVIEW classification, creative-file allowlist, no-spend preflight,
+  paid confirmation + analysis cap, exact-ID preview filter, numeric multi-frame ordering, strict VIDEO
+  parsing, visual-confidence **display**, deterministic trigger hardening.
+- **Committed and pushed in earlier sessions:** `74789e7`, `3f3a76e`, `d379f81`, `b45778a`, `22c6c7a`,
+  `6564b41`, `c69866a`.
+- **Committed (NOT pushed) on 2026-07-17:** `3cedf83` — Phase 1 part 1. HEAD = **`3cedf83`**, which is
+  now **ahead of `origin/main` by 2 commits** (`3cedf83` plus this tracker commit). Pushing was not
+  approved and has not happened.
+- **Phase 1 part 1 — independently reviewed, PASSED, and COMMITTED as `3cedf83` on 2026-07-17; not
+  pushed:** versioned bundle (schema **v2**), strict fail-closed validator, bundle-backed **no-write
+  planner**, opt-in preview bundle output, and **153 tracked tests passing**. Three review rounds ran in
+  all: the first review, then the final review (**NEEDS CHANGES**, six findings), then the focused
+  re-review (**NEEDS CHANGES**, three narrower findings — an empty-`creative_asset_path` ASSET bypass and
+  two atomic-write reporting qualifications). Every finding was corrected, and the **final minimal Codex
+  re-review of those corrections returned PASS before the commit**, declaring Phase 1 part 1 safe to
+  commit (§18). **No further Codex review is required before push.** Details in §11 Phase 1.
+  **Provisional until pushed, not yet frozen** (§14) — §14 requires a Codex PASS *and* a committed,
+  **pushed** change; the PASS and the commit are done, so only the push is outstanding.
+
+### 0.2 What is currently being worked on
+
+**Phase 1 — Reusable analysis handoff** (§12). Part 1 is:
+
+- implemented, with both the final Codex review's six findings and the focused re-review's three
+  findings corrected;
+- **independently reviewed: the final minimal Codex re-review returned PASS** (§18) — 153 tests passed,
+  0 failed, 0 skipped; TypeScript passed; `git diff --check` passed; the ASSET empty-path bypass
+  resolved; temp cleanup correctly treated as best-effort; final checksum and byte-size verification
+  fails closed; the zero-AI / zero-browser / zero-database boundary passed. Part 1 was declared **safe to
+  commit**;
+- **committed as `3cedf83`** (operator-approved 2026-07-17); **not pushed** — pushing was not approved;
+- **153 tracked tests passing** (87 → 139 → 153 as each correction added regression tests);
+- **commit-ready work is complete. No further Codex review is required before push.**
+
+**The immediate action is explicit user approval to push the local commits** (§0.4).
+
+Phase 1 is **not complete**: the real ingestion path is not yet bundle-backed.
+
+### 0.3 What is blocked
+
+| Blocked item | Reason | Unblocks when |
+|---|---|---|
+| Paid Vision preview **from a Claude Code session** (checkpoint **A1**) | `ANTHROPIC_API_KEY` is **ABSENT** from the environment this session inherits. Verified three times. The script reads `process.env` directly — no dotenv loader — so a `.env` file will not work. *(The operator has separately run bounded paid previews from Windows Command Prompt, where the key is available — see §0.6.)* | The key is set at OS/user level **and a new session is started** so the shell inherits it — or the operator runs it from Command Prompt. |
+| A **bundle produced by a real paid preview** | Earlier paid runs were terminal-only and predate the bundle writer, so none produced a bundle. Every bundle exercised so far is synthetic, or built from real assets with **placeholder** analysis text. | After a paid preview is run with `AI_PREVIEW_OUTPUT_FILE` set (post-review). |
+| Live browser DB ingestion (checkpoint **A2**) | Not approved, and `browser:ingest` still calls Anthropic before dedup. | After the next task + explicit approval. |
+| ~~Committing Phase 1 part 1~~ | **UNBLOCKED — the final Codex re-review returned PASS, then the operator approved the commit. Committed as `3cedf83` on 2026-07-17.** | Done. |
+| **Pushing `3cedf83` + this tracker commit to `origin/main`** | Not approved. The commit approval covered the commit only. **No review is outstanding — push needs approval only.** | Explicit push approval in the current message. |
+| Freezing Phase 1 part 1 on the do-not-repeat list (§14) | §14 requires a Codex PASS **and** a committed, **pushed** change. PASS ✅, committed ✅, pushed ❌. | The push lands. |
+
+### 0.4 The next exact task
+
+> **Explicit user approval to push the local commits (`3cedf83` + this tracker commit) to
+> `origin/main`.**
+
+Review and implementation for Phase 1 part 1 are **finished**: the final Codex re-review returned PASS
+and the work is committed. Nothing technical is outstanding — the only thing standing between the local
+branch and `origin/main` is push approval.
+
+**Do not begin bundle-backed live-ingestion integration (§13) before the push**, unless the operator
+explicitly reprioritises. It remains the next *implementation* task and needs its own approval.
+
+Required sequence — do not skip or reorder:
+
+1. ~~Codex review of the corrected code~~ — **done**: verdict **NEEDS CHANGES**, six findings.
+2. ~~Correct those findings~~ — **done** (§19). Temp-file-only bundle writes with atomic no-clobber
+   finalisation; sensitive-string checks on `analysis_model`; no silent blank-source-ID filter in the
+   planner; requested bundle output for held-only scopes; VIDEO manifest cardinality;
+   `creative_asset_path` containment with an empty manifest; standalone validator source-row completeness.
+3. ~~Focused Codex re-review~~ — **done**: verdict **NEEDS CHANGES**, three narrower findings — ASSET
+   SUCCESS rows could still declare an empty `creative_asset_path` and bypass asset disk validation;
+   temp-cleanup failures were silently suppressed while cleanup was described as unconditional; a final
+   `stat` failure could return success with `bytes: 0`.
+4. ~~Correct those three~~ — **done** (§19).
+5. ~~Final minimal Codex re-review of those three corrections~~ — **done: verdict PASS** (§18). All three
+   findings confirmed resolved; 153/153 tests, TypeScript and `git diff --check` all passing; the
+   zero-AI / zero-browser / zero-database boundary confirmed; Part 1 declared safe to commit.
+6. ~~Exact-file commit~~ — **done**: `3cedf83`, operator-approved 2026-07-17, after the PASS.
+7. **Push `3cedf83` + the tracker commit**, after explicit user approval (§15). ← **immediate action**
+8. **Then** begin bundle-backed live-ingestion integration (the spec kept in §13), under its own approval.
+
+### 0.4b Do-not-repeat
+
+The complete list is **§14**. Read it before proposing any work. Nothing on it may be reopened without a
+specific, demonstrated regression.
+
+### 0.5 All files in Phase 1 part 1 — now committed as `3cedf83`
+
+Ten files, staged by exact name. `docs/PROJECT_STATUS.md` is deliberately **not** in `3cedf83`: it is
+committed separately so it can record the real hash.
+
+| File | State |
+|---|---|
+| `lib/analysis/browserAnalysisBundle.ts` | **new** — schema v2, validator (incl. standalone source-row binding), temp-file atomic writer, sidecar loader |
+| `lib/analysis/creativeAssetFiles.ts` | **new** — pure creative-file allowlist |
+| `lib/analysis/sourceRowIdentity.ts` | **new** — pure canonical CSV-row identity |
+| `lib/analysis/bundleAssembly.ts` | **new** (final correction) — pure bundle-row assembly + held-only output decision |
+| `scripts/validate-browser-analysis-bundle.ts` | **new** — validator CLI |
+| `scripts/plan-browser-ingest-from-bundle.ts` | **new** — bundle-only no-write planner |
+| `tests/browser-analysis-bundle.test.ts` | **new** — 153 tracked tests |
+| `scripts/preview-browser-collected-ads.ts` | modified — opt-in bundle output, honest scope, held-only scopes |
+| `lib/analysis/creativeAssetAnalyser.ts` | modified — imports/re-exports the pure allowlist only |
+| `package.json` | modified — `test:browser-bundle`, `browser:bundle:validate`, `browser:plan-from-bundle` |
+| `docs/PROJECT_STATUS.md` | modified — this tracker; **separate commit**, not part of `3cedf83` |
+
+**Untouched by design:** `scripts/ingest-browser-collected-ads.ts` (the live path), `prisma/schema.prisma`,
+all UI. **Never touched:** `AGENTS.md`, `.claude/settings.local.json`, `dir`, `findstr`, `git`,
+`scripts/_orig_check.ts`, and all generated CSVs/logs/reports/assets/databases/backups.
+
+### 0.6 Checks already performed — do not redo blindly
+
+| Check | Result |
+|---|---|
+| `npm run test:browser-bundle` | **153 tests, 153 pass, 0 fail, 0 skipped** (87 → 139 → 153 across the two correction rounds) |
+| `npx tsc --noEmit --incremental false` | exit 0 |
+| `git diff --check` | exit 0 |
+| Validator CLI, full file checks | `VALID — STRUCTURE, SOURCE AND ASSET INTEGRITY VERIFIED` — **pre-correction only** (see note below) |
+| Validator CLI, `--no-file-checks` | `STRUCTURALLY VALID — SOURCE AND ASSET INTEGRITY NOT VERIFIED` — **pre-correction only** |
+| Validator CLI, bad args | unknown flag and two-paths both rejected |
+| Planner CLI vs real 10-row Castlery CSV | 1 INSERT · 1 SKIP · 7 REVIEW · 1 UNAVAILABLE — **pre-correction only** |
+| Full Castlery no-spend preflight | 10 input · 9 READY · 1 UNAVAILABLE · 9 analyses · 34 planned inputs · all videos 4-of-4 |
+| Filtered no-spend preflight | 2 requested · 2 matched · 2 analyses · 8 planned inputs · `1442273137905726` excluded |
+| Paid Vision run **in this task/session** | **none** — `ANTHROPIC_API_KEY` absent here, zero Anthropic calls during Phase 1 implementation and zero in this Claude Code session |
+| Paid Vision runs **historically** | **Earlier bounded paid preview runs DID occur**, run separately by the operator from Windows Command Prompt. Their output was **terminal-only** and was never saved as a reusable analysis bundle. Do **not** state that no paid run has ever occurred. |
+| Database | **never written or read** by any Phase 1 work; `prisma/dev.db` mtime unchanged all session |
+
+> **CLI rows marked "pre-correction only" were run in the earlier session, against the code as it stood
+> before the final Codex correction.** The correction session ran only the tracked test suite, `tsc` and
+> `git diff --check`; no CLI was run against real project data. Those CLI results therefore describe the
+> previous code and are **not** evidence about the corrected code. Re-running them needs explicit approval.
+
+### 0.7 Decisions the next session MUST preserve
+
+1. **A failed ad is never dropped.** It becomes an honest `ERROR` row. Counts derive from the row array —
+   never reset a count (schema v1 did this and it was rejected in review).
+2. **Discriminated rows.** `error_reason` is `null` **iff** SUCCESS; held rows carry a non-empty reason and
+   **no result keys at all**. Per-variant key allowlists enforce this.
+3. **The pure-module boundary is load-bearing.** `browserAnalysisBundle.ts`, `sourceRowIdentity.ts`,
+   `creativeAssetFiles.ts` and the planner must **never** import `creativeAssetAnalyser`, Prisma,
+   Playwright or the live-ingestion script. A tracked test asserts this — keep it passing.
+4. **No recompute fallback, ever.** Missing bundle → fail. Invalid/stale → fail. Missing row → REVIEW.
+   Never "fall back to calling Vision".
+5. **The planner is a separate no-write path.** The live `ingest-browser-collected-ads.ts` was left
+   unchanged deliberately; the next task changes it under its own approval.
+6. **`UPDATE` comes from an injected id set** (`BROWSER_PLAN_EXISTING_AD_IDS`), not a DB read, so the
+   planner stays DB-free. A later phase swaps in a real lookup.
+7. **Visual confidence is VIDEO-only and fails closed to LOW.** It is **not** benchmark confidence and must
+   never be mapped into it.
+8. **The analysis cap counts logical analyses (requests), not files.**
+9. **Behavioural triggers affect output only** — not any numeric score. Verified.
+10. **Bundle scope honesty:** without a filter, scope = every source row; with one, scope = exactly the
+    requested IDs (any status); a requested ID absent from source **fails** the output.
+11. **No new paid Vision runs** until Phase 1 completes (§10) — preflights are free, use them. Note this
+    is a *forward* policy: earlier bounded paid previews **did** already happen from Command Prompt
+    (terminal-only, no bundle saved). Never claim no paid run has ever occurred.
+12. **The active phase changes only when §11 completion criteria are met**, or when the user explicitly
+    reprioritises (§20). Finding a quality bug does **not** reopen frozen work (§14).
+13. **Generated artefacts stay outside the repo** (session scratchpad). `tests/` holds source only.
+14. Honest reporting: the validator is *defensive*, not a proof that prose contains no secret. Do not
+    overstate it.
+15. **Bundle content never streams into the final path.** Writes go to a same-directory temp file, which
+    is fully written, flushed and closed before the destination is created; no-overwrite finalises with
+    `link()` (atomic, EEXIST-on-conflict, no check-then-write race) and confirmed overwrite with
+    `rename()`. Where a filesystem cannot provide the no-clobber operation, nothing is written and the
+    call fails — do **not** add a weaker interruptible fallback, and do not claim atomicity the code
+    does not provide.
+15a. **Temp cleanup is best-effort and says so.** Removal is attempted on every exit, but an unlink
+    failure is reported (`warnings` on success, an appended note on failure) and never presented as a
+    confirmed removal. A cleanup failure never invalidates an already-correct final file, and never
+    replaces the original operational failure.
+15b. **Final verification fails closed.** After finalisation the file is re-read, its checksum compared
+    to the serialised bundle, and its byte size checked against the bytes written. If any of that cannot
+    be done, the call FAILS rather than reporting a fabricated size — `bytes: 0` is never a verdict. The
+    finalised file is left alone: the honest report is "exists but unverified", never "not written".
+15c. **An ASSET SUCCESS row must declare a non-empty `creative_asset_path`.** Structural rule, enforced
+    before any disk check, so a fabricated manifest can never skip file/checksum/size validation by
+    declaring no path. The empty-path skip inside disk validation applies only to rows that consumed
+    nothing.
+16. **A held-only scope is an honest result, not an error.** With an output file requested and no READY
+    rows, preview records every scoped row (REVIEW / SKIPPED, `source_status` preserved) and calls no
+    model. The preflight still writes nothing, and no output file still early-returns.
+17. **Source rows are never silently filtered.** A blank, whitespace-only, malformed or duplicate `ad_id`
+    — or a missing `ad_id` column — fails the whole plan/bundle. Offending values are never echoed into
+    an error message.
+
+---
+
 ## 1. Product goal
 
 The intended complete **local** workflow, end to end:
@@ -46,16 +241,18 @@ Two permanent policies:
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| Latest stable commit | `6564b41` |
-| Commit title | `fix: harden multi-frame video analysis` |
+| Latest **pushed** commit | `c69866a` — `docs: add canonical project status tracker` |
+| Local HEAD | `3cedf83` — `feat: add reusable browser-analysis bundle handoff (Phase 1 part 1)`, **unpushed**, plus this tracker commit |
 | Application | Local-first Next.js 14 (App Router) |
 | Database | Prisma ORM over SQLite (`prisma/dev.db`, local) |
 | Collection policy | Browser-first canonical; Meta API diagnostic only |
 | Canonical workflow ends at | **Terminal preview output only** — nothing is persisted |
 | Ingestion path | **Separate**, and currently **repeats Vision analysis** rather than consuming the completed preview |
 
-Working tree at time of writing: clean on tracked files; only the known protected untracked files
-present (`AGENTS.md`, `dir`, `findstr`, `git`, `scripts/_orig_check.ts`).
+Working tree: HEAD is `3cedf83` (Phase 1 part 1) plus this tracker commit, both **ahead of
+`origin/main`, unpushed**. `c69866a` remains the last pushed commit. Tracked files are otherwise clean;
+the known protected untracked files remain present and untouched (`AGENTS.md`, `dir`, `findstr`, `git`,
+`scripts/_orig_check.ts`).
 
 ---
 
@@ -281,7 +478,21 @@ verification labels; real video playback.
 - **No automatic scheduler** — the GitHub workflow is `workflow_dispatch` only, cron commented out
   (`.github/workflows/meta-batch-weekly.yml:23`), and it refuses a local SQLite `DATABASE_URL`.
 - **Benchmark "HIGH confidence" means ASSET evidence, not visual certainty** — a naming hazard.
-- **No tracked automated tests** (no test script, no `*.test.ts`).
+- **Preview does not surface two bundle-writer diagnostics — LOW severity, reviewed and ACCEPTED as
+  deferred** (raised while correcting the re-review findings; preview was out of scope for that session,
+  and the final Codex re-review passed with both recorded here):
+  1. `writeBundleAtomic()` returns `warnings` when temp-file cleanup could not be confirmed. Preview
+     ignores that field, so a stray temp file is reported to nobody.
+  2. When finalisation succeeds but final verification fails, the writer returns a failure whose text
+     states plainly that the file EXISTS but is unverified. Preview's headline for any write failure is
+     `Bundle NOT written`, which is wrong in that one case — **the detail lines beneath it are accurate
+     and the exit status is still non-zero.**
+  Both are display-only: no incorrect bundle is produced, nothing unsafe is written, and neither can
+  cause a bad bundle to be consumed.
+- **Tracked automated tests exist only for the Phase 1 bundle handoff.** `tests/browser-analysis-bundle.test.ts`
+  runs 153 tests via `npm run test:browser-bundle` (committed in `3cedf83`). Everything outside that
+  handoff — discovery, capture, the video parser, scoring, ingestion, the UI — still has **no** tracked
+  test. The `6564b41` parser/trigger assertions remain synthetic and untracked (§18).
 
 > **Individual Vision-description quality tuning is deferred until the complete local v1
 > architecture is functional. Do not resume paid Vision testing during the current build phase.**
@@ -294,18 +505,53 @@ verification labels; real video playback.
 
 Shortest non-duplicative sequence to complete local v1. Phases already complete are not listed.
 
-### Phase 1 — Reusable analysis handoff  ← **ACTIVE**
+### Phase 1 — Reusable analysis handoff  ← **ACTIVE (partially delivered)**
 
 - **Objective:** make a completed preview a durable, validated ingestion input.
-- **Work remaining:** versioned analysis bundle (JSON), source CSV checksum, per-asset checksums,
-  strict validator, and zero-AI ingestion reuse.
-- **Likely files:** new `lib/analysis/browserAnalysisBundle.ts`; `scripts/preview-browser-collected-ads.ts`;
-  `scripts/ingest-browser-collected-ads.ts`; `lib/analysis/creativeAssetAnalyser.ts` (version constants only).
+- **Delivered in `3cedf83` — corrected after the first independent review and again after both the final
+  Codex review's and the focused re-review's NEEDS CHANGES verdicts, then PASSED by the final minimal
+  Codex re-review before commit (§18):**
+  - `lib/analysis/bundleAssembly.ts` — **pure** bundle-row assembly shared by preview and its tests, plus
+    the held-only output decision rule. Makes the honesty contract provable without running preview.
+  - `lib/analysis/creativeAssetFiles.ts` — **pure** creative-file allowlist. The analyser now imports it,
+    so the validator/planner share the identical rule **without** importing the Anthropic analyser.
+  - `lib/analysis/sourceRowIdentity.ts` — **pure** canonical CSV-row identity (ad id, row number, status,
+    media type, canonical repo-relative asset path, scoring copy) used by **both** the writer and the planner.
+  - `lib/analysis/browserAnalysisBundle.ts` — bundle **schema v2**: discriminated row union
+    (SUCCESS | REVIEW | SKIPPED | ERROR), SHA-256 source/sidecar/asset integrity with `realpath`
+    containment (enforced for **every** declared path, manifest or not) and byte-size checks, canonical
+    enum + 0–10 range validation, exact ISO instants, targeted sensitive-content guards (including on
+    `analysis_model`), VIDEO manifest cardinality against `ai_video_max_frames`, **standalone source-row
+    binding** (row count, selected-ID presence, field-by-field identity), a required non-empty
+    `creative_asset_path` for ASSET SUCCESS rows so no manifest can skip disk validation, stable-order
+    serialiser, temp-file writer with atomic no-clobber finalisation, best-effort-but-reported temp
+    cleanup and fail-closed final checksum/byte-size verification, provenance-aware verified-metadata
+    sidecar loader.
+  - `scripts/validate-browser-analysis-bundle.ts` — `npm run browser:bundle:validate`; strict args;
+    prints **VALID — STRUCTURE, SOURCE AND ASSET INTEGRITY VERIFIED** or, with `--no-file-checks`,
+    **STRUCTURALLY VALID — SOURCE AND ASSET INTEGRITY NOT VERIFIED**.
+  - `scripts/plan-browser-ingest-from-bundle.ts` — `npm run browser:plan-from-bundle`; bundle-only,
+    no-write planner; per-row source binding; exact include/exclude; ACCEPT-only verified metadata.
+  - `scripts/preview-browser-collected-ads.ts` — opt-in `AI_PREVIEW_OUTPUT_FILE`; **honest scope** (every
+    scope ad gets exactly one row; a failed analysis becomes an ERROR row and is never dropped); counts
+    derived from rows; a requested bundle is produced for **held-only scopes** (no READY rows) with no
+    Anthropic call; requested-output failure **exits non-zero**.
+  - `tests/browser-analysis-bundle.test.ts` — **153 tracked tests** via `npm run test:browser-bundle`
+    (Node's built-in `node:test` through tsx — no new framework).
+- **Work remaining before Phase 1 is complete:**
+  1. **The real `browser:ingest` is still not bundle-backed.** It still calls `resolveCreativeContext()`
+     (line 695) **before** the duplicate check (line 756), so live browser ingestion can still be charged
+     twice. The planner is a separate safe path; the charging path is unchanged by design.
+  2. **No bundle produced by a real paid preview exists yet.** Earlier bounded paid previews did run
+     (from Command Prompt) but were terminal-only and predate the bundle writer, so none saved a bundle.
+     Every bundle exercised so far is synthetic or built from real assets with placeholder analysis text.
 - **Dependencies:** existing planner/parser and exact-ID filter (both complete).
-- **Completion criteria:** preview can explicitly save a validated result; ingestion can consume it;
-  a matching valid bundle causes **zero** Anthropic calls; stale/mismatched bundles fail closed;
-  exact selected ad IDs recorded; deterministic scores and visual confidence preserved.
-- **Validation:** tracked unit tests for schema, checksum drift, duplicate/missing IDs, unchanged scoring.
+- **Completion criteria:** preview can explicitly save a validated result ✅; a matching valid bundle causes
+  **zero** Anthropic calls ✅ (planner, proven by tracked import-boundary test); stale/mismatched bundles and
+  row-level drift fail closed ✅; exact selected ad IDs recorded ✅; deterministic scores and visual
+  confidence preserved ✅; **the real ingestion path consumes the bundle ❌ (outstanding)**.
+- **Validation:** `npm run test:browser-bundle` (153 passing), `npx tsc --noEmit --incremental false`,
+  `git diff --check`. The no-spend preflights were last exercised before the final correction (§0.6).
 - **Deferred:** all paid quality tuning; schema changes.
 
 ### Phase 2 — Browser review and exception state
@@ -386,6 +632,22 @@ implementation.
 
 ## 13. Next exact task
 
+> **Superseded, and NOT the immediate action.** The bundle (schema v2), strict validator, bundle-backed
+> **planner** and **153 tracked tests** passed their final Codex re-review and are committed as
+> `3cedf83`, unpushed (§11 Phase 1). **§0.4 holds the immediate action: push approval.** The work below
+> is the task that follows the push — kept here as the agreed spec, not as a licence to start now.
+> **Do not begin it before the push** unless the operator explicitly reprioritises.
+>
+> **Integrate the validated bundle into the real ingestion path without another AI call.**
+> Make `scripts/ingest-browser-collected-ads.ts` consume a validated bundle instead of calling
+> `resolveCreativeContext()` (line 695), so a Vision charge can never precede the line-756 duplicate
+> check — and so dry-run ingestion costs nothing. Reuse `loadBundle()`, `bundleRowIdentity()` and
+> `sourceRowIdentityMismatch()`; fail closed on a missing/invalid/stale bundle with **no** recompute
+> fallback. Keep the triple-flag live-write guard, READY-only eligibility and verified-ACCEPT-only
+> metadata. No Prisma/schema change. Add tracked tests for the new ingestion path.
+>
+> The original Phase 1 scope below is retained for reference.
+
 **Implement a versioned browser-analysis bundle and strict validator, then make browser ingestion
 plan from that bundle with zero Anthropic calls.**
 
@@ -436,6 +698,28 @@ no-spend Castlery preflights unchanged.
 - Preview spending cap and paid-confirmation design.
 - Repeated paid tuning of individual video descriptions.
 - Behavioural-trigger tuning via paid reruns.
+
+### Provisional — NOT yet frozen
+
+The following are **reviewed (Codex PASS), committed as `3cedf83` and covered by 153 tracked tests, but
+remain provisional until the commit is PUSHED.** This section's rule requires a Codex PASS **and** a
+committed, pushed change; the PASS and the commit are done, so the **push is the only thing keeping these
+off the frozen list** — not any doubt about the review. Move them onto the do-not-repeat list above once
+the push lands:
+
+- The bundle schema (v2) and its strict validator — discriminated rows, checksum/realpath integrity,
+  enum/range/ISO rules, sensitive-content guards, VIDEO manifest cardinality, the required non-empty
+  `creative_asset_path` on ASSET SUCCESS rows.
+- The standalone source-row binding in full disk validation.
+- The temp-file bundle writer and its atomic no-clobber finalisation (`link`), including the documented
+  narrowed guarantee when a filesystem cannot provide it, the best-effort-but-reported cleanup contract,
+  and fail-closed final checksum/byte-size verification.
+- The pure-module boundary (`creativeAssetFiles.ts`, `sourceRowIdentity.ts`, `bundleAssembly.ts`) and its
+  tracked import-boundary test.
+- The bundle-backed no-write planner, the opt-in preview bundle output and held-only bundle output.
+
+They may be added to the do-not-repeat list **only after** a Codex PASS and a committed, pushed change.
+Status: Codex PASS ✅ · committed (`3cedf83`) ✅ · **pushed ❌** — freeze them when the push lands.
 
 ---
 
@@ -523,7 +807,10 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | — | Ingestion | Card ingestion inside one atomic run | **Not yet verified** | Not implemented |
 | — | Review | Browser review states | **Not yet verified** | Do not exist |
 | — | Scheduler | Scheduled execution | **Not yet verified** | Cron disabled |
-| — | Tests | Automated test suite | **Missing** | No test script or tracked spec files |
+| `3cedf83` | Phase 1 | `npm run test:browser-bundle` — bundle schema, validator, source binding, planner, atomic write + cleanup/verification reporting, held-only assembly | **PASS — 153 tests, 0 fail, 0 skipped** | **Repo-verifiable** — the suite is tracked at `3cedf83`. 87 → 139 → 153 across the two correction rounds |
+| `3cedf83` | Phase 1 | `npx tsc --noEmit --incremental false`; `git diff --check` | PASS (exit 0) | **Repo-verifiable** — run on the exact tree that was committed |
+| 2026-07-17, at the tree committed as `3cedf83` | Phase 1 part 1 | **Final minimal independent Codex read-only re-review** of the three focused-re-review corrections: ASSET empty-path bypass, temp-cleanup reporting, final checksum/byte-size verification | **PASS** | **Operator-reported** (Codex runs outside this repo, so the verdict itself is not repo-verifiable — the tree it reviewed is). Confirmed: 153 tests passed, 0 failed, 0 skipped; TypeScript passed; `git diff --check` passed; ASSET empty-path bypass resolved; temp cleanup correctly treated as best-effort; final checksum and byte-size verification fails closed; zero-AI / zero-browser / zero-database boundary passed. **Phase 1 part 1 declared safe to commit** — the commit followed this verdict |
+| — | Tests | Automated tests outside the Phase 1 bundle handoff | **Missing** | Discovery, capture, parser, scoring, ingestion and UI have no tracked spec files |
 
 ---
 
@@ -535,6 +822,15 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 |---|---|---|---|---|
 | 2026-07-16 | `6564b41` | Baseline recorded. Multi-frame video hardening: labelled frame blocks, strict four-section parsing, exact frame-observation validation, neutral malformed fallback, visual confidence display. | Strict VIDEO response parsing; visual-confidence **display**; frame-observation validation | Analysis bundle + reuse (Phase 1); browser review/exceptions (Phase 2); browser `ScanRun` (Phase 3); operational UI (Phase 4); resume + scheduling (Phase 5) |
 | 2026-07-16 | (uncommitted) | Created `docs/PROJECT_STATUS.md` as the canonical tracker from the independent Codex audit. | Single source of truth for status, phases, do-not-repeat and agent roles | Phase 1 implementation |
+| 2026-07-16 | `c69866a` | Tracker committed and pushed. | Canonical tracker published | Phase 1 implementation |
+| 2026-07-16 | (uncommitted) | **[HISTORICAL — SUPERSEDED, see the schema-v2 row below. This row describes the schema-v1 attempt as it stood on 2026-07-16; it is NOT the current implementation. Schema v1 was rejected in review because its writer silently dropped failed ads and zeroed the failed count. No v1 code survives.]** **Phase 1 part 1.** Added `lib/analysis/browserAnalysisBundle.ts` (schema v1, checksums, strict validator, atomic writer); `scripts/validate-browser-analysis-bundle.ts`; `scripts/plan-browser-ingest-from-bundle.ts`; opt-in `AI_PREVIEW_OUTPUT_FILE` in preview; 2 npm scripts. | Versioned bundle + strict validator + **bundle-only, zero-AI, no-write planner**; overwrite protection; exact include/exclude | **Tracked** unit tests; make the real `browser:ingest` bundle-backed (it still calls Anthropic at line 695 before dedup at 756); produce a real bundle from a paid preview |
+| 2026-07-16 | (uncommitted) | **Session handover** written (§0): complete/in-progress/blocked, next exact task, all files changed, all checks performed, do-not-repeat pointer, and decisions the next session must preserve. | Session-resumable handover | — |
+| 2026-07-16 | (uncommitted) | **Handover factual correction.** (a) Paid-Vision history restated: no paid call in this task/session, but **earlier bounded paid previews did occur** from Command Prompt (terminal-only, no bundle saved) — the "never performed" claim was wrong. (b) Phase 1 part 1 blocker restated: awaiting **final independent Codex review**, not merely commit approval; not safe to stage until the verdict returns. (c) Immediate next task set to the **Codex review**, with the sequence review → fix findings → commit/push → then live-ingestion integration. (d) The unreviewed bundle schema / validator / pure-module boundary **removed from the frozen do-not-repeat list** and recorded as **provisional**. | Accurate handover; unreviewed work no longer presented as frozen | Codex review verdict |
+| 2026-07-16 | (uncommitted) | **Phase 1 part 1 correction** after independent review. Bundle **schema v2**: discriminated row union so failed ads survive as honest ERROR rows (the v1 writer silently dropped them and zeroed the failed count); per-row source binding via new pure `sourceRowIdentity.ts`; pure `creativeAssetFiles.ts` allowlist removes the analyser import from the validator/planner path; realpath containment + byte-size + range/enum/ISO validation; targeted sensitive-content guards; exclusive-create atomic write reporting the re-read final file; non-zero exit on requested-output failure; strict validator arg parsing and honest `--no-file-checks` wording; ACCEPT-only verified metadata in the plan; **87 tracked tests** (`npm run test:browser-bundle`). | Honest complete row accounting; row-level drift detection; structural zero-AI/browser/DB boundary proven by a tracked test | Make the real `browser:ingest` bundle-backed (still charges AI at line 695 before dedup at 756); produce a real bundle from an approved paid preview |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 1 — final Codex correction.** The final independent review returned **NEEDS CHANGES**; all six findings corrected. (1) **Atomic write:** every write now goes through a same-directory temp file that is fully written, `fsync`ed and closed before the destination exists; no-overwrite finalises with `link()` (atomic, fails EEXIST, no check-then-write race) and fails safely with a documented narrowed guarantee where the filesystem cannot support it; confirmed overwrite finalises with `rename()` from the completed temp file; temp files are cleaned on success and failure. The old path opened the FINAL file with `wx` and streamed into it, so an interrupted write could leave a misleading final bundle. (2) **`analysis_model`** now gets bounded-length (80) and sensitive-content scanning; the rejected value is never echoed. (3) **Planner** no longer silently filters blank `ad_id` rows: new pure `parseSourceIdentities()` rejects a missing `ad_id` column, and blank / whitespace-only / malformed / duplicate ids fail the WHOLE plan without echoing the value. (4) **Held-only scopes** with an output file requested now produce an honest bundle instead of returning early (NEEDS_REVIEW→REVIEW, SKIP→SKIPPED, UNAVAILABLE→SKIPPED retaining `source_status`); the preflight still writes nothing and no output file still early-returns. Row assembly extracted to the new pure `lib/analysis/bundleAssembly.ts`. (5) **VIDEO manifest cardinality** enforced against `ai_video_max_frames` (VIDEO only). (6) **`creative_asset_path` containment** now enforced for every declared path even with an empty manifest; existence is still only required where the row claims the asset was consumed. (7) **Standalone validation** now parses the declared source CSV with the same canonical identity rules and proves row count, selected/excluded ID presence, and field-by-field row binding; `--no-file-checks` stays structural-only. Tests: **87 → 139**, all passing. | Interruption-safe bundle output; no unscanned model string; no silently dropped source row; honest held-only bundles; validator independently proves the bundle-to-source relationship | **Final Codex re-review of these corrections** (immediate next task); then approved exact-file commit/push; then make the real `browser:ingest` bundle-backed (it still charges AI at line 695 before dedup at 756); produce a real bundle from an approved paid preview |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 1 — focused Codex re-review correction.** The re-review of the previous row's work returned **NEEDS CHANGES** for three narrower defects, all now closed in `lib/analysis/browserAnalysisBundle.ts`. (1) **Empty-path ASSET bypass:** a SUCCESS row with `creative_source: ASSET` and a non-empty manifest could declare `creative_asset_path: ""`, which passed shape validation and then hit the empty-path skip in disk validation — so no file, checksum or byte-size check ran on a fabricated manifest. An ASSET SUCCESS row must now declare a non-empty (post-trim) path; the rule is structural, fires with `--no-file-checks`, and short-circuits before disk validation, so the skip can only apply to rows that consumed nothing. MANUAL/FALLBACK/REVIEW/SKIPPED/ERROR rules unchanged. (2) **Cleanup honesty:** temp-file unlink failures were swallowed while the docstring claimed removal was unconditional. Removal is still attempted on every exit, but is now documented and reported as best-effort: an unconfirmed cleanup surfaces as `warnings` on success and as an appended note on failure, never replacing the original failure, and never invalidating an already-correct final file. (3) **Final verification fails closed:** a `stat` failure previously returned `ok: true` with `bytes: 0`. The final file is now re-read, its checksum compared against the serialised bundle and its size compared against the bytes written; any gap returns a failure stating the file EXISTS but is UNVERIFIED, without deleting or rewriting it. A narrow `__testHooks` seam (unlink / statSize / hashFile) makes all three provable. Tests: **139 → 153**, all passing. Two display-only gaps recorded in §10 (preview does not print `warnings`, and labels the exists-but-unverified case `Bundle NOT written`). | Fabricated manifests can no longer skip asset verification; cleanup and byte-size reporting no longer claim more than the code proves | **One final minimal Codex re-review of these three corrections** (immediate next task); then approved exact-file commit/push; then make the real `browser:ingest` bundle-backed (still charges AI at line 695 before dedup at 756); produce a real bundle from an approved paid preview; fix the two §10 preview display gaps |
+| 2026-07-17 | `3cedf83` | **Phase 1 part 1 reviewed and committed.** The **final minimal independent Codex re-review returned PASS** on the tree — all three focused findings confirmed resolved, 153 tests passed / 0 failed / 0 skipped, TypeScript passed, `git diff --check` passed, zero-AI / zero-browser / zero-database boundary passed — and declared Part 1 **safe to commit**. The operator then approved the commit. Ten files staged by exact name (the four protected untracked files and `scripts/_orig_check.ts` were not touched): the three pure modules (`browserAnalysisBundle.ts`, `sourceRowIdentity.ts`, `creativeAssetFiles.ts`), the pure `bundleAssembly.ts`, the validator and planner CLIs, the preview bundle output, the analyser's allowlist re-export, `package.json`'s three scripts, and the 153-test tracked suite. No code changed at commit time — this is exactly the reviewed and validated tree. **Not pushed** — push was not approved. | Phase 1 part 1 is independently reviewed, PASSED and version-controlled; commit-ready work is complete | **Push approval** (the only outstanding item); then the real `browser:ingest` bundle-backed integration (§13, still charges AI at line 695 before dedup at 756); a real bundle from an approved paid preview; the two low-severity §10 preview display items |
+| 2026-07-17 | `65381a8` (amended) | **Tracker factual correction.** The tracker as first written at `65381a8` wrongly stated that the final minimal Codex re-review was still **outstanding** and that Part 1 had been committed **ahead of** independent verification. That was wrong on both counts: the re-review had already run **before** the commits and returned **PASS**. Corrected across every live-status section — §0 handover header, §0.1, §0.2, §0.3 blocked table, §0.4 next action, §11 Phase 1, §13, §14 provisional list, §18 validation log, and the `3cedf83` row above — so the tracker now records the PASS, states that **no further Codex review is required before push**, and names **push approval** as the immediate action. Phase 1 part 1 stays **provisional rather than frozen** for one reason only: §14 requires a Codex PASS *and* a **pushed** change, and the push has not happened. Historical rows above are unchanged: they were accurate when written. Phase 1 remains **ACTIVE and partial** — live ingestion is not bundle-backed, still repeats AI, and no bundle from a real paid preview exists. | An accurate record: review status, commit status and the immediate action are no longer contradicted by the tracker | Push approval |
 
 ---
 
