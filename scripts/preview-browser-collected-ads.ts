@@ -21,7 +21,7 @@ import * as path from 'path';
 import { analyseAdRow } from '@/lib/analysis';
 import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
 import { resolveCreativeContext, planVisionInputs, resolveVideoMaxFrames } from '@/lib/analysis/creativeAssetAnalyser';
-import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
+import type { CreativeContext, CreativeSource, VisualConfidence } from '@/lib/analysis/creativeAssetAnalyser';
 import { scoreCompetitorBenchmarkAd } from '@/lib/analysis/competitorScoring';
 import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
 
@@ -131,6 +131,9 @@ type ScoredRow = {
   copyWasContaminated: boolean;
   rawAdCopy: string;
   creativeSource: CreativeSource;
+  // Vision's own confidence in reading the supplied visual sequence (VIDEO only).
+  // Deliberately SEPARATE from benchmark.confidence (evidence-source confidence).
+  visualConfidence?: VisualConfidence;
   benchmark: CompetitorBenchmark;
   error: null;
 };
@@ -711,6 +714,7 @@ async function main(): Promise<void> {
         copyWasContaminated,
         rawAdCopy:            row.ad_copy.trim(),
         creativeSource:       creative.source,
+        visualConfidence:     creative.visual_confidence,
         error: null,
       });
     } catch (err: unknown) {
@@ -751,7 +755,7 @@ async function main(): Promise<void> {
       copyPreview, visualDescPreview, creativeNotesPreview,
       exampleRowAnalysis, exampleRowCreativeAnalysis,
       exampleRowCopy, exampleRowHeadline, exampleRowDescription,
-      copyWasContaminated, rawAdCopy, creativeSource, benchmark,
+      copyWasContaminated, rawAdCopy, creativeSource, visualConfidence, benchmark,
     } = result;
 
     const sourceLabel =
@@ -763,6 +767,9 @@ async function main(): Promise<void> {
     console.log(`\n  ${qualIcon} Row ${rowNumber}  ad_id=${adId}`);
     console.log(`    media_type:     ${mediaType}  →  format: ${format}`);
     console.log(`    Creative source:${sourceLabel}`);
+    // Vision's confidence in reading the supplied visual sequence. This is NOT the
+    // competitor-benchmark confidence below, and is never mapped into it.
+    console.log(`    Visual confidence: ${visualConfidence ?? 'N/A'}   [Vision: model confidence identifying the supplied visual sequence]`);
     if (copyWasContaminated) {
       console.log(`    ⚠  WARN [ad_copy]: comment-contaminated — excluded from scorer Copy field`);
       console.log(`    Raw copy:       ${truncate(rawAdCopy, 80)}`);
@@ -786,7 +793,7 @@ async function main(): Promise<void> {
     console.log('    ══ COMPETITOR BENCHMARK (primary for competitor ads) ══');
     console.log(`    Benchmark score:  ${scoreBar(benchmark.benchmarkScore)}`);
     console.log(`    Benchmark tier:   ${benchmark.tier}`);
-    console.log(`    Confidence:       ${confIcon} ${benchmark.confidence}`);
+    console.log(`    Benchmark confidence: ${confIcon} ${benchmark.confidence}   [evidence-source confidence — NOT visual confidence]`);
     console.log(`    Evidence source:  ${benchmark.evidenceSource}`);
     console.log(`    Formula:          ${benchmark.formula}`);
     console.log(`    Inputs:           ${benchmark.breakdown.map((b) => `${b.label}=${b.value.toFixed(1)}×${b.weight}`).join('  ')}`);

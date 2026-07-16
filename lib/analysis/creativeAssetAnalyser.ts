@@ -26,10 +26,16 @@ import * as path from 'path';
 
 export type CreativeSource = 'ASSET' | 'MANUAL' | 'FALLBACK';
 
+/** Model's self-reported confidence in its VISUAL interpretation (VIDEO only). */
+export type VisualConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
 export type CreativeContext = {
   visual_description: string;
   creative_notes: string;
   source: CreativeSource;
+  // VIDEO only. Absent/unparseable → LOW (fail closed). Undefined for IMAGE /
+  // CAROUSEL / MANUAL / FALLBACK, which are not asked for a confidence.
+  visual_confidence?: VisualConfidence;
 };
 
 // ─── Internal types ───────────────────────────────────────────────────────────
@@ -129,19 +135,54 @@ Then 2-3 sentences covering: the funnel stage this carousel appears to target (T
 Respond with only the two labelled sections. No preamble or commentary.`;
 }
 
-function buildVideoPrompt(frameCount: number): string {
-  return `You are analysing ${frameCount} still frame(s) sampled in order from ONE Meta Ad Library VIDEO ad for a competitor advertiser. The advertiser may be in any industry and may sell a product or a service. Describe only what is actually visible in these frames; do not assume an industry or category, do not compare it to any other brand or product type, and do not infer audio, voiceover, music, or motion you cannot see. If something is not visible, state that it is not visible rather than guessing. Your output will be used to score the ad's marketing effectiveness.
+/** Label emitted as a text block immediately BEFORE each video frame image. */
+export function videoFrameLabel(index: number, total: number): string {
+  return `FRAME ${index} OF ${total}`;
+}
 
-Provide exactly two sections:
+/** The labelled sections a VIDEO response must contain, in order. */
+export const VIDEO_PROMPT_SECTIONS = [
+  'FRAME_OBSERVATIONS',
+  'VISUAL_DESCRIPTION',
+  'VISUAL_CONFIDENCE',
+  'CREATIVE_NOTES',
+] as const;
+
+function buildVideoPrompt(frameCount: number): string {
+  return `You have been shown ${frameCount} still frames sampled IN ORDER from ONE Meta Ad Library VIDEO ad for a competitor advertiser. Each image was preceded by a label "FRAME n OF ${frameCount}".
+
+The advertiser may be in any industry and may sell a product or a service. Analyse ONLY what is visible in the frames.
+
+MANDATORY METHOD — follow in this order:
+1. Examine EVERY frame separately, in order, BEFORE deciding what the ad is about.
+2. Do NOT classify the video from FRAME 1 alone. FRAME 1 is frequently an intro, a close-up, a texture or fabric shot, a logo card, an empty room, or a transitional shot, and is often NOT the subject of the ad. Later frames commonly carry the decisive product context.
+3. Decide the overall subject only after weighing all ${frameCount} frames together. If a later frame reveals the product, that product is the subject — not whatever FRAME 1 happened to show.
+
+Rules:
+- Do not infer audio, voiceover, music, narration, or motion you cannot see.
+- Do not invent a product category. If the frames are ambiguous, say they are ambiguous.
+- If the frames do not support ONE coherent interpretation, report the uncertainty instead of guessing.
+- Describe only what is actually visible. Never compare to another brand or assume an industry.
+
+Respond with exactly these four labelled sections and nothing else:
+
+FRAME_OBSERVATIONS:
+One line per frame, in order, formatted exactly "FRAME n: <what is visible in that frame>". For each frame state the main object or subject, any people, any on-screen text, and whether the frame looks like an intro / close-up / transitional shot rather than a product shot.
 
 VISUAL_DESCRIPTION:
-Describe the video as a unit across the frames: product or service shown, setting or background, human presence (yes/no), text overlays visible (yes/no and what they say if clear), price or discount visible (yes/no), CTA button or text visible (yes/no and wording if clear), brand or logo visible (yes/no), opening-frame visual strength (strong/moderate/weak), and what changes across the frames (if anything).
+2-4 sentences describing the video as a unit AFTER considering every frame: the recurring product or subject across the sequence, what changes from frame to frame, whether FRAME 1 is an intro/close-up/transitional shot, the setting, human presence (yes/no), text overlays (yes/no and wording if clear), price or discount visible (yes/no), CTA visible (yes/no and wording if clear), brand or logo visible (yes/no), and the best-supported overall purpose of the video.
+
+VISUAL_CONFIDENCE:
+Exactly one word first — HIGH, MEDIUM or LOW — then " - " and a short reason, on one line.
+Use LOW when: the frames conflict; the main object cannot be identified; your description rests mainly on an ambiguous close-up; or the visual evidence does not align into one coherent subject.
+Use MEDIUM when the subject is probable but partly inferred.
+Use HIGH only when the recurring subject is unambiguous across multiple frames.
 
 CREATIVE_NOTES:
-First line only: "Attention X/10. Interest X/10. Desire X/10. Action X/10." (score the video as a unit, 1-10 each, based solely on what is observable in these frames).
-Then 2-3 sentences covering: the funnel stage this video appears to target (TOFU/MOFU/BOFU), the opening-frame hook strength, the ad's primary message or offer, any trust signals visible, and one key strength and one key weakness.
+First line only: "Attention X/10. Interest X/10. Desire X/10. Action X/10." (score the video as a unit, 1-10 each, based solely on what is observable).
+Then 2-3 sentences covering: the funnel stage this video appears to target (TOFU/MOFU/BOFU), the opening hook strength, the ad's primary message or offer, any trust signals visible, and one key strength and one key weakness.
 
-Respond with only the two labelled sections. No preamble or commentary.`;
+No preamble or commentary.`;
 }
 
 // ─── Image helpers ────────────────────────────────────────────────────────────
@@ -278,14 +319,144 @@ export function planVisionInputs(
 
 // ─── Response parsing ─────────────────────────────────────────────────────────
 
-function parseResponse(text: string): { visual_description: string; creative_notes: string } {
-  const visMatch   = text.match(/VISUAL_DESCRIPTION:\s*([\s\S]*?)(?=CREATIVE_NOTES:|$)/i);
+export type ParsedCreativeResponse = {
+  visual_description: string;
+  creative_notes: string;
+  visual_confidence?: VisualConfidence;
+};
+
+// Neutral, reviewable fallbacks for a malformed VIDEO response. The raw model output
+// is deliberately NOT surfaced here — a malformed response must not leak section
+// labels or unstructured text into scored fields.
+const MALFORMED_VIDEO_DESCRIPTION =
+  'Structured video response was malformed (missing, duplicated or out-of-order sections). Manual review required; no visual interpretation accepted.';
+const MALFORMED_VIDEO_NOTES =
+  'Structured creative notes were unavailable for this video response. Manual review required.';
+
+/**
+ * Locates the four required VIDEO sections and validates the WHOLE structure.
+ * Returns null (→ caller fails closed to LOW) when any required header is missing,
+ * appears more than once, or appears out of the required order. Content ranges are
+ * sliced strictly between one header's end and the next header's start, so a section
+ * can never absorb another section's header or text.
+ */
+function locateVideoSections(text: string): Record<string, { start: number; end: number }> | null {
+  const found: Array<{ name: string; index: number; end: number }> = [];
+
+  for (const name of VIDEO_PROMPT_SECTIONS) {
+    const re = new RegExp(`^[ \\t]*${name}[ \\t]*:`, 'gim');
+    let count = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      count++;
+      if (count > 1) return null;                       // duplicate header → invalid
+      found.push({ name, index: m.index, end: m.index + m[0].length });
+    }
+    if (count !== 1) return null;                       // missing header → invalid
+  }
+
+  found.sort((a, b) => a.index - b.index);
+  for (let i = 0; i < VIDEO_PROMPT_SECTIONS.length; i++) {
+    if (found[i]!.name !== VIDEO_PROMPT_SECTIONS[i]) return null;   // out of order → invalid
+  }
+
+  const out: Record<string, { start: number; end: number }> = {};
+  for (let i = 0; i < found.length; i++) {
+    out[found[i]!.name] = {
+      start: found[i]!.end,
+      end: i + 1 < found.length ? found[i + 1]!.index : text.length,
+    };
+  }
+  return out;
+}
+
+/**
+ * FRAME_OBSERVATIONS must carry exactly one ANCHORED "FRAME n: <text>" line per
+ * supplied frame, numbered 1..expectedFrames in order, EACH with real observation
+ * text after the colon. Line-anchored + colon-required, so "FRAME 1" inside ordinary
+ * prose is never counted. Missing, duplicate, extra, empty, frame 0, above-N,
+ * out-of-order observations — and an invalid expectedFrames — all fail closed.
+ *
+ * Group 1 = frame number, group 2 = same-line observation text (may be empty → reject).
+ * Tolerates "FRAME 1 :", "FRAME 1:\ttext" and lower-case "frame 1:". "FRAME 01:"
+ * resolves to 1 and cannot bypass the duplicate/order check below.
+ */
+function hasExactFrameObservations(body: string, expectedFrames: number): boolean {
+  // Fail CLOSED on an invalid expected count — never treat it as "not enforced".
+  // Number.isSafeInteger rejects non-numbers, NaN, Infinity, decimals and unsafe
+  // magnitudes; the > 0 test rejects 0 and negatives.
+  if (!Number.isSafeInteger(expectedFrames) || expectedFrames <= 0) return false;
+
+  const re = /^[ \t]*FRAME[ \t]+(\d+)[ \t]*:(.*)$/gim;
+  const nums: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) {
+    if ((m[2] ?? '').trim() === '') return false;   // labelled but no observation text
+    nums.push(Number(m[1]));
+  }
+  if (nums.length !== expectedFrames) return false;
+  for (let i = 0; i < expectedFrames; i++) if (nums[i] !== i + 1) return false;
+  return true;
+}
+
+/** VIDEO: structure AND bodies must fully validate before HIGH or MEDIUM is accepted. */
+function parseVideoResponse(text: string, expectedFrames: number): ParsedCreativeResponse {
+  const malformed = (): ParsedCreativeResponse => ({
+    visual_description: MALFORMED_VIDEO_DESCRIPTION,
+    creative_notes: MALFORMED_VIDEO_NOTES,
+    visual_confidence: 'LOW',
+  });
+
+  const sec = locateVideoSections(text);
+  if (!sec) return malformed();                       // missing / duplicate / out-of-order headers
+
+  const body = (name: string) => text.slice(sec[name]!.start, sec[name]!.end).trim();
+  const frames      = body('FRAME_OBSERVATIONS');
+  const description = body('VISUAL_DESCRIPTION');
+  const notes       = body('CREATIVE_NOTES');
+
+  // Headers alone are not a response: required bodies must carry real content.
+  if (!frames || !description || !notes) return malformed();
+
+  // Every supplied frame must have been observed exactly once, in order.
+  if (!hasExactFrameObservations(frames, expectedFrames)) return malformed();
+
+  // Confidence is read ONLY from between its own header and CREATIVE_NOTES, and only
+  // as an exact leading token — never borrowed from another section. An unreadable
+  // token with otherwise valid sections is a STRUCTURED LOW (real content retained),
+  // which stays distinguishable from the neutral malformed fallback above.
+  const m = /^(HIGH|MEDIUM|LOW)\b/i.exec(body('VISUAL_CONFIDENCE'));
+  return {
+    visual_description: description,
+    creative_notes:     notes,
+    visual_confidence:  m ? (m[1]!.toUpperCase() as VisualConfidence) : 'LOW',
+  };
+}
+
+/** IMAGE / CAROUSEL / single file — unchanged two-section behaviour, never a confidence. */
+function parseSimpleResponse(text: string): ParsedCreativeResponse {
+  const visMatch   = text.match(/VISUAL_DESCRIPTION:\s*([\s\S]*?)(?=VISUAL_CONFIDENCE:|CREATIVE_NOTES:|$)/i);
   const notesMatch = text.match(/CREATIVE_NOTES:\s*([\s\S]*?)$/i);
+  return {
+    visual_description: visMatch  ? visMatch[1]!.trim()   : text.trim(),
+    creative_notes:     notesMatch ? notesMatch[1]!.trim() : '',
+    // These prompts never ask for a confidence, so an unexpected VISUAL_CONFIDENCE
+    // label in the output must NOT populate the field. It stays undefined.
+    visual_confidence: undefined,
+  };
+}
 
-  const visual_description = visMatch  ? visMatch[1].trim()   : text.trim();
-  const creative_notes     = notesMatch ? notesMatch[1].trim() : '';
-
-  return { visual_description, creative_notes };
+/**
+ * `expectedFrames` is the number of frames actually supplied in the request (VIDEO
+ * only; pass 0 for IMAGE/CAROUSEL). It is required — not defaulted — so a caller can
+ * never silently skip frame-observation validation.
+ */
+export function parseResponse(
+  text: string,
+  expectConfidence: boolean,
+  expectedFrames: number,
+): ParsedCreativeResponse {
+  return expectConfidence ? parseVideoResponse(text, expectedFrames) : parseSimpleResponse(text);
 }
 
 // ─── Main analysis function ───────────────────────────────────────────────────
@@ -301,7 +472,7 @@ function parseResponse(text: string): { visual_description: string; creative_not
 export async function analyseCreativeAsset(
   assetPath: string,
   mediaType: string,
-): Promise<{ visual_description: string; creative_notes: string }> {
+): Promise<{ visual_description: string; creative_notes: string; visual_confidence?: VisualConfidence }> {
   // Frame budget is validated BEFORE any request is built — fail closed on a
   // malformed AI_VIDEO_MAX_FRAMES rather than silently defaulting.
   const framesCfg = resolveVideoMaxFrames();
@@ -319,13 +490,26 @@ export async function analyseCreativeAsset(
   // ONE logical Vision request per ad, however many images it carries:
   //   CAROUSEL → every eligible card;  VIDEO → up to AI_VIDEO_MAX_FRAMES frames;
   //   IMAGE / single file → its one eligible image.
-  const imageBlocks: ImageBlock[] = [];
-  for (const f of plan.planned) imageBlocks.push(await buildImageBlock(f)); // sequential: avoids concurrent browser launches
-  const prompt =
-    plan.kind === 'CAROUSEL' ? buildCarouselPrompt(plan.planned.length) :
-    plan.kind === 'VIDEO'    ? buildVideoPrompt(plan.planned.length)    :
-                               IMAGE_PROMPT;
-  const content: ContentBlock[] = [...imageBlocks, { type: 'text', text: prompt }];
+  let content: ContentBlock[];
+
+  if (plan.kind === 'VIDEO') {
+    // Each frame is explicitly labelled ("FRAME n OF N") in a text block placed
+    // immediately BEFORE its image, so the model can reason per frame and cannot
+    // silently treat frame 1 as the whole ad. Still ONE request.
+    const total = plan.planned.length;
+    const blocks: ContentBlock[] = [];
+    for (let i = 0; i < total; i++) {
+      blocks.push({ type: 'text', text: videoFrameLabel(i + 1, total) });
+      blocks.push(await buildImageBlock(plan.planned[i]!)); // sequential: avoids concurrent browser launches
+    }
+    content = [...blocks, { type: 'text', text: buildVideoPrompt(total) }];
+  } else {
+    // IMAGE / CAROUSEL / single file — unchanged ordering: images, then one prompt.
+    const imageBlocks: ImageBlock[] = [];
+    for (const f of plan.planned) imageBlocks.push(await buildImageBlock(f)); // sequential: avoids concurrent browser launches
+    const prompt = plan.kind === 'CAROUSEL' ? buildCarouselPrompt(plan.planned.length) : IMAGE_PROMPT;
+    content = [...imageBlocks, { type: 'text', text: prompt }];
+  }
 
   const apiResponse = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -354,7 +538,8 @@ export async function analyseCreativeAsset(
   const textBlock   = data.content.find((b) => b.type === 'text');
   const responseText = textBlock?.text ?? '';
 
-  return parseResponse(responseText);
+  const isVideo = plan.kind === 'VIDEO';
+  return parseResponse(responseText, isVideo, isVideo ? plan.planned.length : 0);
 }
 
 // ─── Context resolver (called by scripts) ────────────────────────────────────
