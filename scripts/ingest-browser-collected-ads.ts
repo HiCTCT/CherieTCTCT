@@ -1,90 +1,72 @@
 /**
- * Browser-Collected Ads — Dry-Run Ingestion Script
+ * Browser-Collected Ads — BUNDLE-BACKED Ingestion  (Phase 1 part 2)
  *
- * Reads a browser-collected ads CSV, scores each READY row using analyseAdRow(),
- * checks for existing duplicate metaAdIds in the database, and prints exactly
- * what would be written to the Ad and AdAnalysis tables.
+ * Consumes a validated browser-analysis bundle and persists the analysis that the
+ * preview ALREADY paid for. It never analyses anything itself.
  *
- * DEFAULT MODE: DRY RUN — no database writes are performed.
- * To enable live writes in the future, set BROWSER_DRY_RUN=false explicitly.
+ * STRUCTURAL GUARANTEES — enforced by the import list, not by comments:
+ *   - No Anthropic, no Vision, no creativeAssetAnalyser, no analyseAdRow, no
+ *     competitor scoring, no Playwright, no browser, no fetch. There is no route from
+ *     this script to any of them, and NO recompute fallback: a missing or invalid
+ *     bundle fails the run; a missing row is REVIEW, never an AI call.
+ *   - ANTHROPIC_API_KEY is neither required nor read.
+ *
+ * Ordering (deliberate — this is what closed the repeated-charge defect):
+ *   1. evaluate live mode and the three required live-write flags;
+ *   2. parse the CSV and fully validate the bundle, source identity, declared sidecar,
+ *      assets and per-row binding — all local, no database;
+ *   3. build the per-row decisions; NO Prisma boundary is created unless live writing is
+ *      authorised AND at least one row is genuinely writable;
+ *   4. only then: resolve the competitor, deduplicate, and insert.
+ * No optional external work exists at all, so nothing can be charged before dedup.
+ * In dry-run the database is never contacted — not even to construct a client — so
+ * dry-run cannot report duplicates and says so rather than implying a check it did not
+ * perform.
+ *
+ * PERSISTENCE REQUIRES SCHEMA v3. A v2 bundle records an analysis SUMMARY only: it
+ * cannot truthfully fill the AdAnalysis columns the model requires non-null, so it
+ * plans and reports but can never authorise an INSERT (see decidePersistence()).
+ *
+ * DEFAULT MODE: DRY RUN — no database writes.
  *
  * Usage:
+ *   set BROWSER_ADS_FILE=data/imports/my-file.with-assets.csv
+ *   set BROWSER_ANALYSIS_BUNDLE=<path>.bundle.json
  *   npm run browser:ingest
  *
- * Override input file:
- *   set BROWSER_ADS_FILE=data/imports/my-file.csv&& npm run browser:ingest
- *
- * Override competitor (required if multiple competitors share the same metaPageId):
- *   set COMPETITOR_ID=cmp23o62c000p2fn63ut08wrn&& npm run browser:ingest
- *
- * Enable future live write mode (NOT YET ACTIVE — dry-run logic only):
- *   set BROWSER_DRY_RUN=false&& npm run browser:ingest
- *
  * Environment variables:
- *   BROWSER_ADS_FILE   — CSV path (default: data/imports/castlery-browser-collected-ads-pilot-01.csv)
- *   BROWSER_DRY_RUN    — 'false' to enable future live writes; anything else = dry-run (default: true)
- *   COMPETITOR_ID      — Prisma cuid of target Competitor; optional if metaPageId is unique in DB
+ *   BROWSER_ADS_FILE         — CSV path (default: data/imports/castlery-browser-collected-ads-pilot-01.csv)
+ *   BROWSER_ANALYSIS_BUNDLE  — REQUIRED. Validated bundle produced by the preview.
+ *   BROWSER_DRY_RUN          — 'false' + the two flags below to enable live writes (default: dry-run)
+ *   COMPETITOR_ID            — Prisma cuid of target Competitor; optional if metaPageId is unique
  */
 
 import { parse } from 'csv-parse/sync';
 import * as fs from 'fs';
 import * as path from 'path';
-import { PrismaClient } from '@prisma/client';
 
-import { analyseAdRow } from '@/lib/analysis';
-import type { AdFormat, AnalysisOutput, ExampleRow } from '@/lib/analysis/types';
-import { resolveCreativeContext } from '@/lib/analysis/creativeAssetAnalyser';
-import type { CreativeContext, CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
-import { scoreCompetitorBenchmarkAd } from '@/lib/analysis/competitorScoring';
-import type { CompetitorBenchmark } from '@/lib/analysis/competitorScoring';
+import {
+  loadBundle, decidePersistence, loadVerifiedMetaSidecar, sha256Buffer,
+  BUNDLE_SCHEMA_V3, IMPORT_ROOT,
+} from '@/lib/analysis/browserAnalysisBundle';
+import type { BrowserAnalysisBundle, BundleRow } from '@/lib/analysis/browserAnalysisBundle';
+import { planIngestion, parseSourceIdentities } from '@/scripts/plan-browser-ingest-from-bundle';
+import { buildIngestPayload } from '@/lib/analysis/browserIngestBundleMapping';
+import type {
+  AdWritePayload, AdAnalysisWritePayload, IngestPayload, VerifiedMetaDecisionInput,
+} from '@/lib/analysis/browserIngestBundleMapping';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_FILE    = 'data/imports/castlery-browser-collected-ads-pilot-01.csv';
-const SCORE_THRESHOLD = 7.0;
-const AD_SOURCE       = 'browser_collected';
+const DEFAULT_FILE = 'data/imports/castlery-browser-collected-ads-pilot-01.csv';
+const AD_SOURCE = 'browser_collected';
 
-const EXPECTED_HEADER = [
-  'collection_status',
-  'competitor_name',
-  'meta_page_id',
-  'ad_id',
-  'ad_library_url',
-  'media_type',
-  'publisher_platforms',
-  'ad_delivery_start_time',
-  'ad_copy',
-  'headline',
-  'description',
-  'landing_page_url',
-  'notes',
-  'visual_description',
-  'creative_notes',
-] as const;
+// ─── Database boundary ────────────────────────────────────────────────────────
+//
+// The smallest surface ingestion needs. Injected so the real orchestration can be
+// tested with fakes — there is no second implementation for tests to drift from.
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type BrowserAdRow = {
-  collection_status: string;
-  competitor_name: string;
-  meta_page_id: string;
-  ad_id: string;
-  ad_library_url: string;
-  media_type: string;
-  publisher_platforms: string;
-  ad_delivery_start_time: string;
-  ad_copy: string;
-  headline: string;
-  description: string;
-  landing_page_url: string;
-  notes: string;
-  visual_description: string;
-  creative_notes: string;
-  // Optional creative asset column (Phase 8 — vision analysis)
-  creative_asset_path?: string;
-};
-
-type CompetitorRecord = {
+export type CompetitorRecord = {
   id: string;
   name: string;
   clientId: string;
@@ -93,1021 +75,550 @@ type CompetitorRecord = {
   status: string;
 };
 
-type FormatDerivation =
-  | { ok: true;  format: AdFormat }
-  | { ok: false; reason: string  };
-
-type RowOutcome = 'WOULD_INSERT' | 'INSERTED' | 'SKIPPED_EXISTING' | 'SKIPPED_DUPLICATE' | 'WRITE_ERROR' | 'SKIPPED_ERROR';
-
-type ProcessedRow = {
-  rowNumber: number;
-  adId: string;
-  mediaType: string;
-  format: AdFormat;
-  analysis: AnalysisOutput;
-  outcome: RowOutcome;
-  activeSince: Date | null;
-  row: BrowserAdRow;
-  copyWasContaminated: boolean;
-  creativeSource: CreativeSource;
-  benchmark: CompetitorBenchmark;
-  capturedAssetPath: string;
-  capturedAssetType: string;
-  verifiedHeadline: string;
-  verifiedDescription: string;
-  verifiedHeadlineStatus: string;
-  verifiedDescriptionStatus: string;
-  verifiedStatus: string;
-  verifiedStrategy: string;
-  verifiedReason: string;
+export type IngestDb = {
+  resolveCompetitor(metaPageId: string, explicitId: string | undefined): Promise<CompetitorRecord>;
+  findExistingMetaAdIds(competitorId: string, metaAdIds: string[]): Promise<string[]>;
+  /** Must write Ad + AdAnalysis in ONE transaction, or neither. */
+  insertAdWithAnalysis(ad: AdWritePayload, analysis: AdAnalysisWritePayload): Promise<void>;
+  disconnect(): Promise<void>;
 };
-
-type ErroredRow = {
-  rowNumber: number;
-  adId: string;
-  mediaType: string;
-  outcome: 'SKIPPED_ERROR';
-  error: string;
-};
-
-type RowResult = ProcessedRow | ErroredRow;
-
-function isErrored(r: RowResult): r is ErroredRow {
-  return r.outcome === 'SKIPPED_ERROR';
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function truncate(str: string | undefined | null, max: number): string {
-  if (!str) return '(empty)';
-  return str.length > max ? str.slice(0, max) + '…' : str;
-}
-
-function fmt(n: number | null | undefined): string {
-  if (n === null || n === undefined) return 'N/A';
-  return n.toFixed(1);
-}
-
-function deriveFormat(mediaType: string): FormatDerivation {
-  const mt = mediaType.trim().toUpperCase();
-  if (mt === 'IMAGE' || mt === 'CAROUSEL') return { ok: true, format: 'STATIC' };
-  if (mt === 'VIDEO')                       return { ok: true, format: 'VIDEO'  };
-  return {
-    ok: false,
-    reason: `media_type="${mediaType}" is not IMAGE, CAROUSEL, or VIDEO — cannot derive format`,
-  };
-}
-
-function parseActiveSince(dateStr: string): Date | null {
-  if (!dateStr || !dateStr.trim()) return null;
-  const d = new Date(dateStr.trim());
-  return isNaN(d.getTime()) ? null : d;
-}
 
 /**
- * Detects comment-contaminated ad_copy (e.g. UGC comment dumps captured by the browser).
- * Conservative patterns only — false negatives are preferred over false positives.
- *
- * Flags as contaminated when:
- *  1. Copy starts with a separator character: ; | ,
- *  2. Copy contains 3+ semicolon-separated segments that are all short (avg < 120 chars)
- *
- * Returns cleanedCopy (undefined if entire content is contaminated) and a wasContaminated flag.
- * When contaminated, primaryCopy in the DB write will be undefined (stored as null).
+ * Creates the boundary. Called ONLY when the run actually reaches the database stage —
+ * after all three live-write flags, after full source and bundle validation, and only
+ * when at least one row is genuinely writable. A dry run, an invalid bundle, a source
+ * mismatch, a v2 bundle or a held-only workload never calls it, so no Prisma client is
+ * ever constructed for them.
  */
-function cleanAdCopy(raw: string): { cleanedCopy: string | undefined; wasContaminated: boolean } {
-  const trimmed = raw.trim();
-  if (!trimmed) return { cleanedCopy: undefined, wasContaminated: false };
+export type DbFactory = () => Promise<IngestDb>;
 
-  // Pattern 1: leading separator character (; | ,)
-  if (/^[;|,]/.test(trimmed)) {
-    return { cleanedCopy: undefined, wasContaminated: true };
-  }
+// ─── Outcomes ─────────────────────────────────────────────────────────────────
 
-  // Pattern 2: multiple semicolons with short segments — UGC comment concatenation
-  const parts = trimmed.split(';');
-  if (parts.length >= 3) {
-    const avgLen =
-      parts.map((p) => p.trim().length).reduce((a, b) => a + b, 0) / parts.length;
-    if (avgLen < 120) {
-      return { cleanedCopy: undefined, wasContaminated: true };
-    }
-  }
+export type IngestOutcome =
+  | 'WOULD_INSERT'        // valid v3 SUCCESS, new — insert only in authorised live mode
+  | 'INSERTED'
+  | 'SKIPPED_EXISTING'    // already in the database — never updated
+  | 'BLOCKED_SCHEMA'      // v2 bundle: plannable, never persistable
+  | 'REVIEW'
+  | 'SKIPPED'
+  | 'UNAVAILABLE'
+  | 'ERROR'
+  | 'WRITE_ERROR';
 
-  return { cleanedCopy: trimmed, wasContaminated: false };
-}
-
-// ─── ExampleRow mapping ───────────────────────────────────────────────────────
-//
-// creative context is resolved before this call (ASSET / MANUAL / FALLBACK).
-// visual_description → 'Creative Analysis' → creativeAnalysisText in scorer
-// creative_notes     → 'Analysis'          → analysisNotes in scorer
-
-// ── Verified ad-level metadata sidecar (read-only join, fail-closed) ──────────
-// Produced by browser:capture-assets. Canonical name: example.csv and
-// example.with-assets.csv BOTH map to example.verified-meta.csv. A field is usable only
-// when its own status is ACCEPT (headline_status / description_status independently).
-// Absent / malformed / unreadable / duplicate-ad_id sidecars yield NO verified values
-// for the affected ad/file; raw browser CSV headline/description are never used.
-type VerifiedMeta = {
-  headline: string; headlineStatus: string; headlineReason: string;
-  description: string; descriptionStatus: string; descriptionReason: string;
-  cta: string; displayUrl: string; landingUrl: string; strategy: string;
-  status: string; reason: string;
+export type IngestRow = {
+  adId: string;
+  rowNumber: number;
+  sourceStatus: string;
+  outcome: IngestOutcome;
+  reason: string;
+  /** Present only for a row that is genuinely writable. */
+  payload?: IngestPayload;
 };
-type VerifiedMetaLoad = { map: Map<string, VerifiedMeta>; status: string; message: string };
 
-function verifiedMetaPathFor(inputFile: string): string {
-  const dir = path.dirname(inputFile);
-  const base = path.basename(inputFile, '.csv').replace(/\.with-assets$/, '');
-  return path.join(dir, `${base}.verified-meta.csv`);
-}
+export type IngestRunResult =
+  | { ok: false; errors: string[]; rows: []; dbCalls: 0 }
+  | {
+      ok: true;
+      rows: IngestRow[];
+      schemaVersion: number;
+      persistable: boolean;
+      liveWrite: boolean;
+      inserted: number;
+      writeErrors: number;
+    };
 
-const VERIFIED_REQUIRED_COLS = ['ad_id', 'verified_headline', 'verified_description', 'cta', 'display_url', 'landing_url', 'capture_strategy', 'headline_status', 'headline_reason', 'description_status', 'description_reason', 'verification_status', 'verification_reason', 'captured_at'];
+export type IngestOptions = {
+  csvPath: string;
+  bundlePath: string | undefined;
+  dryRun: boolean;
+  writeFlag: boolean;
+  confirmFlag: string | undefined;
+  competitorId?: string;
+  cwd?: string;
+  now?: Date;
+  log?: (msg: string) => void;
+};
 
-function loadVerifiedMeta(inputFile: string): VerifiedMetaLoad {
-  const map = new Map<string, VerifiedMeta>();
-  const p = verifiedMetaPathFor(inputFile);
-  if (!fs.existsSync(p)) return { map, status: 'absent', message: `absent — no sidecar at ${p}` };
-  let raw: string;
-  try { raw = fs.readFileSync(p, 'utf-8'); } catch (e) { return { map, status: 'unreadable', message: `unreadable: ${e instanceof Error ? e.message : String(e)}` }; }
-  let rows: Record<string, string>[];
-  try { rows = parse(raw, { columns: true, skip_empty_lines: true, trim: true }) as Record<string, string>[]; } catch (e) { return { map, status: 'malformed', message: `malformed CSV: ${e instanceof Error ? e.message : String(e)}` }; }
-  if (rows.length === 0) return { map, status: 'empty', message: 'present but contains no data rows' };
-  const cols = Object.keys(rows[0]!);
-  const missing = VERIFIED_REQUIRED_COLS.filter((c) => !cols.includes(c));
-  if (missing.length) return { map, status: 'malformed', message: `malformed header — missing columns: ${missing.join(', ')}` };
-  // Any duplicate non-empty ad_id invalidates the ENTIRE sidecar (fail closed): return an
-  // empty map so NO ad from this file contributes verified headline/description.
-  const counts = new Map<string, number>();
-  for (const r of rows) { const id = (r.ad_id ?? '').trim(); if (id) counts.set(id, (counts.get(id) ?? 0) + 1); }
-  const dups = Array.from(counts.entries()).filter(([, n]) => n > 1).map(([id]) => id);
-  if (dups.length) return { map, status: 'duplicates', message: `duplicate ad_id(s) — entire sidecar ignored (fail closed): ${dups.join(', ')}` };
-  for (const r of rows) {
-    const id = (r.ad_id ?? '').trim();
-    if (!id) continue;
+// ─── Verified-metadata sidecar — BOUND TO THE BUNDLE'S DECLARATION ────────────
+
+type SidecarLoad =
+  | { ok: true; map: Map<string, VerifiedMetaDecisionInput>; message: string }
+  | { ok: false; errors: string[] };
+
+/**
+ * Loads ONLY the sidecar the bundle declared, from the exact bytes its checksum covers.
+ *
+ * There is deliberately no discovery and no fallback: if the bundle declares no sidecar,
+ * ingestion uses no verified metadata at all, even when a canonical file exists beside
+ * the CSV. Otherwise a sidecar created or edited AFTER the bundle was written could put
+ * advertiser copy into the database that no bundle ever vouched for.
+ *
+ * The bytes are read ONCE and the checksum is computed over that same buffer, so there
+ * is no time-of-check/time-of-use gap between verifying and parsing.
+ */
+function loadDeclaredSidecar(bundle: BrowserAnalysisBundle, cwd: string): SidecarLoad {
+  if (!bundle.verified_meta_path || !bundle.verified_meta_sha256) {
+    return { ok: true, map: new Map(), message: 'none declared by the bundle — no verified metadata will be used' };
+  }
+
+  const abs = path.resolve(cwd, bundle.verified_meta_path);
+  const importRoot = path.resolve(cwd, IMPORT_ROOT);
+  const contained = (() => {
+    try {
+      const root = fs.realpathSync(importRoot);
+      let child: string;
+      try { child = fs.realpathSync(abs); } catch { child = abs; }
+      return child === root || child.startsWith(root + path.sep);
+    } catch { return false; }
+  })();
+  if (!contained) return { ok: false, errors: [`declared verified_meta_path resolves outside ${IMPORT_ROOT} — refusing`] };
+
+  let buf: Buffer;
+  try { buf = fs.readFileSync(abs); }
+  catch (e) { return { ok: false, errors: [`declared verified-metadata sidecar is missing or unreadable: ${bundle.verified_meta_path} (${e instanceof Error ? e.message : String(e)})`] }; }
+
+  // Checksum the exact bytes we are about to parse — not a re-read.
+  const sum = sha256Buffer(buf);
+  if (sum !== bundle.verified_meta_sha256) {
+    return { ok: false, errors: [`verified-metadata checksum mismatch for ${bundle.verified_meta_path} — the sidecar changed since the bundle was written`] };
+  }
+
+  // The shared strict parser — same rules as validation and the planner, no weaker
+  // ingestion-only copy.
+  const parsed = loadVerifiedMetaSidecar(buf.toString('utf-8'));
+  if (!parsed.ok) return { ok: false, errors: parsed.errors };
+
+  const map = new Map<string, VerifiedMetaDecisionInput>();
+  for (const [id, d] of parsed.map) {
     map.set(id, {
-      headline:    (r.verified_headline ?? '').trim(),    headlineStatus:    (r.headline_status ?? '').trim().toUpperCase(),    headlineReason:    (r.headline_reason ?? '').trim(),
-      description: (r.verified_description ?? '').trim(), descriptionStatus: (r.description_status ?? '').trim().toUpperCase(), descriptionReason: (r.description_reason ?? '').trim(),
-      cta:         (r.cta ?? '').trim(),                  displayUrl:        (r.display_url ?? '').trim(),                      landingUrl:        (r.landing_url ?? '').trim(),
-      strategy:    (r.capture_strategy ?? '').trim(),
-      status:      (r.verification_status ?? '').trim().toUpperCase(),  reason: (r.verification_reason ?? '').trim(),
+      headline: d.headline,
+      headline_status: d.headline_status,
+      description: d.description,
+      description_status: d.description_status,
     });
   }
-  return { map, status: 'ok', message: `ok — ${map.size} usable row(s)` };
+  return { ok: true, map, message: `declared sidecar verified — ${map.size} usable row(s)` };
 }
 
-function toExampleRow(row: BrowserAdRow, creative: CreativeContext, verified?: VerifiedMeta): ExampleRow {
-  // Strip comment-contaminated ad_copy before passing to scorer.
-  // cleanedCopy is undefined when the entire field is contaminated. Headline and
-  // description are also excluded (unscoped listing metadata), so there is no
-  // headline fallback — scoring relies on the available creative context and other valid fields.
-  const { cleanedCopy } = cleanAdCopy(row.ad_copy);
-  return {
-    Product:             row.competitor_name.trim() || 'Unknown Advertiser',
-    'Ad Link':           row.ad_library_url.trim()  || undefined,
-    Copy:                cleanedCopy                 || undefined,
-    // Verified ad-level metadata is the ONLY accepted source of headline/description,
-    // gated PER FIELD. Raw browser listing headline/description are never used.
-    Headline:            (verified && verified.headlineStatus === 'ACCEPT' && verified.headline) ? verified.headline : undefined,
-    Description:         (verified && verified.descriptionStatus === 'ACCEPT' && verified.description) ? verified.description : undefined,
-    'Active Since':      row.ad_delivery_start_time.trim() || undefined,
-    Analysis:            creative.creative_notes      || undefined,
-    'Creative Analysis': creative.visual_description  || undefined,
-    Improvement:              undefined,
-    'Creative Improvements':  undefined,
-    'Other Feedbacks':        undefined,
-  };
-}
+// ─── Mixed-competitor guard (unchanged rule) ──────────────────────────────────
 
-// ─── Competitor lookup ────────────────────────────────────────────────────────
-
-async function resolveCompetitor(
-  prisma: PrismaClient,
-  metaPageId: string,
-): Promise<CompetitorRecord> {
-  const explicitId = process.env.COMPETITOR_ID?.trim();
-
-  if (explicitId) {
-    const competitor = await prisma.competitor.findUnique({
-      where: { id: explicitId },
-      select: { id: true, name: true, clientId: true, industryId: true, metaPageId: true, status: true },
-    });
-
-    if (!competitor) {
-      throw new Error(
-        `COMPETITOR_ID="${explicitId}" was not found in the database.\n` +
-        'Check that the id is correct and that the competitor has been imported.',
-      );
-    }
-
-    console.log(`  Competitor:    ${competitor.name} (${competitor.id})  [resolved via COMPETITOR_ID]`);
-    return competitor;
-  }
-
-  // Auto-detect by metaPageId
-  const matches = await prisma.competitor.findMany({
-    where: { metaPageId },
-    select: { id: true, name: true, clientId: true, industryId: true, metaPageId: true, status: true },
-  });
-
-  if (matches.length === 0) {
-    throw new Error(
-      `No competitor found with metaPageId "${metaPageId}".\n` +
-      'Has import:clients been run? Or set COMPETITOR_ID to the correct competitor cuid.',
-    );
-  }
-
-  if (matches.length > 1) {
-    const list = matches
-      .map((m) => `  • id: ${m.id}  name: ${m.name}  clientId: ${m.clientId}`)
-      .join('\n');
-    throw new Error(
-      `Multiple competitors share metaPageId "${metaPageId}":\n${list}\n\n` +
-      'Set COMPETITOR_ID=<id> to specify which competitor to use.',
-    );
-  }
-
-  const competitor = matches[0]!;
-  console.log(`  Competitor:    ${competitor.name} (${competitor.id})  [auto-detected via metaPageId]`);
-  return competitor;
-}
-
-// ─── Dry-run output per row ───────────────────────────────────────────────────
-
-function printDryRunRow(
-  r: ProcessedRow,
-  competitor: CompetitorRecord,
-  DIV: string,
-): void {
-  const { rowNumber, adId, mediaType, format, analysis, outcome, activeSince, row, copyWasContaminated, creativeSource, benchmark, capturedAssetPath, capturedAssetType } = r;
-  const outcomeIcon = outcome === 'WOULD_INSERT' ? '✓' : '○';
-  const outcomeLabel = outcome === 'WOULD_INSERT'
-    ? '[WOULD INSERT]'
-    : '[SKIPPED — duplicate metaAdId already in DB]';
-
-  const sourceLabel =
-    creativeSource === 'ASSET'    ? '[ASSET]    — vision analysis from creative_asset_path' :
-    creativeSource === 'MANUAL'   ? '[MANUAL]   — from CSV visual_description / creative_notes' :
-                                    '[FALLBACK] — machine-scored baseline (no asset or manual text)';
-
-  console.log(`\n  ${outcomeIcon} Row ${rowNumber}  ad_id=${adId}  ${outcomeLabel}`);
-  console.log(`  ${DIV}`);
-
-  if (copyWasContaminated) {
-    console.log(`  ⚠  WARN [ad_copy]: ad_copy appears comment-contaminated`);
-    console.log(`    metaAdId:        ${adId}`);
-    console.log(`    Raw copy:        ${truncate(row.ad_copy, 80)}`);
-    console.log(`    Cleaned copy:    (empty — entire field excluded; primaryCopy will be null in DB)`);
-    console.log(`    Scorer Copy:     (empty — headline and description are excluded; no listing-metadata fallback)`);
-    console.log('');
-  }
-
-  const { cleanedCopy } = cleanAdCopy(row.ad_copy);
-
-  console.log(`  Creative source: ${sourceLabel}`);
-  console.log('  Ad record:');
-  console.log(`    competitorId:    ${competitor.id}`);
-  console.log(`    clientId:        ${competitor.clientId}`);
-  console.log(`    industryId:      ${competitor.industryId}`);
-  console.log(`    metaAdId:        ${adId}`);
-  console.log(`    adSource:        ${AD_SOURCE}`);
-  console.log(`    adFormat:        ${format}`);
-  console.log(`    score:           ${analysis.overallScore.toFixed(2)}`);
-  console.log(`    qualified:       ${analysis.qualified}`);
-  console.log(`    reviewStatus:    PENDING`);
-  console.log(`    adStatus:        ACTIVE`);
-  console.log(`    lastSeenActiveAt: (now — set on insert)`);
-  console.log(`    capturedAssetPath: ${capturedAssetPath || '(none)'}`);
-  console.log(`    capturedAssetType: ${capturedAssetType}`);
-  console.log(`    activeSince:     ${activeSince ? activeSince.toISOString().slice(0, 10) : '(empty)'}`);
-  console.log(`    primaryCopy:     ${cleanedCopy ? truncate(cleanedCopy, 80) : '(null — contaminated)'}`);
-  console.log(`    headline:        ${r.verifiedHeadline ? `"${truncate(r.verifiedHeadline, 80)}" (headline ${r.verifiedHeadlineStatus})` : `(blank — headline ${r.verifiedHeadlineStatus})`}`);
-  console.log(`    description:     ${r.verifiedDescription ? `"${truncate(r.verifiedDescription, 80)}" (description ${r.verifiedDescriptionStatus})` : `(blank — description ${r.verifiedDescriptionStatus})`}`);
-  console.log(`    verified-meta:   overall=${r.verifiedStatus} strategy=${r.verifiedStrategy || 'n/a'} reason=${truncate(r.verifiedReason, 80)}`);
-  console.log(`    adLink:          ${truncate(row.ad_library_url, 80)}`);
-  console.log(`    productOrService:${row.competitor_name.trim() || '(empty)'}`);
-
-  console.log('');
-  console.log('  Competitor benchmark (NEW — Ad fields):');
-  console.log(`    competitorBenchmarkScore: ${benchmark.benchmarkScore.toFixed(2)}`);
-  console.log(`    benchmarkTier:            ${benchmark.tierToken}`);
-  console.log(`    benchmarkConfidence:      ${benchmark.confidence}`);
-  console.log(`    evidenceSource:           ${benchmark.evidenceToken}`);
-  console.log(`    creativeSource:           ${creativeSource}`);
-  console.log(`    benchmarkScoredAt:        (set to now on write)`);
-
-  console.log('');
-  console.log('  AdAnalysis record:');
-  console.log(`    overallScore:        ${analysis.overallScore.toFixed(2)}`);
-  console.log(`    finalVerdict:        ${analysis.finalVerdict}`);
-  console.log(`    funnelStage:         ${analysis.funnelStage}`);
-  console.log(`    raceStage:           ${analysis.raceStage}`);
-  console.log(`    trustFunnelStage:    ${analysis.trustFunnelStage}`);
-  console.log(`    copyScore:           ${fmt(analysis.copyScore)}`);
-  console.log(`    headlineScore:       ${fmt(analysis.headlineScore)}`);
-  console.log(`    descriptionScore:    ${fmt(analysis.descriptionScore)}`);
-  console.log(`    creativeScore:       ${fmt(analysis.creativeScore)}`);
-  console.log(`    clarityScore:        ${fmt(analysis.clarityScore)}`);
-  console.log(`    connectionScore:     ${fmt(analysis.connectionScore)}`);
-  console.log(`    convictionScore:     ${fmt(analysis.convictionScore)}`);
-  console.log(`    aidaAttention:       ${analysis.aidaScores.attention.toFixed(1)}`);
-  console.log(`    aidaInterest:        ${analysis.aidaScores.interest.toFixed(1)}`);
-  console.log(`    aidaDesire:          ${analysis.aidaScores.desire.toFixed(1)}`);
-  console.log(`    aidaAction:          ${analysis.aidaScores.action.toFixed(1)}`);
-  console.log(`    recommendedUse:          ${truncate(benchmark.recommendedUse, 70)}`);
-  console.log(`    benchmarkBreakdownJson:  ${truncate(JSON.stringify({ formula: benchmark.formula, breakdown: benchmark.breakdown }), 90)}`);
-
-  const activeTriggers = analysis.behaviouralTriggers.filter((t) => t.strength !== 'MISSING');
-  if (activeTriggers.length > 0) {
-    const triggerStr = activeTriggers.map((t) => `${t.name}(${t.strength})`).join(', ');
-    console.log(`    behaviouralTriggers: ${triggerStr}`);
-  } else {
-    console.log(`    behaviouralTriggers: none detected`);
-  }
-}
-
-// ─── API key guard ────────────────────────────────────────────────────────────
-
-/**
- * Aborts if any READY row has creative_asset_path set but ANTHROPIC_API_KEY
- * is absent. Called after bucketing rows, before competitor resolution or any
- * DB access.
- */
-function assertApiKeyIfAssets(
-  readyRows: Array<{ row: BrowserAdRow; rowNumber: number }>,
-): void {
-  const rowsWithAssets = readyRows.filter(({ row }) => row.creative_asset_path?.trim());
-  if (rowsWithAssets.length === 0) return;
-
-  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
-    const rowNums = rowsWithAssets.map((r) => r.rowNumber).join(', ');
-    console.error('\n❌ ANTHROPIC_API_KEY is required.');
-    console.error(`   ${rowsWithAssets.length} READY row(s) have creative_asset_path set (row(s): ${rowNums}).`);
-    console.error('   Set ANTHROPIC_API_KEY=<key> before re-running,');
-    console.error('   or remove creative_asset_path from those rows to run without vision analysis.');
-    process.exit(1);
-  }
-}
-
-// ─── Mixed-competitor guard ───────────────────────────────────────────────────
-
-/**
- * Asserts that all READY rows in the CSV share the same meta_page_id.
- * NEEDS_REVIEW and SKIP rows are ignored — they are not processed.
- *
- * Throws with a descriptive error if more than one distinct meta_page_id is
- * found among READY rows. The error lists each page ID, its row count, and
- * an example competitor_name so the operator knows how to split the file.
- *
- * Why: resolveCompetitor() resolves a single competitor. If READY rows belong
- * to multiple competitors, rows after the first competitor would be silently
- * attributed to the wrong competitor. This guard prevents that data corruption.
- */
-function assertSingleCompetitor(
-  readyRows: Array<{ row: BrowserAdRow; rowNumber: number }>,
-  filePath: string,
-): void {
+export function assertSingleCompetitor(readyRows: Record<string, string>[], filePath: string): string | null {
   const pageIdMap = new Map<string, { count: number; exampleName: string }>();
-
-  for (const { row } of readyRows) {
-    const pid  = row.meta_page_id.trim();
-    const name = row.competitor_name.trim() || '(unknown)';
+  for (const row of readyRows) {
+    const pid = (row.meta_page_id ?? '').trim();
+    const name = (row.competitor_name ?? '').trim() || '(unknown)';
     const existing = pageIdMap.get(pid);
-    if (existing) {
-      existing.count++;
-    } else {
-      pageIdMap.set(pid, { count: 1, exampleName: name });
+    if (existing) existing.count++;
+    else pageIdMap.set(pid, { count: 1, exampleName: name });
+  }
+  if (pageIdMap.size <= 1) return null;
+  const detail = Array.from(pageIdMap.entries())
+    .map(([pid, { count, exampleName }]) => `  • meta_page_id: ${pid}  (${count} READY row(s), competitor_name: "${exampleName}")`)
+    .join('\n');
+  return (
+    `CSV contains READY rows from ${pageIdMap.size} different competitors (${filePath}):\n\n${detail}\n\n` +
+    'Each CSV file must contain READY rows for one competitor only.\n' +
+    'Split the file into separate CSVs — one per competitor — then re-run.'
+  );
+}
+
+// ─── Captured-asset type (mechanical, from the saved files) ───────────────────
+
+function deriveCapturedAssetType(assetPath: string, cwd: string): string | null {
+  if (!assetPath) return null;
+  try {
+    const abs = path.resolve(cwd, assetPath);
+    const st = fs.statSync(abs);
+    const files = (st.isDirectory() ? fs.readdirSync(abs) : [path.basename(abs)]).map((f) => f.toLowerCase());
+    if (files.some((f) => /^image-\d+\.(?:png|jpe?g|webp)$/.test(f))) return 'CREATIVE_IMAGE';
+    if (files.some((f) => /^card-\d+\.(?:png|jpe?g|webp)$/.test(f))) return 'CAROUSEL_CARD';
+    if (files.some((f) => /^frame-\d+\.(?:png|jpe?g|webp)$/.test(f))) return 'VIDEO_FRAME';
+  } catch { /* missing/unreadable — UNKNOWN */ }
+  return 'UNKNOWN';
+}
+
+// ─── Plan action → outcome ────────────────────────────────────────────────────
+
+function outcomeForPlan(p: PlannedActionLite): IngestOutcome {
+  switch (p) {
+    case 'REVIEW': return 'REVIEW';
+    case 'UNAVAILABLE': return 'UNAVAILABLE';
+    case 'SKIP': return 'SKIPPED';
+    case 'ERROR': return 'ERROR';
+    default: return 'REVIEW';
+  }
+}
+type PlannedActionLite = 'INSERT' | 'UPDATE' | 'SKIP' | 'REVIEW' | 'UNAVAILABLE' | 'ERROR';
+
+// ─── Orchestration ────────────────────────────────────────────────────────────
+
+/**
+ * The real ingestion flow. `db` is contacted ONLY after full validation AND live-write
+ * authorisation — a dry run, an invalid bundle or a v2 bundle reaches zero database calls.
+ */
+export async function runIngestion(opts: IngestOptions, getDb: DbFactory | null): Promise<IngestRunResult> {
+  const cwd = opts.cwd ?? process.cwd();
+  const now = opts.now ?? new Date();
+  const log = opts.log ?? (() => { /* quiet by default in tests */ });
+  const fail = (...errors: string[]): IngestRunResult => ({ ok: false, errors, rows: [], dbCalls: 0 });
+
+  const liveWrite = !opts.dryRun && opts.writeFlag && opts.confirmFlag === 'I_UNDERSTAND';
+  if (!opts.dryRun && !liveWrite) {
+    return fail(
+      'Live write mode requires all 3 flags to be set correctly:',
+      `  BROWSER_DRY_RUN=false                          ${!opts.dryRun ? '✓' : '✗ not set'}`,
+      `  BROWSER_INGEST_WRITE=true                      ${opts.writeFlag ? '✓' : '✗ missing or wrong'}`,
+      `  BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND  ${opts.confirmFlag === 'I_UNDERSTAND' ? '✓' : '✗ missing or wrong'}`,
+    );
+  }
+
+  // ── 1. Bundle is mandatory. There is no analysis fallback. ──
+  if (!opts.bundlePath || !opts.bundlePath.trim()) {
+    return fail(
+      'BROWSER_ANALYSIS_BUNDLE is required — ingestion is bundle-only and never analyses anything itself.',
+      'Produce one with the preview (AI_PREVIEW_OUTPUT_FILE), then re-run.',
+    );
+  }
+
+  // ── 2. Source CSV ──
+  const csvAbs = path.resolve(cwd, opts.csvPath);
+  if (!fs.existsSync(csvAbs)) return fail(`File not found: ${csvAbs}`);
+  let rawRows: Record<string, string>[];
+  try {
+    rawRows = parse(fs.readFileSync(csvAbs, 'utf-8'), { columns: true, skip_empty_lines: true, trim: true }) as Record<string, string>[];
+  } catch (e) {
+    return fail(`Could not read source CSV: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (rawRows.length === 0) return fail('CSV has no data rows.');
+
+  // ── 3. Full bundle validation — structure, source, sidecar, assets, row identity ──
+  //     checkFiles stays ON: the production path never trusts a bundle it has not
+  //     verified against the files on disk.
+  const loaded = loadBundle(path.resolve(cwd, opts.bundlePath), { cwd });
+  if (!loaded.ok) {
+    return fail('Bundle rejected — refusing to ingest (there is no fallback to re-analysis).', ...loaded.errors);
+  }
+  const bundle: BrowserAnalysisBundle = loaded.bundle;
+
+  if (path.resolve(cwd, bundle.source_csv_path) !== csvAbs) {
+    return fail(
+      'Source identity mismatch — refusing to ingest.',
+      `  CSV given : ${csvAbs}`,
+      `  Bundle for: ${path.resolve(cwd, bundle.source_csv_path)}`,
+    );
+  }
+
+  // ── 4. Canonical source identities (no silent row dropping) ──
+  const parsed = parseSourceIdentities(rawRows, cwd);
+  if (!parsed.ok) return fail('Source CSV rejected — refusing to ingest.', ...parsed.errors);
+
+  const readyRaw = rawRows.filter((r) => (r.collection_status ?? '').trim().toUpperCase() === 'READY');
+  const mixed = assertSingleCompetitor(readyRaw, csvAbs);
+  if (mixed) return fail(mixed);
+
+  // ── 5. Verified metadata — ONLY what the bundle declared, from checksum-covered bytes ──
+  const sidecar = loadDeclaredSidecar(bundle, cwd);
+  if (!sidecar.ok) {
+    return fail('Declared verified-metadata sidecar rejected — refusing to ingest.', ...sidecar.errors);
+  }
+  log(`  Verified-meta sidecar: ${sidecar.message}`);
+
+  // ── 6. Per-row decisions — reuses the Part 1 planner verbatim. Still no writes. ──
+  const planned = planIngestion(parsed.rows, bundle, { verifiedMeta: null });
+  if (!planned.ok) return fail('Plan rejected — refusing to ingest.', ...planned.errors);
+
+  const byId = new Map<string, BundleRow>(bundle.rows.map((r) => [r.ad_id, r]));
+  const persistableSchema = bundle.schema_version >= BUNDLE_SCHEMA_V3;
+  // Safe to parse: validation has already proven created_at is an exact ISO instant.
+  const bundleCreatedAt = new Date(bundle.created_at);
+  const rows: IngestRow[] = [];
+
+  for (const p of planned.plan) {
+    const base = { adId: p.adId, rowNumber: p.rowNumber, sourceStatus: p.sourceStatus };
+
+    // Anything the planner already held stays held, verbatim.
+    if (p.action !== 'INSERT' && p.action !== 'UPDATE') {
+      rows.push({ ...base, outcome: outcomeForPlan(p.action), reason: p.reason });
+      continue;
+    }
+
+    const bundleRow = byId.get(p.adId);
+    if (!bundleRow) {
+      rows.push({ ...base, outcome: 'REVIEW', reason: 'no analysis found in bundle for this ad — never auto-analysed here' });
+      continue;
+    }
+
+    // The persistence gate. A v2 bundle stops here, by design.
+    const decision = decidePersistence(bundle, bundleRow);
+    if (!decision.persistable) {
+      rows.push({
+        ...base,
+        outcome: persistableSchema ? 'REVIEW' : 'BLOCKED_SCHEMA',
+        reason: decision.reason,
+      });
+      continue;
+    }
+
+    const identity = parsed.rows.find((s) => s.ad_id === p.adId)!;
+    const raw = rawRows[identity.source_row_number - 2] ?? {};
+    const vm = sidecar.map.get(p.adId) ?? null;
+    const activeSinceRaw = (raw.ad_delivery_start_time ?? '').trim();
+    const activeSince = activeSinceRaw ? new Date(activeSinceRaw) : null;
+
+    const built = buildIngestPayload(decision.row, {
+      competitorId: '', clientId: '', industryId: '',   // filled after competitor resolution
+      productOrService: (raw.competitor_name ?? '').trim(),
+      adLink: (raw.ad_library_url ?? '').trim(),
+      activeSince: activeSince && !Number.isNaN(activeSince.getTime()) ? activeSince : null,
+      primaryCopy: identity.copy_used_for_scoring,
+      capturedAssetType: deriveCapturedAssetType(bundleRow.creative_asset_path, cwd),
+      verifiedMeta: vm,
+      adSource: AD_SOURCE,
+      now,
+      // The benchmark was computed during preview, at the bundle's created_at — which
+      // strict validation has already proven is an exact ISO instant.
+      benchmarkScoredAt: bundleCreatedAt,
+    });
+    if (!built.ok) {
+      rows.push({ ...base, outcome: 'ERROR', reason: built.reason });
+      continue;
+    }
+
+    rows.push({
+      ...base,
+      outcome: 'WOULD_INSERT',
+      reason: 'READY + validated v3 SUCCESS analysis reused from the bundle; no AI call was made',
+      payload: built.payload,
+    });
+  }
+
+  const summary = { schemaVersion: bundle.schema_version, persistable: persistableSchema, liveWrite };
+
+  // ── 7. Dry run stops here: the database is never contacted. ──
+  if (!liveWrite) {
+    return { ok: true, rows, ...summary, inserted: 0, writeErrors: 0 };
+  }
+  if (!persistableSchema) {
+    return fail(
+      `Bundle is schema v${bundle.schema_version} — it cannot authorise any INSERT.`,
+      `Only a schema v${BUNDLE_SCHEMA_V3} bundle records the complete analysis needed to write truthfully.`,
+      'Re-run the preview to produce one. Analysis is never recomputed here.',
+    );
+  }
+  const writable = rows.filter((r) => r.outcome === 'WOULD_INSERT' && r.payload);
+  if (writable.length === 0) {
+    // Nothing to write: the database is never contacted, so no client is constructed.
+    return { ok: true, rows, ...summary, inserted: 0, writeErrors: 0 };
+  }
+  if (!getDb) return fail('No database boundary was provided — refusing to continue.');
+
+  // ── 8. The database stage. This is the FIRST point at which a client exists: every
+  //     flag is satisfied, the bundle is fully validated, and a row is genuinely writable.
+  let db: IngestDb;
+  try {
+    db = await getDb();
+  } catch (e) {
+    return fail(`Could not open the database boundary: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  let competitor: CompetitorRecord;
+  try {
+    const metaPageId = (readyRaw[0]?.meta_page_id ?? '').trim();
+    competitor = await db.resolveCompetitor(metaPageId, opts.competitorId);
+  } catch (e) {
+    return fail(`Competitor lookup failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // ── 9. Duplicate detection BEFORE any write. No optional work precedes it. ──
+  let existing: Set<string>;
+  try {
+    existing = new Set(await db.findExistingMetaAdIds(competitor.id, writable.map((r) => r.adId)));
+  } catch (e) {
+    return fail(`Duplicate check failed — refusing to write: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // ── 10. An existing ad is skipped, never updated. Insert-only policy unchanged. ──
+  const toWrite: IngestRow[] = [];
+  for (const r of writable) {
+    if (existing.has(r.adId)) {
+      r.outcome = 'SKIPPED_EXISTING';
+      r.reason = 'metaAdId already present for this competitor — skipped, never updated';
+      delete r.payload;
+      continue;
+    }
+    toWrite.push(r);
+  }
+
+  // ── 11. Transactional inserts, isolated per row. ──
+  let inserted = 0;
+  let writeErrors = 0;
+  for (const r of toWrite) {
+    const payload = r.payload!;
+    try {
+      await db.insertAdWithAnalysis(
+        { ...payload.ad, competitorId: competitor.id, clientId: competitor.clientId, industryId: competitor.industryId },
+        payload.analysis,
+      );
+      r.outcome = 'INSERTED';
+      inserted++;
+      log(`  ✓ Inserted  row ${r.rowNumber}  ad_id=${r.adId}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.toLowerCase().includes('unique constraint')) {
+        r.outcome = 'SKIPPED_EXISTING';
+        r.reason = 'metaAdId already present (detected at write time) — skipped, never updated';
+      } else {
+        r.outcome = 'WRITE_ERROR';
+        r.reason = msg;
+        writeErrors++;
+        log(`  ✗ Error     row ${r.rowNumber}  ad_id=${r.adId}: ${msg}`);
+      }
     }
   }
 
-  if (pageIdMap.size <= 1) return;
+  return { ok: true, rows, ...summary, inserted, writeErrors };
+}
 
-  const detail = Array.from(pageIdMap.entries())
-    .map(([pid, { count, exampleName }]) =>
-      `  • meta_page_id: ${pid}  (${count} READY row(s), competitor_name: "${exampleName}")`,
-    )
-    .join('\n');
+// ─── Real database boundary (Prisma) ──────────────────────────────────────────
+//
+// Imported lazily inside main() so that importing this module for tests never loads
+// Prisma and can never open a database handle.
 
-  throw new Error(
-    `CSV contains READY rows from ${pageIdMap.size} different competitors (${filePath}):\n\n` +
-    `${detail}\n\n` +
-    'Each CSV file must contain READY rows for one competitor only.\n' +
-    'Split the file into separate CSVs — one per competitor — then re-run.',
-  );
+async function createPrismaDb(): Promise<IngestDb> {
+  const { PrismaClient } = await import('@prisma/client');
+  const prisma = new PrismaClient();
+  const select = { id: true, name: true, clientId: true, industryId: true, metaPageId: true, status: true };
+
+  return {
+    async resolveCompetitor(metaPageId, explicitId) {
+      if (explicitId) {
+        const c = await prisma.competitor.findUnique({ where: { id: explicitId }, select });
+        if (!c) throw new Error(`COMPETITOR_ID="${explicitId}" was not found in the database.`);
+        return c;
+      }
+      const matches = await prisma.competitor.findMany({ where: { metaPageId }, select });
+      if (matches.length === 0) throw new Error(`No competitor found with metaPageId "${metaPageId}". Set COMPETITOR_ID to the correct competitor cuid.`);
+      if (matches.length > 1) {
+        const list = matches.map((m) => `  • id: ${m.id}  name: ${m.name}`).join('\n');
+        throw new Error(`Multiple competitors share metaPageId "${metaPageId}":\n${list}\n\nSet COMPETITOR_ID=<id> to specify which.`);
+      }
+      return matches[0]!;
+    },
+    async findExistingMetaAdIds(competitorId, metaAdIds) {
+      if (metaAdIds.length === 0) return [];
+      const found = await prisma.ad.findMany({
+        where: { competitorId, metaAdId: { in: metaAdIds } },
+        select: { metaAdId: true },
+      });
+      return found.map((a) => a.metaAdId!).filter(Boolean);
+    },
+    async insertAdWithAnalysis(ad, analysis) {
+      await prisma.$transaction(async (tx) => {
+        const created = await tx.ad.create({ data: { ...ad, productOrService: ad.productOrService ?? undefined } });
+        await tx.adAnalysis.create({ data: { ...analysis, adId: created.id } });
+      });
+    },
+    async disconnect() { await prisma.$disconnect(); },
+  };
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const LINE = '═'.repeat(63);
-  const DIV  = '─'.repeat(63);
+  const DIV = '─'.repeat(63);
 
-  // ── Mode and file resolution ─────────────────────────────────────────────────
-  const dryRun      = process.env.BROWSER_DRY_RUN !== 'false';
-  const writeFlag   = process.env.BROWSER_INGEST_WRITE === 'true';
+  const dryRun = process.env.BROWSER_DRY_RUN !== 'false';
+  const writeFlag = process.env.BROWSER_INGEST_WRITE === 'true';
   const confirmFlag = process.env.BROWSER_INGEST_CONFIRM_DB_WRITES;
-  const liveWrite   = !dryRun && writeFlag && confirmFlag === 'I_UNDERSTAND';
-  const filePath    = path.resolve(process.env.BROWSER_ADS_FILE ?? DEFAULT_FILE);
+  const liveWrite = !dryRun && writeFlag && confirmFlag === 'I_UNDERSTAND';
+  const csvPath = path.resolve(process.env.BROWSER_ADS_FILE ?? DEFAULT_FILE);
+  const bundlePath = process.env.BROWSER_ANALYSIS_BUNDLE;
 
   console.log(`\n${LINE}`);
-  console.log('  Browser-Collected Ads — Ingestion');
+  console.log('  Browser-Collected Ads — Ingestion (BUNDLE-BACKED)');
   console.log(LINE);
+  console.log('  No Anthropic call.  No Vision.  No browser.  No re-analysis.');
+  console.log('  Analysis is REUSED from the validated bundle and never recomputed.');
+  console.log(LINE);
+  console.log(`  Mode:          ${dryRun ? 'DRY RUN — no DB writes, no DB reads' : '⚠  LIVE WRITE MODE — DB writes are ACTIVE'}`);
+  console.log(`  File:          ${csvPath}`);
+  console.log(`  Bundle:        ${bundlePath ?? '(none — required)'}`);
+  console.log(`  adSource:      ${AD_SOURCE}`);
   if (dryRun) {
-    console.log('  Mode:          DRY RUN — no DB writes');
-    console.log(`  File:          ${filePath}`);
-    console.log(`  Score threshold: ${SCORE_THRESHOLD.toFixed(1)}`);
-    console.log(`  adSource:      ${AD_SOURCE}`);
-    console.log('  DB writes:     0');
     console.log('  To enable live writes, set all 3 flags:');
     console.log('    BROWSER_DRY_RUN=false');
     console.log('    BROWSER_INGEST_WRITE=true');
     console.log('    BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND');
-  } else {
-    console.log('  Mode:          ⚠  LIVE WRITE MODE — DB writes are ACTIVE');
-    console.log(`  File:          ${filePath}`);
-    console.log(`  Score threshold: ${SCORE_THRESHOLD.toFixed(1)}`);
-    console.log(`  adSource:      ${AD_SOURCE}`);
   }
   console.log(LINE);
 
-  // ── Guard: all 3 flags required for live write ────────────────────────────────
-  if (!dryRun && !liveWrite) {
-    console.error('\n❌ Live write mode requires all 3 flags to be set correctly:');
-    console.error(`   BROWSER_DRY_RUN=false                         ${!dryRun ? '✓' : '✗ not set'}`);
-    console.error(`   BROWSER_INGEST_WRITE=true                     ${writeFlag ? '✓' : '✗ missing or wrong'}`);
-    console.error(`   BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND  ${confirmFlag === 'I_UNDERSTAND' ? '✓' : '✗ missing or wrong'}`);
-    console.error('\n   Re-run with all 3 flags set, or remove BROWSER_DRY_RUN=false to stay in dry-run.');
-    process.exit(1);
-  }
-
-  // ── Read and parse CSV ───────────────────────────────────────────────────────
-  if (!fs.existsSync(filePath)) {
-    console.error(`\n❌ File not found: ${filePath}`);
-    console.error('   Set BROWSER_ADS_FILE to override the default path.');
-    process.exit(1);
-  }
-
-  const content = fs.readFileSync(filePath, 'utf-8');
-  const rawRows = parse(content, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true,
-  }) as Record<string, string>[];
-
-  if (rawRows.length === 0) {
-    console.error('\n❌ CSV has no data rows.');
-    process.exit(1);
-  }
-
-  // ── Validate header ──────────────────────────────────────────────────────────
-  const actualCols  = Object.keys(rawRows[0]!);
-  const missingCols = EXPECTED_HEADER.filter((c) => !actualCols.includes(c));
-
-  if (missingCols.length > 0) {
-    console.error(`\n❌ Missing required columns: ${missingCols.join(', ')}`);
-    process.exit(1);
-  }
-
-  // ── Bucket rows by status ────────────────────────────────────────────────────
-  let needsReviewCount = 0;
-  let skipCount        = 0;
-  let otherCount       = 0;
-  const readyRows: Array<{ row: BrowserAdRow; rowNumber: number }> = [];
-
-  rawRows.forEach((raw, idx) => {
-    const row    = raw as unknown as BrowserAdRow;
-    const status = (row.collection_status ?? '').trim().toUpperCase();
-    const rowNum = idx + 2;
-
-    if      (status === 'READY')        readyRows.push({ row, rowNumber: rowNum });
-    else if (status === 'NEEDS_REVIEW') needsReviewCount++;
-    else if (status === 'SKIP')         skipCount++;
-    else                                otherCount++;
-  });
-
-  console.log(`\n${DIV}`);
-  console.log('  Input Summary');
-  console.log(DIV);
-  console.log(`  Total rows:             ${rawRows.length}`);
-  console.log(`  READY (will process):   ${readyRows.length}`);
-  console.log(`  NEEDS_REVIEW (skipped): ${needsReviewCount}`);
-  console.log(`  SKIP (skipped):         ${skipCount}`);
-  if (otherCount > 0) console.log(`  Other/unknown (skipped):${otherCount}`);
-
-  if (readyRows.length === 0) {
-    console.log('\n  ⚠  No READY rows found. Nothing to process.');
-    printSafetyFooter(LINE, dryRun);
-    return;
-  }
-
-  // ── API key guard ────────────────────────────────────────────────────────────
-  // Abort early if creative_asset_path is present on any READY row but the key is absent.
-  assertApiKeyIfAssets(readyRows);
-
-  // ── Mixed-competitor guard ───────────────────────────────────────────────────
-  // Must run before resolveCompetitor() — throws if READY rows span more than one
-  // meta_page_id. NEEDS_REVIEW and SKIP rows are excluded from the check.
-  assertSingleCompetitor(readyRows, filePath);
-
-  // ── Resolve competitor ───────────────────────────────────────────────────────
-  // Use meta_page_id from the first READY row as the lookup key.
-  // All rows in a single browser-collected CSV should belong to the same competitor.
-  const firstMetaPageId = readyRows[0]!.row.meta_page_id.trim();
-  const prisma = new PrismaClient();
-
-  let competitor: CompetitorRecord;
+  // A lazy factory: nothing is constructed until the run actually reaches the database
+  // stage, which it cannot do before the flags AND full validation are satisfied.
+  let db: IngestDb | null = null;
+  const getDb = async (): Promise<IngestDb> => {
+    db = await createPrismaDb();
+    return db;
+  };
 
   try {
-    console.log(`\n${DIV}`);
-    console.log('  Competitor Resolution');
-    console.log(DIV);
-    competitor = await resolveCompetitor(prisma, firstMetaPageId);
-    console.log(`  clientId:      ${competitor.clientId}`);
-    console.log(`  industryId:    ${competitor.industryId}`);
-    console.log(`  status:        ${competitor.status}`);
-    console.log(`  metaPageId:    ${competitor.metaPageId ?? '(not set)'}`);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`\n❌ Competitor lookup failed:\n   ${message}`);
-    await prisma.$disconnect();
-    process.exit(1);
-  }
-
-  // ── Score all READY rows ─────────────────────────────────────────────────────
-  type ScoredRow = {
-    rowNumber: number;
-    adId: string;
-    mediaType: string;
-    format: AdFormat;
-    analysis: AnalysisOutput;
-    activeSince: Date | null;
-    row: BrowserAdRow;
-    copyWasContaminated: boolean;
-    creativeSource: CreativeSource;
-    benchmark: CompetitorBenchmark;
-    capturedAssetPath: string;
-    capturedAssetType: string;
-    verifiedHeadline: string;
-    verifiedDescription: string;
-    verifiedHeadlineStatus: string;
-    verifiedDescriptionStatus: string;
-    verifiedStatus: string;
-    verifiedStrategy: string;
-    verifiedReason: string;
-  };
-
-  type PreErrorRow = {
-    rowNumber: number;
-    adId: string;
-    mediaType: string;
-    error: string;
-  };
-
-  const scored: ScoredRow[]    = [];
-  const preErrors: PreErrorRow[] = [];
-
-  // Verified ad-level metadata sidecar (read-only, fail-closed). Per-field ACCEPT is the
-  // only source of headline/description; raw CSV headline/description are ignored entirely.
-  const verifiedLoad = loadVerifiedMeta(filePath);
-  const verifiedMeta = verifiedLoad.map;
-  console.log(`  Verified-meta sidecar: ${verifiedMetaPathFor(filePath)}`);
-  console.log(`    status: ${verifiedLoad.status.toUpperCase()} — ${verifiedLoad.message}`);
-  if (verifiedLoad.status !== 'ok') console.log('    ⚠  No verified headline/description will be used from this sidecar (fail closed).');
-  let staticCount = 0;
-  let videoCount  = 0;
-
-  for (const { row, rowNumber } of readyRows) {
-    const adId = row.ad_id.trim() || `(row ${rowNumber})`;
-
-    const derived = deriveFormat(row.media_type);
-    if (!derived.ok) {
-      preErrors.push({ rowNumber, adId, mediaType: row.media_type, error: derived.reason });
-      continue;
-    }
-
-    const format = derived.format;
-    if (format === 'STATIC') staticCount++;
-    else                     videoCount++;
-
-    try {
-      // Resolve creative context: ASSET (vision API) → MANUAL (CSV text) → FALLBACK
-      const creative = await resolveCreativeContext(row, row.media_type);
-
-      const verified = verifiedMeta.get(row.ad_id.trim());
-      const vHAccept = !!(verified && verified.headlineStatus === 'ACCEPT' && verified.headline);
-      const vDAccept = !!(verified && verified.descriptionStatus === 'ACCEPT' && verified.description);
-      const verifiedHeadline    = vHAccept ? verified!.headline    : '';
-      const verifiedDescription = vDAccept ? verified!.description : '';
-      console.log(`  • verified-meta [${adId}]: ${verified ? `overall=${verified.status} strategy=${verified.strategy}` : 'NONE (no usable sidecar row)'} | headline ${vHAccept ? `ACCEPT used: "${truncate(verifiedHeadline, 60)}"` : `blank (${verified ? verified.headlineStatus : 'no row'})`} | description ${vDAccept ? `ACCEPT used: "${truncate(verifiedDescription, 60)}"` : `blank (${verified ? verified.descriptionStatus : 'no row'})`}`);
-      const exampleRow = toExampleRow(row, creative, verified);
-      const analysis   = analyseAdRow(exampleRow, format);
-      const benchmark  = scoreCompetitorBenchmarkAd(analysis, creative.source);
-      const { wasContaminated: copyWasContaminated } = cleanAdCopy(row.ad_copy);
-
-      // Captured creative evidence: store the path as-is, and derive the asset TYPE
-      // from the saved files (image-/card-/frame-), NOT from adFormat.
-      const capturedAssetPath = row.creative_asset_path?.trim() || '';
-      let capturedAssetType = 'UNKNOWN';
-      if (capturedAssetPath) {
-        try {
-          const abs = path.resolve(capturedAssetPath);
-          const st = fs.statSync(abs);
-          const files = (st.isDirectory() ? fs.readdirSync(abs) : [path.basename(abs)]).map((f) => f.toLowerCase());
-          if (files.some((f) => /^image-\d+\.(?:png|jpe?g|webp)$/.test(f)))      capturedAssetType = 'CREATIVE_IMAGE';
-          else if (files.some((f) => /^card-\d+\.(?:png|jpe?g|webp)$/.test(f)))  capturedAssetType = 'CAROUSEL_CARD';
-          else if (files.some((f) => /^frame-\d+\.(?:png|jpe?g|webp)$/.test(f))) capturedAssetType = 'VIDEO_FRAME';
-        } catch { /* folder missing/unreadable — leave UNKNOWN */ }
-      }
-
-      scored.push({
-        rowNumber,
-        adId,
-        mediaType: row.media_type.trim().toUpperCase(),
-        format,
-        analysis,
-        activeSince: parseActiveSince(row.ad_delivery_start_time),
-        row,
-        copyWasContaminated,
-        creativeSource: creative.source,
-        benchmark,
-        capturedAssetPath,
-        capturedAssetType,
-        verifiedHeadline,
-        verifiedDescription,
-        verifiedHeadlineStatus: verified ? verified.headlineStatus : 'NONE',
-        verifiedDescriptionStatus: verified ? verified.descriptionStatus : 'NONE',
-        verifiedStatus: verified ? verified.status : 'NONE',
-        verifiedStrategy: verified ? verified.strategy : '',
-        verifiedReason: verified ? verified.reason : 'no usable verified-meta sidecar row',
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      preErrors.push({ rowNumber, adId, mediaType: row.media_type, error: `Scoring threw: ${message}` });
-    }
-  }
-
-  // ── Deduplication check (DB read — dry-run safe) ─────────────────────────────
-  const metaAdIds = scored.map((s) => s.adId).filter((id) => !/^\(row \d+\)$/.test(id));
-
-  let existingSet = new Set<string>();
-  if (metaAdIds.length > 0) {
-    try {
-      const existing = await prisma.ad.findMany({
-        where: {
-          competitorId: competitor.id,
-          metaAdId: { in: metaAdIds },
-        },
-        select: { metaAdId: true },
-      });
-      existingSet = new Set(existing.map((a) => a.metaAdId!).filter(Boolean));
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`\n  ⚠  Deduplication check failed (non-fatal in dry-run): ${message}`);
-      console.warn('      All rows will be shown as WOULD_INSERT.');
-    }
-  }
-
-  // ── Build final results ──────────────────────────────────────────────────────
-  const results: RowResult[] = [];
-
-  for (const s of scored) {
-    const isDuplicate = existingSet.has(s.adId);
-    results.push({
-      ...s,
-      outcome: isDuplicate ? 'SKIPPED_EXISTING' : 'WOULD_INSERT',
-    });
-  }
-
-  for (const e of preErrors) {
-    results.push({ ...e, outcome: 'SKIPPED_ERROR' });
-  }
-
-  // Sort by rowNumber for consistent output
-  results.sort((a, b) => a.rowNumber - b.rowNumber);
-
-  // ── Format breakdown ─────────────────────────────────────────────────────────
-  console.log(`\n${DIV}`);
-  console.log('  Format Breakdown (READY rows)');
-  console.log(DIV);
-  console.log(`  STATIC (IMAGE + CAROUSEL): ${staticCount}`);
-  console.log(`  VIDEO:                     ${videoCount}`);
-  if (preErrors.length > 0) {
-    console.log(`  Errored (format/scoring):  ${preErrors.length}`);
-  }
-
-  // ── Per-row dry-run detail ───────────────────────────────────────────────────
-  console.log(`\n${LINE}`);
-  console.log('  Per-Row Ingestion Plan');
-  console.log(LINE);
-
-  for (const result of results) {
-    if (isErrored(result)) {
-      console.log(`\n  ✗ Row ${result.rowNumber}  ad_id=${result.adId}  [SKIPPED — ERROR]`);
-      console.log(`    media_type: ${result.mediaType}`);
-      console.log(`    ❌ ${result.error}`);
-      continue;
-    }
-
-    printDryRunRow(result, competitor, DIV);
-  }
-
-  // ── Live write ───────────────────────────────────────────────────────────────
-  let insertedCount = 0;
-  let dupSkipCount  = 0;
-  let writeErrCount = 0;
-
-  if (liveWrite) {
-    const toWrite = results.filter(
-      (r): r is ProcessedRow => !isErrored(r) && r.outcome === 'WOULD_INSERT',
+    const result = await runIngestion(
+      {
+        csvPath, bundlePath, dryRun, writeFlag, confirmFlag,
+        competitorId: process.env.COMPETITOR_ID?.trim() || undefined,
+        log: (m) => console.log(m),
+      },
+      liveWrite ? getDb : null,
     );
-    const preDetectedDups = results.filter(
-      (r): r is ProcessedRow => !isErrored(r) && r.outcome === 'SKIPPED_EXISTING',
-    ).length;
+
+    if (!result.ok) {
+      console.error('\n❌ Refusing to proceed.');
+      for (const e of result.errors) console.error(`   ${e}`);
+      console.log('');
+      process.exit(1);
+    }
+
+    console.log(`\n${DIV}`);
+    console.log(`  Bundle schema v${result.schemaVersion}${result.persistable ? '' : ' — PLANNING ONLY, cannot authorise any INSERT'}`);
+    console.log(DIV);
+    for (const r of result.rows) {
+      console.log(`  ${r.outcome.padEnd(17)} ${r.adId.padEnd(18)} row ${String(r.rowNumber).padEnd(3)} ${r.sourceStatus.padEnd(13)} ${r.reason}`);
+    }
+
+    const tally = (o: IngestOutcome) => result.rows.filter((r) => r.outcome === o).length;
+    console.log(`\n${DIV}`);
+    console.log('  Summary');
+    console.log(DIV);
+    for (const o of ['WOULD_INSERT', 'INSERTED', 'SKIPPED_EXISTING', 'BLOCKED_SCHEMA', 'REVIEW', 'SKIPPED', 'UNAVAILABLE', 'ERROR', 'WRITE_ERROR'] as IngestOutcome[]) {
+      const n = tally(o);
+      if (n > 0) console.log(`  ${o.padEnd(18)} ${n}`);
+    }
+    console.log(`  ${'TOTAL'.padEnd(18)} ${result.rows.length}   (held rows are counted, never hidden)`);
 
     console.log(`\n${LINE}`);
-    console.log('  ⚠  LIVE WRITE MODE ACTIVE');
+    console.log('  Safety confirmation');
     console.log(LINE);
-    console.log('  DB writes are enabled.');
-    console.log('  No updates or deletes will be performed.');
-    console.log('  Only new Ad + AdAnalysis records will be inserted.');
-    console.log('');
-    console.log(`  Rows eligible for insert:   ${toWrite.length}`);
-    console.log(`  Duplicate rows (pre-check): ${preDetectedDups}`);
-    console.log(`  Pre-write errored rows:     ${preErrors.length}`);
+    if (!result.liveWrite) {
+      console.log('  No database writes were performed.');
+      console.log('  No database READ was performed either — dry run never contacts the database,');
+      console.log('  so duplicates are not reported here. They are detected before any live insert.');
+    } else {
+      console.log('  No existing records were updated or deleted.');
+      console.log(`  Inserted ${result.inserted} Ad + AdAnalysis record(s); ${result.writeErrors} write error(s).`);
+    }
+    console.log('  No Anthropic call was made. No analysis was recomputed.');
+    console.log('  No schema changes were made.');
     console.log(LINE);
-
-    for (const r of toWrite) {
-      const now = new Date();
-      try {
-        await prisma.$transaction(async (tx) => {
-          const ad = await tx.ad.create({
-            data: {
-              competitorId:     competitor.id,
-              clientId:         competitor.clientId,
-              industryId:       competitor.industryId,
-              productOrService: r.row.competitor_name.trim() || undefined,
-              adFormat:         r.format,
-              adLink:           r.row.ad_library_url.trim() || '',
-              activeSince:      r.activeSince ?? undefined,
-              primaryCopy:      cleanAdCopy(r.row.ad_copy).cleanedCopy || undefined,
-              // Only verified ad-level metadata (ACCEPT) may populate the Ad record;
-              // raw browser listing headline/description are never used.
-              headline:         r.verifiedHeadline    || undefined,
-              description:      r.verifiedDescription || undefined,
-              metaAdId:         r.adId,
-              adSource:         AD_SOURCE,
-              reviewStatus:     'PENDING',
-              score:            r.analysis.overallScore,
-              qualified:        r.analysis.qualified,
-              firstSeenAt:      now,
-              lastSeenAt:       now,
-              adStatus:         'ACTIVE',
-
-              // Phase G: captured creative evidence + active-seen tracking (additive)
-              lastSeenActiveAt:  now,
-              capturedAssetPath: r.capturedAssetPath || undefined,
-              capturedAssetType: r.capturedAssetPath ? r.capturedAssetType : undefined,
-
-              // Competitor benchmark — ranking/filtering fields (canonical tokens)
-              competitorBenchmarkScore: r.benchmark.benchmarkScore,
-              benchmarkTier:            r.benchmark.tierToken,
-              benchmarkConfidence:      r.benchmark.confidence,
-              evidenceSource:           r.benchmark.evidenceToken,
-              creativeSource:           r.creativeSource,
-              benchmarkScoredAt:        now,
-            },
-          });
-
-          await tx.adAnalysis.create({
-            data: {
-              adId:                    ad.id,
-              creativeAnalysis:        r.analysis.creativeAnalysis,
-              copyAnalysis:            r.analysis.copyAnalysis,
-              headlineAnalysis:        r.analysis.headlineAnalysis,
-              descriptionAnalysis:     r.analysis.descriptionAnalysis,
-              overallScore:            r.analysis.overallScore,
-
-              // Shared sub-scores
-              hookStopScrollScore:     r.analysis.subScores.hookStopScroll,
-              audienceRelevanceScore:  r.analysis.subScores.audienceRelevance,
-              valueClarityScore:       r.analysis.subScores.valueClarity,
-              trustProofStrengthScore: r.analysis.subScores.trustProofStrength,
-              ctaClarityScore:         r.analysis.subScores.ctaClarity,
-
-              // Static-specific sub-scores (undefined → null for video)
-              visualHierarchyScore:       r.analysis.subScores.visualHierarchy,
-              productClarityScore:        r.analysis.subScores.productClarity,
-              offerClarityScore:          r.analysis.subScores.offerClarity,
-              headlineStrengthScore:      r.analysis.subScores.headlineStrength,
-              descriptionUsefulnessScore: r.analysis.subScores.descriptionUsefulness,
-              ctaVisibilityScore:         r.analysis.subScores.ctaVisibility,
-              trustSignalsScore:          r.analysis.subScores.trustSignals,
-
-              // Video-specific sub-scores (undefined → null for static)
-              firstThreeSecondsScore:  r.analysis.subScores.firstThreeSeconds,
-              soundOffDesignScore:     r.analysis.subScores.soundOffDesign,
-              soundOnEnhancementScore: r.analysis.subScores.soundOnEnhancement,
-              onScreenTextScore:       r.analysis.subScores.onScreenText,
-              storyFlowScore:          r.analysis.subScores.storyFlow,
-              authenticityScore:       r.analysis.subScores.authenticity,
-              platformNativeFeelScore: r.analysis.subScores.platformNativeFeel,
-
-              // Framework mapping
-              aidaJson:    JSON.stringify(r.analysis.aida),
-              funnelStage: r.analysis.funnelStage,
-              raceStage:   r.analysis.raceStage,
-
-              strengthsJson:    JSON.stringify(r.analysis.strengths),
-              weaknessesJson:   JSON.stringify(r.analysis.weaknesses),
-              improvementsJson: JSON.stringify(r.analysis.improvements),
-              rubricScoresJson: JSON.stringify(r.analysis.subScores),
-
-              // Phase 3.5: Conversion-focused scoring fields
-              copyScore:               r.analysis.copyScore,
-              headlineScore:           r.analysis.headlineScore,
-              descriptionScore:        r.analysis.descriptionScore,
-              creativeScore:           r.analysis.creativeScore,
-              aidaAttentionScore:      r.analysis.aidaScores.attention,
-              aidaInterestScore:       r.analysis.aidaScores.interest,
-              aidaDesireScore:         r.analysis.aidaScores.desire,
-              aidaActionScore:         r.analysis.aidaScores.action,
-              clarityScore:            r.analysis.clarityScore,
-              connectionScore:         r.analysis.connectionScore,
-              convictionScore:         r.analysis.convictionScore,
-              trustFunnelStage:        r.analysis.trustFunnelStage,
-              behaviouralTriggersJson: JSON.stringify(r.analysis.behaviouralTriggers),
-              recommendationsJson:     JSON.stringify(r.analysis.recommendations),
-              rewriteDirectionJson:    r.analysis.rewriteDirection
-                ? JSON.stringify(r.analysis.rewriteDirection)
-                : null,
-              finalVerdict: r.analysis.finalVerdict,
-
-              // Competitor benchmark — display/detail fields
-              recommendedUse:         r.benchmark.recommendedUse,
-              benchmarkBreakdownJson: JSON.stringify({ formula: r.benchmark.formula, breakdown: r.benchmark.breakdown }),
-            },
-          });
-        });
-
-        r.outcome = 'INSERTED';
-        insertedCount++;
-        console.log(`  ✓ Inserted  row ${r.rowNumber}  ad_id=${r.adId}  score=${r.analysis.overallScore.toFixed(2)}  qualified=${r.analysis.qualified}`);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.toLowerCase().includes('unique constraint')) {
-          r.outcome = 'SKIPPED_DUPLICATE';
-          dupSkipCount++;
-          console.log(`  ○ Skipped   row ${r.rowNumber}  ad_id=${r.adId}  [duplicate — metaAdId already in DB]`);
-        } else {
-          r.outcome = 'WRITE_ERROR';
-          writeErrCount++;
-          console.error(`  ✗ Error     row ${r.rowNumber}  ad_id=${r.adId}  ❌ ${msg}`);
-        }
-      }
-    }
-
-    // Add pre-detected duplicates to the total skip count
-    dupSkipCount += preDetectedDups;
-
-    console.log(`\n${LINE}`);
-    console.log('  ✓ LIVE WRITE COMPLETE');
-    console.log(LINE);
-    console.log(`  Inserted:                ${insertedCount}`);
-    console.log(`  Skipped (duplicate):     ${dupSkipCount}`);
-    console.log(`  Errored:                 ${preErrors.length + writeErrCount}`);
     console.log('');
-    console.log('  No existing records were updated or deleted.');
-    console.log(LINE);
+  } finally {
+    // Only if a boundary was actually created.
+    if (db) await (db as IngestDb).disconnect();
   }
-
-  // ── Summary ──────────────────────────────────────────────────────────────────
-  // processedRows: all scored rows (includes duplicates, excludes pre-scoring errors).
-  // Score stats are computed from ALL processedRows so duplicate-only runs still show
-  // correct qualified / avg / distribution figures instead of "0 of 0 / N/A".
-  const processedRows    = results.filter((r): r is ProcessedRow => !isErrored(r));
-  const insertCandidates = processedRows.filter((r) =>
-    liveWrite ? r.outcome === 'INSERTED' : r.outcome === 'WOULD_INSERT',
-  );
-  const skipCandidates = processedRows.filter((r) =>
-    liveWrite
-      ? r.outcome === 'SKIPPED_EXISTING' || r.outcome === 'SKIPPED_DUPLICATE'
-      : r.outcome === 'SKIPPED_EXISTING',
-  );
-
-  // Score stats: always from ALL processedRows regardless of duplicate status
-  const qualifiedAll   = processedRows.filter((r) => r.analysis.qualified);
-  const unqualifiedAll = processedRows.filter((r) => !r.analysis.qualified);
-  const avgScore       = processedRows.length > 0
-    ? processedRows.reduce((sum, r) => sum + r.analysis.overallScore, 0) / processedRows.length
-    : null;
-  const totalErrored   = preErrors.length + (liveWrite ? writeErrCount : 0);
-
-  // Qualify counts scoped to insert-only (used in verdict messaging)
-  const qualifiedInserted   = insertCandidates.filter((r) => r.analysis.qualified);
-  const unqualifiedInserted = insertCandidates.filter((r) => !r.analysis.qualified);
-
-  console.log(`\n${LINE}`);
-  console.log(`  ${liveWrite ? 'WRITE SUMMARY' : 'SUMMARY'}`);
-  console.log(LINE);
-
-  // ── READY row analysis (all scored rows, regardless of duplicate status) ──────
-  console.log(`  READY rows analysed:              ${readyRows.length}`);
-  console.log(`  Successfully scored:              ${processedRows.length}`);
-  console.log(`  Qualified among READY rows:       ${qualifiedAll.length} of ${processedRows.length}`);
-  console.log(`  Non-qualified among READY rows:   ${unqualifiedAll.length} of ${processedRows.length}`);
-  console.log(`  Average score among READY rows:   ${avgScore !== null ? avgScore.toFixed(2) : 'N/A'}`);
-  if (totalErrored > 0) {
-    console.log(`  Errored (skipped):               ${totalErrored}`);
-  }
-  console.log('');
-
-  // ── Ingestion action summary ──────────────────────────────────────────────────
-  if (liveWrite) {
-    console.log(`  Inserted:                        ${insertedCount}`);
-    console.log(`  Skipped (duplicate):             ${dupSkipCount}`);
-  } else {
-    console.log(`  Would INSERT:                    ${insertCandidates.length}`);
-    console.log(`  Would SKIP duplicate:            ${skipCandidates.length}`);
-  }
-
-  console.log('');
-  console.log('  Score distribution (all READY rows):');
-
-  const band = (lo: number, hi: number) =>
-    processedRows.filter((r) => r.analysis.overallScore >= lo && r.analysis.overallScore < hi).length;
-
-  console.log(`    ≥ 9.0       :  ${processedRows.filter((r) => r.analysis.overallScore >= 9.0).length}`);
-  console.log(`    7.0 – 8.9   :  ${band(7.0, 9.0)}`);
-  console.log(`    5.0 – 6.9   :  ${band(5.0, 7.0)}`);
-  console.log(`    below 5.0   :  ${processedRows.filter((r) => r.analysis.overallScore < 5.0).length}`);
-
-  // ── Verdict ───────────────────────────────────────────────────────────────────
-  console.log(`\n${LINE}`);
-  console.log(`  ${liveWrite ? 'POST-WRITE CONFIRMATION' : 'DRY RUN VERDICT'}`);
-  console.log(LINE);
-
-  if (liveWrite) {
-    console.log(`\n  ✓ Live write complete.`);
-    console.log(`    Inserted:  ${insertedCount} Ad + AdAnalysis record(s).`);
-    console.log(`    Skipped:   ${dupSkipCount} duplicate(s) — competitorId + metaAdId already in DB.`);
-    if (writeErrCount > 0) {
-      console.log(`    Errors:    ${writeErrCount} row(s) failed — review errors above.`);
-    }
-    console.log('');
-    console.log('    No existing records were updated or deleted.');
-    console.log(`    adSource='${AD_SOURCE}' stored on all inserted ads.`);
-    console.log(`    qualified=true: ${qualifiedInserted.length}  |  qualified=false: ${unqualifiedInserted.length}`);
-    console.log('    Winning-ad views can filter qualified=true at query time.');
-  } else if (preErrors.length === 0) {
-    console.log(`\n  \u2713 READY \u2014 ${insertCandidates.length} row(s) can be ingested with 0 scoring errors.`);
-    if (insertCandidates.length > 0) {
-      console.log(`    All ${insertCandidates.length} would be stored as adSource='${AD_SOURCE}'.`);
-      console.log(`    qualified=true:  ${qualifiedInserted.length}  |  qualified=false: ${unqualifiedInserted.length}`);
-      console.log('    Non-qualified ads are stored as competitor reference data.');
-    }
-    if (skipCandidates.length > 0) {
-      console.log(`    ${skipCandidates.length} duplicate(s) would be skipped (competitorId + metaAdId already in DB).`);
-    }
-    console.log('');
-    console.log('  Next steps before live write:');
-    console.log('  1. Back up the database:');
-    console.log('       copy prisma\\dev.db prisma\\dev.db.backup-pre-browser-ingestion');
-    console.log('  2. Re-run with all 3 flags:');
-    console.log('       BROWSER_DRY_RUN=false');
-    console.log('       BROWSER_INGEST_WRITE=true');
-    console.log('       BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND');
-  } else {
-    console.log(`\n  ⚠  ${preErrors.length} row(s) errored and would be skipped.`);
-    console.log('    Review errors above before proceeding to live ingestion.');
-  }
-
-  console.log('');
-  printSafetyFooter(LINE, dryRun);
-
-  await prisma.$disconnect();
 }
 
-function printSafetyFooter(LINE: string, dryRun: boolean): void {
-  console.log(LINE);
-  console.log('  Safety confirmation');
-  console.log(LINE);
-  if (dryRun) {
-    console.log('  No database writes were performed.');
-    console.log('  No records were inserted, updated, or deleted.');
-  } else {
-    console.log('  No existing records were updated or deleted.');
-    console.log('  Only new Ad + AdAnalysis records were inserted (if any).');
-  }
-  console.log('  No scoring changes were made.');
-  console.log('  No schema changes were made.');
-  console.log('  data/imports/*.csv remains uncommitted by design.');
-  console.log(LINE);
-  console.log('');
+if (require.main === module) {
+  main().catch((err: unknown) => {
+    console.error('\n❌ Fatal error:', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
 }
-
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error('\n❌ Fatal error:', message);
-  process.exit(1);
-});

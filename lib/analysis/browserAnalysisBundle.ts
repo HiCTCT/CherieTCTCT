@@ -32,11 +32,37 @@ import * as path from 'path';
 import { isCreativeAssetFile } from './creativeAssetFiles';
 import { canonicalAssetPath, deriveSourceRowIdentity, sourceRowIdentityMismatch } from './sourceRowIdentity';
 import type { SourceRowIdentity } from './sourceRowIdentity';
+// Pure tables only — the benchmark scorer's own guarantees, WITHOUT importing scoring
+// code. This is what lets bundle-backed ingestion validate benchmark semantics while
+// still having no runtime route to the scorer.
+import {
+  TIER_LABEL_BY_TOKEN, BENCHMARK_BREAKDOWN_ENTRIES, ANALYSIS_IMPROVEMENT_ENTRIES,
+  BENCHMARK_FORMULA_BY_SOURCE, deriveTierToken, deriveTierLabel, deriveRecommendedUse,
+  deriveEvidenceForCreativeSource, deriveBenchmarkBreakdown, computeBenchmarkScoreFromBreakdown,
+} from './benchmarkContract';
+import type { CreativeSourceValue } from './benchmarkContract';
 
 // ─── Versions ─────────────────────────────────────────────────────────────────
 
-/** v2: discriminated row union + selected_rows count + per-row source binding. */
-export const BUNDLE_SCHEMA_VERSION = 2;
+/**
+ * Schema versions.
+ *
+ * v2 — discriminated row union + selected_rows count + per-row source binding.
+ *      FROZEN and unchanged. It carries a SUMMARY of an analysis, which is enough to
+ *      plan, but NOT enough to persist truthfully: the AdAnalysis model requires
+ *      creativeAnalysis / copyAnalysis / headlineAnalysis / descriptionAnalysis /
+ *      weaknessesJson / improvementsJson / rubricScoresJson, and v2 carries none of
+ *      them. A v2 bundle is therefore PLANNING-ONLY and can never authorise an INSERT.
+ *
+ * v3 — v2 plus the complete, already-computed scorer and benchmark output
+ *      (`analysis_result` / `benchmark_result`), so ingestion can persist the real
+ *      analysis without ever recomputing it. Additive: v2 semantics are untouched.
+ */
+export const BUNDLE_SCHEMA_V2 = 2;
+export const BUNDLE_SCHEMA_V3 = 3;
+export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [BUNDLE_SCHEMA_V2, BUNDLE_SCHEMA_V3];
+/** The version the preview writer produces now. Readers accept every supported version. */
+export const BUNDLE_SCHEMA_VERSION = BUNDLE_SCHEMA_V3;
 export const BUNDLE_PROMPT_VERSION = 'video-labelled-4section.2026-07';
 export const BUNDLE_PLANNER_VERSION = 'planVisionInputs.2026-07';
 
@@ -52,6 +78,10 @@ export const CREATIVE_SOURCES = ['ASSET', 'MANUAL', 'FALLBACK'] as const;
 export const VISUAL_CONFIDENCES = ['HIGH', 'MEDIUM', 'LOW'] as const;
 export const BENCHMARK_TIERS = ['STRONG', 'MODERATE', 'WEAK', 'LOW'] as const;
 export const BENCHMARK_CONFIDENCES = ['HIGH', 'MEDIUM', 'LOW'] as const;
+/** mirrors EvidenceToken in lib/analysis/competitorScoring.ts */
+export const EVIDENCE_TOKENS = ['VISION', 'MANUAL', 'NONE'] as const;
+/** The canonical BenchmarkTier display labels, from the shared benchmark contract. */
+export const BENCHMARK_TIER_LABELS: readonly string[] = Object.values(TIER_LABEL_BY_TOKEN);
 /** mirrors lib/analysis/types.ts FinalVerdict */
 export const QA_VERDICTS = [
   'STRONG_READY_TO_TEST', 'GOOD_NEEDS_SHARPENING', 'CLEAR_IDEA_WEAK_SIGNALS',
@@ -99,9 +129,113 @@ export type BundleRowCommon = {
   copy_used_for_scoring: string;
 };
 
+// ─── v3 result blocks ─────────────────────────────────────────────────────────
+//
+// A faithful, snake_cased mirror of the scorer's AnalysisOutput and the benchmark's
+// CompetitorBenchmark, exactly as they were computed during preview. Nothing here is
+// recomputed, reconstructed or summarised: this is the authoritative record.
+//
+// Optional SubScores keys become explicit `null` so exact-key validation can prove the
+// block is complete. Dropping the nulls again reproduces the original object byte-for-byte.
+
+/** Mirrors SubScores (lib/analysis/types.ts). Shared always present; format-specific null. */
+export type BundleSubScores = {
+  hook_stop_scroll: number;
+  audience_relevance: number;
+  value_clarity: number;
+  trust_proof_strength: number;
+  cta_clarity: number;
+  // Static-specific — null on a VIDEO ad because the scorer genuinely produced none.
+  visual_hierarchy: number | null;
+  product_clarity: number | null;
+  offer_clarity: number | null;
+  headline_strength: number | null;
+  description_usefulness: number | null;
+  cta_visibility: number | null;
+  trust_signals: number | null;
+  // Video-specific — null on a STATIC ad, same reason.
+  first_three_seconds: number | null;
+  sound_off_design: number | null;
+  sound_on_enhancement: number | null;
+  on_screen_text: number | null;
+  story_flow: number | null;
+  authenticity: number | null;
+  platform_native_feel: number | null;
+};
+
+export type BundleAidaText = { attention: string; interest: string; desire: string; action: string };
+
+/**
+ * Mirrors Recommendations. The headline/description entries are deliberately NOT named
+ * `headline`/`description`: those bare keys are globally forbidden anywhere in a bundle
+ * so raw browser-listing metadata can never enter one, and that guard is frozen. These
+ * are scorer ADVICE about a headline, not a headline — the suffix keeps both true.
+ */
+export type BundleRecommendations = {
+  copy: string;
+  headline_recommendation: string;
+  description_recommendation: string;
+  creative: string;
+  conversion_strength: string;
+};
+
+export type BundleRewriteDirection = {
+  hook: string; body: string; cta: string; creative_direction: string;
+};
+
+/** Mirrors AnalysisOutput — every field the AdAnalysis record needs, as computed. */
+export type BundleAnalysisResult = {
+  overall_score: number;
+  qualified: boolean;
+  sub_scores: BundleSubScores;
+  creative_analysis: string;
+  copy_analysis: string;
+  headline_analysis: string;
+  description_analysis: string;
+  aida: BundleAidaText;
+  aida_explanations: BundleAidaText;
+  aida_scores: { attention: number; interest: number; desire: number; action: number };
+  funnel_stage: string;
+  race_stage: string;
+  trust_funnel_stage: string;
+  strengths: string[];
+  weaknesses: string[];
+  improvements: string[];
+  copy_score: number;
+  headline_score: number | null;
+  description_score: number | null;
+  creative_score: number;
+  clarity_score: number;
+  connection_score: number;
+  conviction_score: number;
+  behavioural_triggers: Array<{ name: string; strength: string }>;
+  recommendations: BundleRecommendations;
+  /** null only when the scorer genuinely produced none (all component scores >= 7). */
+  rewrite_direction: BundleRewriteDirection | null;
+  final_verdict: string;
+};
+
+/** Mirrors CompetitorBenchmark. */
+export type BundleBenchmarkResult = {
+  benchmark_score: number;
+  tier: string;
+  tier_token: (typeof BENCHMARK_TIERS)[number];
+  confidence: (typeof BENCHMARK_CONFIDENCES)[number];
+  evidence_source: string;
+  evidence_token: (typeof EVIDENCE_TOKENS)[number];
+  recommended_use: string;
+  formula: string;
+  breakdown: Array<{ label: string; value: number; weight: number }>;
+  warning: string | null;
+};
+
 export type BundleSuccessRow = BundleRowCommon & {
   analysis_status: 'SUCCESS';
   error_reason: null;
+  /** v3 only. Absent on a v2 row, which is why v2 can never authorise a write. */
+  analysis_result?: BundleAnalysisResult;
+  /** v3 only. */
+  benchmark_result?: BundleBenchmarkResult;
   visual_description: string;
   visual_confidence: BundleVisualConfidence | null;
   creative_notes: string;
@@ -127,6 +261,15 @@ export type BundleHeldRow = BundleRowCommon & {
 };
 
 export type BundleRow = BundleSuccessRow | BundleHeldRow;
+
+/**
+ * A SUCCESS row from a v3 bundle: the result blocks are guaranteed present and complete
+ * by validation. This is the ONLY shape that may be turned into a database write.
+ */
+export type BundleSuccessRowV3 = BundleSuccessRow & {
+  analysis_result: BundleAnalysisResult;
+  benchmark_result: BundleBenchmarkResult;
+};
 
 export type BrowserAnalysisBundle = {
   schema_version: number;
@@ -170,8 +313,47 @@ const SUCCESS_ONLY_KEYS = [
   'race_stage', 'trust_funnel_stage', 'behavioural_triggers', 'strengths',
 ] as const;
 
+/** v3 adds the authoritative result blocks. A v2 SUCCESS row must NOT carry them. */
+const V3_ONLY_KEYS = ['analysis_result', 'benchmark_result'] as const;
+
 const SUCCESS_KEYS: readonly string[] = [...COMMON_KEYS, ...SUCCESS_ONLY_KEYS];
+const SUCCESS_KEYS_V3: readonly string[] = [...COMMON_KEYS, ...SUCCESS_ONLY_KEYS, ...V3_ONLY_KEYS];
 const HELD_KEYS: readonly string[] = [...COMMON_KEYS];
+
+const ANALYSIS_RESULT_KEYS: readonly string[] = [
+  'overall_score', 'qualified', 'sub_scores', 'creative_analysis', 'copy_analysis',
+  'headline_analysis', 'description_analysis', 'aida', 'aida_explanations', 'aida_scores',
+  'funnel_stage', 'race_stage', 'trust_funnel_stage', 'strengths', 'weaknesses', 'improvements',
+  'copy_score', 'headline_score', 'description_score', 'creative_score', 'clarity_score',
+  'connection_score', 'conviction_score', 'behavioural_triggers', 'recommendations',
+  'rewrite_direction', 'final_verdict',
+];
+
+const SUB_SCORE_SHARED_KEYS: readonly string[] = [
+  'hook_stop_scroll', 'audience_relevance', 'value_clarity', 'trust_proof_strength', 'cta_clarity',
+];
+const SUB_SCORE_STATIC_KEYS: readonly string[] = [
+  'visual_hierarchy', 'product_clarity', 'offer_clarity', 'headline_strength',
+  'description_usefulness', 'cta_visibility', 'trust_signals',
+];
+const SUB_SCORE_VIDEO_KEYS: readonly string[] = [
+  'first_three_seconds', 'sound_off_design', 'sound_on_enhancement', 'on_screen_text',
+  'story_flow', 'authenticity', 'platform_native_feel',
+];
+const SUB_SCORE_KEYS: readonly string[] = [
+  ...SUB_SCORE_SHARED_KEYS, ...SUB_SCORE_STATIC_KEYS, ...SUB_SCORE_VIDEO_KEYS,
+];
+
+const BENCHMARK_RESULT_KEYS: readonly string[] = [
+  'benchmark_score', 'tier', 'tier_token', 'confidence', 'evidence_source', 'evidence_token',
+  'recommended_use', 'formula', 'breakdown', 'warning',
+];
+
+const AIDA_TEXT_KEYS: readonly string[] = ['attention', 'interest', 'desire', 'action'];
+const RECOMMENDATION_KEYS: readonly string[] = [
+  'copy', 'headline_recommendation', 'description_recommendation', 'creative', 'conversion_strength',
+];
+const REWRITE_KEYS: readonly string[] = ['hook', 'body', 'cta', 'creative_direction'];
 
 const BUNDLE_TOP_KEYS: readonly string[] = [
   'schema_version', 'created_at', 'source_csv_path', 'source_csv_sha256',
@@ -201,7 +383,18 @@ const MAX_TEXT_LEN: Record<string, number> = {
   // A model identifier is a short token (e.g. claude-haiku-4-5). Anything longer is
   // not a model name, and a bounded limit keeps key/base64 payloads out of the field.
   analysis_model: 80,
+  // ── v3 result blocks ── generous for real scorer prose, hostile to payloads.
+  analysis_text: 20_000,
+  list_item: 1_000,
+  recommendation: 4_000,
+  benchmark_text: 4_000,
+  formula: 2_000,
+  breakdown_label: 200,
 };
+
+/** Bounds on v3 arrays — a scorer list is short; a smuggled payload is not. */
+const MAX_LIST_ITEMS = 50;
+const MAX_BREAKDOWN_ITEMS = 20;
 
 const UNSAFE_PATTERNS: Array<{ re: RegExp; what: string }> = [
   { re: /sk-ant-[A-Za-z0-9_-]{8,}/, what: 'Anthropic API key prefix' },
@@ -280,10 +473,11 @@ export function validateBundleShape(value: unknown): ValidationResult {
 
   findForbiddenKeys(value, 'bundle', errors);
 
-  if (value.schema_version !== BUNDLE_SCHEMA_VERSION) {
-    errors.push(`unsupported schema_version ${JSON.stringify(value.schema_version)} (supported: ${BUNDLE_SCHEMA_VERSION})`);
+  if (typeof value.schema_version !== 'number' || !SUPPORTED_SCHEMA_VERSIONS.includes(value.schema_version)) {
+    errors.push(`unsupported schema_version ${JSON.stringify(value.schema_version)} (supported: ${SUPPORTED_SCHEMA_VERSIONS.join(', ')})`);
     return { ok: false, errors };
   }
+  const version = value.schema_version as number;
   checkExactKeys(value, BUNDLE_TOP_KEYS, 'bundle', errors);
 
   if (!isExactIsoTimestamp(value.created_at)) errors.push('created_at must be an exact ISO instant (YYYY-MM-DDTHH:MM:SS.sssZ)');
@@ -333,7 +527,7 @@ export function validateBundleShape(value: unknown): ValidationResult {
 
   if (!Array.isArray(value.rows)) { errors.push('rows must be an array'); return { ok: false, errors }; }
   const seen = new Set<string>();
-  (value.rows as unknown[]).forEach((r, i) => validateRowShape(r, `bundle.rows[${i}]`, seen, errors));
+  (value.rows as unknown[]).forEach((r, i) => validateRowShape(r, `bundle.rows[${i}]`, seen, errors, version));
 
   // VIDEO manifest cardinality: one analysis may consume at most the configured
   // number of frames, so a manifest claiming more frames than the bundle's own
@@ -383,7 +577,7 @@ function oneOf(v: unknown, list: readonly string[]): boolean {
   return typeof v === 'string' && list.includes(v);
 }
 
-function validateRowShape(r: unknown, at: string, seen: Set<string>, errors: string[]): void {
+function validateRowShape(r: unknown, at: string, seen: Set<string>, errors: string[], version: number): void {
   if (!isPlainObject(r)) { errors.push(`${at} is not an object`); return; }
 
   const status = r.analysis_status;
@@ -392,7 +586,10 @@ function validateRowShape(r: unknown, at: string, seen: Set<string>, errors: str
     return;   // cannot narrow further
   }
   // Variant key allowlist — a held row carrying result fields is rejected outright.
-  checkExactKeys(r, status === 'SUCCESS' ? SUCCESS_KEYS : HELD_KEYS, at, errors);
+  // A v3 SUCCESS row must carry the result blocks; a v2 SUCCESS row must NOT (that
+  // would be a v3 row wearing a v2 version number).
+  const successKeys = version >= BUNDLE_SCHEMA_V3 ? SUCCESS_KEYS_V3 : SUCCESS_KEYS;
+  checkExactKeys(r, status === 'SUCCESS' ? successKeys : HELD_KEYS, at, errors);
 
   // ── common ──
   if (!isExactAdId(r.ad_id)) errors.push(`${at}.ad_id must be an exact numeric id string`);
@@ -505,6 +702,374 @@ function validateRowShape(r: unknown, at: string, seen: Set<string>, errors: str
       errors.push(`${at} ${String(src)} row must not claim consumed assets`);
     }
     if (r.visual_confidence !== null) errors.push(`${at} ${String(src)} row must have visual_confidence: null`);
+  }
+
+  // ── v3 authoritative result blocks ──
+  if (version >= BUNDLE_SCHEMA_V3) validateResultBlocks(r, at, errors);
+}
+
+// ─── v3 result-block validation ───────────────────────────────────────────────
+
+function scoreField(v: unknown, at: string, errors: string[], nullable = false): void {
+  if (nullable && v === null) return;
+  if (!isScore(v)) errors.push(`${at} must be a number between 0 and 10${nullable ? ' or null' : ''}`);
+}
+
+function textField(v: unknown, at: string, limitKey: string, errors: string[]): void {
+  if (typeof v !== 'string' || v.trim() === '') {
+    errors.push(`${at} must be a non-empty string — a truthful AdAnalysis record cannot be written without it`);
+    return;
+  }
+  scanText(v, at, limitKey, errors);
+}
+
+/**
+ * A scorer list. `exact` pins a cardinality the scorer GUARANTEES; otherwise at least
+ * one entry is required, because the real analysers never emit an empty list — they
+ * substitute an explicit sentence. An empty or blank-filled array therefore cannot come
+ * from a real run, and must never be accepted as one.
+ */
+function stringListField(v: unknown, at: string, errors: string[], exact?: number): void {
+  if (!Array.isArray(v) || !v.every((s) => typeof s === 'string')) {
+    errors.push(`${at} must be an array of strings`);
+    return;
+  }
+  const list = v as string[];
+  if (exact !== undefined) {
+    if (list.length !== exact) {
+      errors.push(`${at} must contain exactly ${exact} entries — the scorer always emits ${exact} (got ${list.length})`);
+    }
+  } else if (list.length === 0) {
+    errors.push(`${at} must not be empty — the scorer never emits an empty list, so this cannot be a real result`);
+  }
+  if (list.length > MAX_LIST_ITEMS) errors.push(`${at} exceeds ${MAX_LIST_ITEMS} entries`);
+  list.forEach((s, i) => {
+    if (s.trim() === '') errors.push(`${at}[${i}] is blank — a placeholder entry cannot satisfy persistence validation`);
+    scanText(s, `${at}[${i}]`, 'list_item', errors);
+  });
+}
+
+function aidaTextField(v: unknown, at: string, errors: string[]): void {
+  if (!isPlainObject(v)) { errors.push(`${at} must be an object`); return; }
+  checkExactKeys(v, AIDA_TEXT_KEYS, at, errors);
+  for (const k of AIDA_TEXT_KEYS) if (k in v) textField(v[k], `${at}.${k}`, 'analysis_text', errors);
+}
+
+/**
+ * The v3 contract: a SUCCESS row must carry the COMPLETE computed result. Every field
+ * the AdAnalysis model requires non-null is validated here as non-empty, so a row that
+ * could not be persisted truthfully is rejected at load time rather than papered over
+ * with an empty string at write time.
+ */
+function validateResultBlocks(r: Record<string, unknown>, at: string, errors: string[]): void {
+  // ── analysis_result ──
+  const R = r.analysis_result;
+  if (!isPlainObject(R)) {
+    errors.push(`${at}.analysis_result must be an object — a v3 SUCCESS row carries the complete scorer output`);
+  } else {
+    checkExactKeys(R, ANALYSIS_RESULT_KEYS, `${at}.analysis_result`, errors);
+    const A = `${at}.analysis_result`;
+
+    // Required non-null AdAnalysis text columns.
+    textField(R.creative_analysis, `${A}.creative_analysis`, 'analysis_text', errors);
+    textField(R.copy_analysis, `${A}.copy_analysis`, 'analysis_text', errors);
+    textField(R.headline_analysis, `${A}.headline_analysis`, 'analysis_text', errors);
+    textField(R.description_analysis, `${A}.description_analysis`, 'analysis_text', errors);
+
+    // Required non-null AdAnalysis JSON columns, held to the REAL scorer invariants:
+    //   strengths / weaknesses — never empty (the analysers substitute an explicit
+    //     sentence when nothing is detected), so [] cannot be a real result;
+    //   improvements — always exactly [recommendations.copy, .headline, .creative].
+    // An empty or blank array would assert "nothing found", which is a different and
+    // false claim from "not computed". Both are rejected.
+    stringListField(R.strengths, `${A}.strengths`, errors);
+    stringListField(R.weaknesses, `${A}.weaknesses`, errors);
+    stringListField(R.improvements, `${A}.improvements`, errors, ANALYSIS_IMPROVEMENT_ENTRIES);
+
+    scoreField(R.overall_score, `${A}.overall_score`, errors);
+    if (typeof R.qualified !== 'boolean') errors.push(`${A}.qualified must be a boolean`);
+
+    // Rubric — exact keys, and the half that must be populated is decided by the ad's
+    // OWN media type, not by whatever the row happens to carry. IMAGE/CAROUSEL score
+    // STATIC; VIDEO scores VIDEO; the other half is null because the scorer genuinely
+    // produced nothing for it. A genuine 0 is a real score and survives.
+    if (!isPlainObject(R.sub_scores)) {
+      errors.push(`${A}.sub_scores must be an object`);
+    } else {
+      const S = R.sub_scores as Record<string, unknown>;
+      checkExactKeys(S, SUB_SCORE_KEYS, `${A}.sub_scores`, errors);   // unknown extra keys fail here
+
+      for (const k of SUB_SCORE_SHARED_KEYS) {
+        if (!(k in S)) continue;   // absence already reported
+        scoreField(S[k], `${A}.sub_scores.${k}`, errors);   // shared scores are never null
+      }
+
+      const isVideo = r.media_type === 'VIDEO';
+      const required = isVideo ? SUB_SCORE_VIDEO_KEYS : SUB_SCORE_STATIC_KEYS;
+      const forbidden = isVideo ? SUB_SCORE_STATIC_KEYS : SUB_SCORE_VIDEO_KEYS;
+      const half = isVideo ? 'video' : 'static';
+
+      if (oneOf(r.media_type, MEDIA_TYPES)) {
+        for (const k of required) {
+          if (!(k in S)) continue;
+          if (S[k] === null || S[k] === undefined) {
+            errors.push(`${A}.sub_scores.${k} is required for a ${String(r.media_type)} ad — the ${half} rubric must be complete`);
+          } else {
+            scoreField(S[k], `${A}.sub_scores.${k}`, errors);
+          }
+        }
+        for (const k of forbidden) {
+          if (k in S && S[k] !== null) {
+            errors.push(`${A}.sub_scores.${k} must be null for a ${String(r.media_type)} ad — the scorer produces no ${isVideo ? 'static' : 'video'} rubric for it`);
+          }
+        }
+      }
+    }
+
+    aidaTextField(R.aida, `${A}.aida`, errors);
+    aidaTextField(R.aida_explanations, `${A}.aida_explanations`, errors);
+    if (!isPlainObject(R.aida_scores)) errors.push(`${A}.aida_scores must be an object`);
+    else {
+      checkExactKeys(R.aida_scores, AIDA_TEXT_KEYS, `${A}.aida_scores`, errors);
+      for (const k of Object.keys(R.aida_scores)) scoreField((R.aida_scores as Record<string, unknown>)[k], `${A}.aida_scores.${k}`, errors);
+    }
+
+    if (!oneOf(R.funnel_stage, FUNNEL_STAGES)) errors.push(`${A}.funnel_stage must be one of ${FUNNEL_STAGES.join('/')}`);
+    if (!oneOf(R.race_stage, RACE_STAGES)) errors.push(`${A}.race_stage must be one of ${RACE_STAGES.join('/')}`);
+    if (!oneOf(R.trust_funnel_stage, TRUST_STAGES)) errors.push(`${A}.trust_funnel_stage must be one of ${TRUST_STAGES.join('/')}`);
+    if (!oneOf(R.final_verdict, QA_VERDICTS)) errors.push(`${A}.final_verdict must be one of ${QA_VERDICTS.join('/')}`);
+
+    scoreField(R.copy_score, `${A}.copy_score`, errors);
+    scoreField(R.headline_score, `${A}.headline_score`, errors, true);
+    scoreField(R.description_score, `${A}.description_score`, errors, true);
+    scoreField(R.creative_score, `${A}.creative_score`, errors);
+    scoreField(R.clarity_score, `${A}.clarity_score`, errors);
+    scoreField(R.connection_score, `${A}.connection_score`, errors);
+    scoreField(R.conviction_score, `${A}.conviction_score`, errors);
+
+    if (!Array.isArray(R.behavioural_triggers)) errors.push(`${A}.behavioural_triggers must be an array`);
+    else {
+      (R.behavioural_triggers as unknown[]).forEach((t, i) => {
+        const tat = `${A}.behavioural_triggers[${i}]`;
+        if (!isPlainObject(t)) { errors.push(`${tat} is not an object`); return; }
+        checkExactKeys(t, ['name', 'strength'], tat, errors);
+        if (!oneOf(t.name, TRIGGER_NAMES)) errors.push(`${tat}.name is not a known behavioural trigger`);
+        if (!oneOf(t.strength, TRIGGER_STRENGTHS)) errors.push(`${tat}.strength must be one of ${TRIGGER_STRENGTHS.join('/')}`);
+      });
+    }
+
+    if (!isPlainObject(R.recommendations)) errors.push(`${A}.recommendations must be an object`);
+    else {
+      checkExactKeys(R.recommendations, RECOMMENDATION_KEYS, `${A}.recommendations`, errors);
+      const rec = R.recommendations as Record<string, unknown>;
+      for (const k of RECOMMENDATION_KEYS) if (k in rec) textField(rec[k], `${A}.recommendations.${k}`, 'recommendation', errors);
+    }
+
+    // null is meaningful here: the scorer produces none when every component scores >= 7.
+    if (R.rewrite_direction !== null) {
+      if (!isPlainObject(R.rewrite_direction)) errors.push(`${A}.rewrite_direction must be an object or null`);
+      else {
+        checkExactKeys(R.rewrite_direction, REWRITE_KEYS, `${A}.rewrite_direction`, errors);
+        const rw = R.rewrite_direction as Record<string, unknown>;
+        for (const k of REWRITE_KEYS) if (k in rw) textField(rw[k], `${A}.rewrite_direction.${k}`, 'recommendation', errors);
+      }
+    }
+  }
+
+  // ── benchmark_result ──
+  const B = r.benchmark_result;
+  if (!isPlainObject(B)) {
+    errors.push(`${at}.benchmark_result must be an object — a v3 SUCCESS row carries the complete benchmark output`);
+  } else {
+    checkExactKeys(B, BENCHMARK_RESULT_KEYS, `${at}.benchmark_result`, errors);
+    const K = `${at}.benchmark_result`;
+    scoreField(B.benchmark_score, `${K}.benchmark_score`, errors);
+    if (!oneOf(B.tier, BENCHMARK_TIER_LABELS)) errors.push(`${K}.tier must be one of the canonical tier labels`);
+    if (!oneOf(B.tier_token, BENCHMARK_TIERS)) errors.push(`${K}.tier_token must be one of ${BENCHMARK_TIERS.join('/')}`);
+    if (!oneOf(B.confidence, BENCHMARK_CONFIDENCES)) errors.push(`${K}.confidence must be HIGH/MEDIUM/LOW`);
+    textField(B.evidence_source, `${K}.evidence_source`, 'benchmark_text', errors);
+    if (!oneOf(B.evidence_token, EVIDENCE_TOKENS)) errors.push(`${K}.evidence_token must be one of ${EVIDENCE_TOKENS.join('/')}`);
+    textField(B.recommended_use, `${K}.recommended_use`, 'benchmark_text', errors);
+    textField(B.formula, `${K}.formula`, 'formula', errors);
+    if (B.warning !== null) textField(B.warning, `${K}.warning`, 'benchmark_text', errors);
+
+    // Shape checks on each entry before any semantic comparison.
+    if (!Array.isArray(B.breakdown)) errors.push(`${K}.breakdown must be an array`);
+    else {
+      const bd = B.breakdown as unknown[];
+      if (bd.length !== BENCHMARK_BREAKDOWN_ENTRIES) {
+        errors.push(`${K}.breakdown must contain exactly ${BENCHMARK_BREAKDOWN_ENTRIES} entries — the scorer always emits ${BENCHMARK_BREAKDOWN_ENTRIES} (got ${bd.length})`);
+      }
+      bd.forEach((b, i) => {
+        const bat = `${K}.breakdown[${i}]`;
+        if (!isPlainObject(b)) { errors.push(`${bat} is not an object`); return; }
+        checkExactKeys(b, ['label', 'value', 'weight'], bat, errors);
+        if (typeof b.label !== 'string' || b.label.trim() === '') errors.push(`${bat}.label must be a non-empty string`);
+        else scanText(b.label, `${bat}.label`, 'breakdown_label', errors);
+        scoreField(b.value, `${bat}.value`, errors);
+        if (typeof b.weight !== 'number' || !Number.isFinite(b.weight) || b.weight < 0 || b.weight > 1) {
+          errors.push(`${bat}.weight must be a number between 0 and 1`);
+        }
+      });
+    }
+
+    // ── The benchmark must be one the scorer could actually have produced ──
+    if (isPlainObject(R)) validateBenchmarkAgainstContract(r, R, B, K, errors);
+  }
+
+  // ── the summary must not contradict the authoritative result ──
+  if (isPlainObject(R) && isPlainObject(B)) validateSummaryAgainstResult(r, R, B, at, errors);
+}
+
+/**
+ * Recomputes the ENTIRE benchmark the scorer would have produced from this row's own
+ * `analysis_result` and `creative_source`, and requires the bundle to match it.
+ *
+ * This is deterministic verification against the shared pure contract, not re-scoring:
+ * no analyser runs, nothing is inferred, and the numbers being checked are the ones the
+ * preview already computed. It closes the gap where every individual field was in range
+ * yet the combination was impossible — e.g. score 6.4 with tier MODERATE, when the real
+ * threshold for MODERATE is 6.5, so 6.4 is WEAK.
+ */
+function validateBenchmarkAgainstContract(
+  r: Record<string, unknown>,
+  R: Record<string, unknown>,
+  B: Record<string, unknown>,
+  K: string,
+  errors: string[],
+): void {
+  const src = r.creative_source;
+  if (!oneOf(src, CREATIVE_SOURCES)) return;   // already reported
+  const s = src as CreativeSourceValue;
+
+  // Evidence, confidence and warning are pure functions of the creative source.
+  const evidence = deriveEvidenceForCreativeSource(s);
+  if (B.evidence_token !== evidence.token) errors.push(`${K}.evidence_token must be ${evidence.token} for a ${s} row`);
+  if (B.evidence_source !== evidence.label) errors.push(`${K}.evidence_source does not match the canonical label for a ${s} row`);
+  if (B.confidence !== evidence.confidence) {
+    errors.push(`${K}.confidence must be ${evidence.confidence} for a ${s} row — benchmark confidence describes the evidence`);
+  }
+  if (B.warning !== evidence.warning) {
+    errors.push(evidence.warning === null
+      ? `${K}.warning must be null for a ${s} row`
+      : `${K}.warning must be the exact ${s} warning the scorer emits`);
+  }
+  if (B.formula !== BENCHMARK_FORMULA_BY_SOURCE[s]) {
+    errors.push(`${K}.formula is not the formula the scorer emits for a ${s} row`);
+  }
+
+  // The breakdown must be exactly the one these analysis inputs produce.
+  const aida = R.aida_scores;
+  if (!isPlainObject(aida) || typeof R.creative_score !== 'number' || typeof R.copy_score !== 'number') return;
+  const inputs = {
+    aidaScores: aida as unknown as { attention: number; interest: number; desire: number; action: number },
+    creativeScore: R.creative_score,
+    copyScore: R.copy_score,
+  };
+  if (![inputs.aidaScores.attention, inputs.aidaScores.interest, inputs.aidaScores.desire, inputs.aidaScores.action].every((n) => typeof n === 'number')) return;
+
+  const expected = deriveBenchmarkBreakdown(inputs, s);
+  const actual = Array.isArray(B.breakdown) ? (B.breakdown as unknown[]) : [];
+  if (actual.length === expected.length) {
+    expected.forEach((exp, i) => {
+      const got = actual[i];
+      if (!isPlainObject(got)) return;
+      if (got.label !== exp.label) {
+        errors.push(`${K}.breakdown[${i}].label must be "${exp.label}" for a ${s} row (order and naming are fixed)`);
+      }
+      if (typeof got.weight === 'number' && Math.abs(got.weight - exp.weight) > 1e-9) {
+        errors.push(`${K}.breakdown[${i}].weight ${got.weight} does not match the ${s} formula weight ${exp.weight}`);
+      }
+      if (typeof got.value === 'number' && Math.abs(got.value - exp.value) > 1e-9) {
+        errors.push(`${K}.breakdown[${i}].value ${got.value} does not match the authoritative analysis value ${exp.value} ("${exp.label}")`);
+      }
+    });
+
+    const weightTotal = expected.reduce((t, e) => t + e.weight, 0);
+    const actualTotal = actual.reduce<number>((t, b) => t + (isPlainObject(b) && typeof b.weight === 'number' ? b.weight : 0), 0);
+    if (Math.abs(actualTotal - weightTotal) > 1e-9) {
+      errors.push(`${K}.breakdown weights sum to ${actualTotal}, but the ${s} formula sums to ${weightTotal}`);
+    }
+  }
+
+  // The score must be the weighted sum of that breakdown, under the scorer's rounding.
+  const expectedScore = computeBenchmarkScoreFromBreakdown(expected);
+  if (typeof B.benchmark_score === 'number' && Math.abs(B.benchmark_score - expectedScore) > 1e-9) {
+    errors.push(`${K}.benchmark_score ${B.benchmark_score} does not equal the ${expectedScore} its own breakdown computes`);
+  }
+
+  // The tier must come from that score's threshold band.
+  const expectedToken = deriveTierToken(expectedScore);
+  if (B.tier_token !== expectedToken) {
+    errors.push(`${K}.tier_token ${String(B.tier_token)} does not match the tier a score of ${expectedScore} earns (${expectedToken})`);
+  }
+  if (B.tier !== deriveTierLabel(expectedToken)) {
+    errors.push(`${K}.tier does not match the ${expectedToken} label a score of ${expectedScore} earns`);
+  }
+
+  // Guidance is a pure function of tier + confidence.
+  const expectedUse = deriveRecommendedUse(expectedToken, evidence.confidence);
+  if (B.recommended_use !== expectedUse) {
+    errors.push(`${K}.recommended_use is not the guidance the scorer emits for ${expectedToken} + ${evidence.confidence}`);
+  }
+}
+
+/** Stable structural equality — key order must not decide whether two values agree. */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((x, i) => sameValue(x, b[i]));
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const ka = Object.keys(a).sort();
+    const kb = Object.keys(b).sort();
+    return ka.length === kb.length && ka.every((k, i) => k === kb[i] && sameValue(a[k], b[k]));
+  }
+  return false;
+}
+
+/**
+ * EXHAUSTIVE: every value duplicated between the v2-shaped summary and the authoritative
+ * v3 result. Neither side is silently preferred — a disagreement fails the bundle, because
+ * we cannot know which one a reader would trust.
+ *
+ * Not listed here because they are NOT duplicated: visual_description, visual_confidence
+ * and creative_notes are Vision inputs and have no counterpart in the scorer's output.
+ */
+function validateSummaryAgainstResult(
+  r: Record<string, unknown>,
+  R: Record<string, unknown>,
+  B: Record<string, unknown>,
+  at: string,
+  errors: string[],
+): void {
+  const cs = isPlainObject(r.component_scores) ? (r.component_scores as Record<string, unknown>) : {};
+  const pairs: Array<[unknown, unknown, string]> = [
+    [r.internal_qa_score, R.overall_score, 'internal_qa_score vs analysis_result.overall_score'],
+    [r.internal_qa_verdict, R.final_verdict, 'internal_qa_verdict vs analysis_result.final_verdict'],
+    [r.qualified, R.qualified, 'qualified'],
+    [r.funnel_stage, R.funnel_stage, 'funnel_stage'],
+    [r.race_stage, R.race_stage, 'race_stage'],
+    [r.trust_funnel_stage, R.trust_funnel_stage, 'trust_funnel_stage'],
+    [r.aida_scores, R.aida_scores, 'aida_scores'],
+    [cs.copy_score, R.copy_score, 'component_scores.copy_score'],
+    [cs.headline_score, R.headline_score, 'component_scores.headline_score'],
+    [cs.description_score, R.description_score, 'component_scores.description_score'],
+    [cs.creative_score, R.creative_score, 'component_scores.creative_score'],
+    [cs.clarity_score, R.clarity_score, 'component_scores.clarity_score'],
+    [cs.connection_score, R.connection_score, 'component_scores.connection_score'],
+    [cs.conviction_score, R.conviction_score, 'component_scores.conviction_score'],
+    [r.behavioural_triggers, R.behavioural_triggers, 'behavioural_triggers'],
+    [r.strengths, R.strengths, 'strengths'],
+    [r.benchmark_score, B.benchmark_score, 'benchmark_score'],
+    [r.benchmark_tier, B.tier_token, 'benchmark_tier vs benchmark_result.tier_token'],
+    [r.benchmark_confidence, B.confidence, 'benchmark_confidence'],
+  ];
+  for (const [summary, authoritative, label] of pairs) {
+    if (!sameValue(summary, authoritative)) {
+      errors.push(`${at} summary contradicts the authoritative result (${label})`);
+    }
   }
 }
 
@@ -708,6 +1273,45 @@ export function bundleRowIdentity(row: BundleRow): SourceRowIdentity {
   };
 }
 
+// ─── Persistence gate ─────────────────────────────────────────────────────────
+
+export type PersistenceDecision =
+  | { persistable: true; row: BundleSuccessRowV3 }
+  | { persistable: false; reason: string };
+
+/**
+ * The ONE place that decides whether a validated bundle row may become a database
+ * write. Everything it refuses stays honestly reportable — refusal is never an error
+ * and never triggers recomputation.
+ *
+ * A v2 bundle is refused for persistence BY DESIGN: it carries an analysis summary,
+ * not the scorer output, so the required non-null AdAnalysis columns could only be
+ * filled by inventing content or re-running the scorer. Both are forbidden.
+ */
+export function decidePersistence(bundle: BrowserAnalysisBundle, row: BundleRow): PersistenceDecision {
+  if (bundle.schema_version < BUNDLE_SCHEMA_V3) {
+    return {
+      persistable: false,
+      reason:
+        `bundle is schema v${bundle.schema_version}, which records an analysis SUMMARY only — ` +
+        `it cannot truthfully populate the required AdAnalysis fields (creativeAnalysis, copyAnalysis, ` +
+        `headlineAnalysis, descriptionAnalysis, weaknessesJson, improvementsJson, rubricScoresJson). ` +
+        `Re-run the preview to produce a v${BUNDLE_SCHEMA_V3} bundle; analysis is never recomputed here`,
+    };
+  }
+  if (row.analysis_status !== 'SUCCESS') {
+    return { persistable: false, reason: `analysis_status is ${row.analysis_status}, not SUCCESS` };
+  }
+  if (row.visual_confidence === 'LOW') {
+    return { persistable: false, reason: 'LOW visual confidence — model could not confidently identify the visual sequence' };
+  }
+  if (!row.analysis_result || !row.benchmark_result) {
+    // Unreachable for a validated v3 bundle; kept as a fail-closed backstop.
+    return { persistable: false, reason: 'v3 SUCCESS row is missing its authoritative result blocks' };
+  }
+  return { persistable: true, row: row as BundleSuccessRowV3 };
+}
+
 // ─── Serialisation ────────────────────────────────────────────────────────────
 
 export function serializeBundle(bundle: BrowserAnalysisBundle): string {
@@ -715,7 +1319,8 @@ export function serializeBundle(bundle: BrowserAnalysisBundle): string {
   for (const k of BUNDLE_TOP_KEYS) {
     if (k === 'rows') {
       ordered.rows = bundle.rows.map((r) => {
-        const keys = r.analysis_status === 'SUCCESS' ? SUCCESS_KEYS : HELD_KEYS;
+        const successKeys = bundle.schema_version >= BUNDLE_SCHEMA_V3 ? SUCCESS_KEYS_V3 : SUCCESS_KEYS;
+        const keys = r.analysis_status === 'SUCCESS' ? successKeys : HELD_KEYS;
         const o: Record<string, unknown> = {};
         for (const rk of keys) o[rk] = (r as unknown as Record<string, unknown>)[rk];
         return o;

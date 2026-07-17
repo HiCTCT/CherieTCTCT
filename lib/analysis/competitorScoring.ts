@@ -22,6 +22,11 @@
 import { clampScore } from '@/lib/analysis/scoring';
 import type { AnalysisOutput } from '@/lib/analysis/types';
 import type { CreativeSource } from '@/lib/analysis/creativeAssetAnalyser';
+import {
+  TIER_LABEL_BY_TOKEN, EVIDENCE_TOKEN_BY_SOURCE, EVIDENCE_LABEL_BY_SOURCE,
+  BENCHMARK_FORMULA_BY_SOURCE, deriveTierToken, deriveRecommendedUse,
+  deriveBenchmarkBreakdown, computeBenchmarkScoreFromBreakdown, deriveEvidenceForCreativeSource,
+} from '@/lib/analysis/benchmarkContract';
 
 export type BenchmarkConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
 export type BenchmarkTierToken = 'STRONG' | 'MODERATE' | 'WEAK' | 'LOW';
@@ -46,31 +51,19 @@ export type CompetitorBenchmark = {
   warning: string | null;
 };
 
-const TIER_LABEL: Record<BenchmarkTierToken, BenchmarkTier> = {
-  STRONG:   'Strong competitor signal',
-  MODERATE: 'Moderate competitor signal',
-  WEAK:     'Weak competitor signal',
-  LOW:      'Low competitor signal',
-};
+// These tables now live in the pure benchmark contract, so the bundle validator can
+// check the scorer's guarantees without importing (or executing) any scoring code.
+// Same values, same behaviour — single source of truth, so the two cannot drift.
+const TIER_LABEL: Record<BenchmarkTierToken, BenchmarkTier> = TIER_LABEL_BY_TOKEN;
+const EVIDENCE_TOKEN: Record<CreativeSource, EvidenceToken> = EVIDENCE_TOKEN_BY_SOURCE;
 
-const EVIDENCE_TOKEN: Record<CreativeSource, EvidenceToken> = {
-  ASSET:    'VISION',
-  MANUAL:   'MANUAL',
-  FALLBACK: 'NONE',
-};
-
-const EVIDENCE_LABEL: Record<CreativeSource, string> = {
-  ASSET:    'Vision creative analysis (creative seen by Claude Vision)',
-  MANUAL:   'Stored manual analysis (creative NOT analysed by Vision)',
-  FALLBACK: 'No creative evidence (no asset, no manual text)',
-};
+const EVIDENCE_LABEL: Record<CreativeSource, string> = EVIDENCE_LABEL_BY_SOURCE;
 
 /** Canonical tier token from a benchmark score. */
 export function benchmarkTierToken(score: number): BenchmarkTierToken {
-  if (score >= 8.0) return 'STRONG';
-  if (score >= 6.5) return 'MODERATE';
-  if (score >= 5.0) return 'WEAK';
-  return 'LOW';
+  // Thresholds live in the pure contract so the bundle validator can check a produced
+  // benchmark against the SAME rule. Same boundaries (>=8.0 / >=6.5 / >=5.0), unchanged.
+  return deriveTierToken(score);
 }
 
 /** Display label from a benchmark score (back-compat for preview renderers). */
@@ -125,13 +118,9 @@ export function creativeSourceLabel(token: string | null | undefined): string {
  * scripts and ingestion (so they never drift). Derived from tier + confidence.
  */
 export function recommendedUseFor(tierToken: BenchmarkTierToken, confidence: BenchmarkConfidence): string {
-  if (confidence === 'LOW') return 'Reference only — low confidence (no creative seen)';
-  const base =
-    tierToken === 'STRONG'   ? 'Model / reverse-engineer — strong signal' :
-    tierToken === 'MODERATE' ? 'Study — worth analysing' :
-    tierToken === 'WEAK'     ? 'Reference only — weak signal' :
-                               'Archive — low signal';
-  return confidence === 'MEDIUM' ? `${base} (verify — manual text only)` : base;
+  // Exact same strings and rule — now owned by the pure contract, so the validator can
+  // reject a recommended_use the scorer would never have written.
+  return deriveRecommendedUse(tierToken, confidence);
 }
 
 /**
@@ -148,49 +137,19 @@ export function scoreCompetitorBenchmarkAd(
   analysis: AnalysisOutput,
   source: CreativeSource,
 ): CompetitorBenchmark {
-  const a = analysis.aidaScores;
-  const aidaAvg = clampScore((a.attention + a.interest + a.desire + a.action) / 4);
-  const creativeScore = analysis.creativeScore;
-  const copyScore = analysis.copyScore;
-  const actionSignal = a.action; // CTA/offer/action proxy from AIDA
-
-  let benchmarkScore: number;
-  let confidence: BenchmarkConfidence;
-  let formula: string;
-  let breakdown: { label: string; value: number; weight: number }[];
-  let warning: string | null;
-
-  if (source === 'ASSET') {
-    benchmarkScore = clampScore(aidaAvg * 0.70 + creativeScore * 0.20 + actionSignal * 0.10);
-    confidence = 'HIGH';
-    formula = 'AIDA avg ×0.70 + creative ×0.20 + action/offer ×0.10';
-    breakdown = [
-      { label: 'AIDA avg',  value: aidaAvg,       weight: 0.70 },
-      { label: 'creative',  value: creativeScore, weight: 0.20 },
-      { label: 'action',    value: actionSignal,  weight: 0.10 },
-    ];
-    warning = null;
-  } else if (source === 'MANUAL') {
-    benchmarkScore = clampScore(creativeScore * 0.50 + copyScore * 0.30 + actionSignal * 0.20);
-    confidence = 'MEDIUM';
-    formula = 'manual creative ×0.50 + copy/message ×0.30 + CTA/offer ×0.20';
-    breakdown = [
-      { label: 'creative (manual)', value: creativeScore, weight: 0.50 },
-      { label: 'copy/message',      value: copyScore,     weight: 0.30 },
-      { label: 'CTA/offer',         value: actionSignal,  weight: 0.20 },
-    ];
-    warning = 'MEDIUM confidence — the creative was not analysed by Vision; score is based on operator-entered text.';
-  } else {
-    benchmarkScore = clampScore(creativeScore * 0.50 + copyScore * 0.30 + actionSignal * 0.20);
-    confidence = 'LOW';
-    formula = 'machine baseline only (no asset / no manual text)';
-    breakdown = [
-      { label: 'creative (none)', value: creativeScore, weight: 0.50 },
-      { label: 'copy/message',    value: copyScore,     weight: 0.30 },
-      { label: 'CTA/offer',       value: actionSignal,  weight: 0.20 },
-    ];
-    warning = 'LOW confidence — no creative was captured or described. Treat this score as unreliable.';
-  }
+  // Every rule below — inputs, weights, labels, formula, confidence, warning, rounding —
+  // now comes from the pure benchmark contract, which the bundle validator consumes too.
+  // Identical arithmetic and identical strings to before: this is a single-source-of-truth
+  // extraction, not a scoring change.
+  const breakdown = deriveBenchmarkBreakdown(
+    { aidaScores: analysis.aidaScores, creativeScore: analysis.creativeScore, copyScore: analysis.copyScore },
+    source,
+  );
+  const benchmarkScore = computeBenchmarkScoreFromBreakdown(breakdown);
+  const evidence = deriveEvidenceForCreativeSource(source);
+  const confidence: BenchmarkConfidence = evidence.confidence;
+  const formula = BENCHMARK_FORMULA_BY_SOURCE[source];
+  const warning = evidence.warning;
 
   const tierToken = benchmarkTierToken(benchmarkScore);
   return {

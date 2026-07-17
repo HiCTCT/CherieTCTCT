@@ -13,8 +13,9 @@ the tracked repository. Status is based on that evidence — **not** on the mere
 
 ## 0. Session handover — READ FIRST
 
-_Last updated: 2026-07-17. Written after Phase 1 part 1 was reviewed (**Codex PASS**), committed and
-**pushed to `origin/main`**. Nothing is pending for Part 1._
+_Last updated: 2026-07-17. Part 1 is reviewed (**Codex PASS**), committed and **pushed**. **Part 2 —
+bundle-backed live ingestion — is implemented locally, uncommitted, and awaiting final coordinator
+verification.**_
 
 ### 0.1 What is complete
 
@@ -25,9 +26,9 @@ _Last updated: 2026-07-17. Written after Phase 1 part 1 was reviewed (**Codex PA
   parsing, visual-confidence **display**, deterministic trigger hardening.
 - **Committed and pushed in earlier sessions:** `74789e7`, `3f3a76e`, `d379f81`, `b45778a`, `22c6c7a`,
   `6564b41`, `c69866a`.
-- **Committed and pushed on 2026-07-17:** `3cedf83` (Phase 1 part 1 implementation) and `e208cbd`
-  (tracker recording the final Codex PASS). `origin/main` contains both; local `main` was verified
-  **level with `origin/main`** after the push.
+- **Committed and pushed on 2026-07-17:** `3cedf83` (Phase 1 part 1 implementation), `e208cbd` (tracker
+  recording the final Codex PASS) and `ed71513` (tracker finalisation). **The latest committed baseline
+  is `ed71513`**, which is where `origin/main` and local `main` both sit.
 - **Phase 1 part 1 — reviewed, committed and pushed. COMPLETE and FROZEN (§14):** versioned bundle
   (schema **v2**), strict fail-closed validator, bundle-backed **no-write planner**, opt-in preview
   bundle output, and **153 tracked tests passing**. Three review rounds ran in all: the first review,
@@ -39,6 +40,71 @@ _Last updated: 2026-07-17. Written after Phase 1 part 1 was reviewed (**Codex PA
   and must not be reopened without a specific, demonstrated regression.
 
 ### 0.2 What is currently being worked on
+
+**Phase 1 part 2 — bundle-backed live ingestion. Implemented locally, UNCOMMITTED.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests have passed the substantive reviews; what remains is final coordinator verification — no Codex PASS has been recorded, and no further Codex review is outstanding.**
+
+Codex confirmed sound and unchanged: zero-AI/zero-browser/zero-recomputation ingestion, v2 persistence
+refusal, v3 preview serialisation, the pure mapping, duplicate skip-only handling, no update path, the
+Ad + AdAnalysis transaction boundary, all three live-write flags, **zero-database dry-run (judged safer
+and accepted — it is not a defect and must not be "fixed" to report duplicates)**, per-row isolation and
+the recommendation-key rename.
+
+**Five Codex reviews so far, all NEEDS CHANGES, all corrected. The canonical sequence:**
+
+1. Part 2 implemented (schema v3 + bundle-backed ingestion).
+2. **Codex review 1 → NEEDS CHANGES**: nine findings (sidecar binding, placeholder arrays, rubric,
+   summary cross-check, benchmark semantics, `benchmarkScoredAt`, schema-aware drift, lazy Prisma,
+   `Ad.adLink`).
+3. Correction pass 1 — all nine closed.
+4. **Codex review 2 → NEEDS CHANGES**: one material blocker — the benchmark validator accepted
+   combinations the real scorer could never emit (**score 6.4 with tier MODERATE**, when MODERATE starts
+   at 6.5, so 6.4 is WEAK). Range-checking each field was never enough; the *combination* had to be
+   verified.
+5. Correction pass 2 — the benchmark semantic contract.
+6. **Codex review 3 → NEEDS CHANGES**: no production defect left; two accuracy problems — an overstated
+   scorer/validator parity test, and contradictory tracker statements.
+7. Correction pass 3 — a genuine parity test that invokes the production scorer, plus tracker fixes.
+8. **Codex review 4 → NEEDS CHANGES**: still no production defect; the 6.4 negative regression was
+   ambiguous (it overrode the score on a row whose breakdown computed 6.1, so it could fail for the
+   wrong reason), and live tracker sections still contradicted each other.
+9. **Correction pass 4** — the 6.4 regression isolated from a genuine production-scored row, and stale
+   live tracker sections reconciled.
+10. **Codex review 5 → NEEDS CHANGES — tracker accuracy only.** The **production implementation and
+    tests were ACCEPTED**; three stale current-state tracker sections remained.
+11. **Correction pass 5** — the stable baseline, executive workflow and validation history reconciled.
+12. **Final coordinator verification pending.** No Codex PASS has been recorded for Part 2, and no
+    further Codex review is outstanding.
+
+Summary of the whole part:
+
+- **The mapping audit gate FAILED first, and that drove the design.** Schema v2 records an analysis
+  *summary*; the `AdAnalysis` model requires seven non-null fields v2 cannot supply truthfully —
+  `creativeAnalysis`, `copyAnalysis`, `headlineAnalysis`, `descriptionAnalysis`, `weaknessesJson`,
+  `improvementsJson`, `rubricScoresJson`. Filling them would have meant inventing content, re-running
+  the scorer, or writing `''`/`[]`/`{}` — and `weaknessesJson: '[]'` would *assert* "no weaknesses
+  found", which is false. Implementation stopped and the operator approved the additive fix below.
+- **Approved decision, now implemented: schema v3.** v2 stays **frozen and immutable**; v3 is its
+  additive successor, carrying the complete already-computed `AnalysisOutput` and `CompetitorBenchmark`
+  (`analysis_result` / `benchmark_result`) that preview already held in memory.
+- **v2 remains loadable, validatable and usable for no-write planning — and can NEVER authorise an
+  INSERT.** A would-be writable v2 row routes to `BLOCKED_SCHEMA` with a precise reason. Only a fully
+  validated **v3 SUCCESS** row (non-LOW confidence) is a persistence candidate.
+- **`scripts/ingest-browser-collected-ads.ts` is now bundle-backed.** Every route to
+  `resolveCreativeContext`, `analyseAdRow`, `scoreCompetitorBenchmarkAd`, the analyser, Anthropic,
+  fetch and Playwright is **removed**. No recompute fallback exists. `ANTHROPIC_API_KEY` is neither
+  required nor read.
+- **The repeated-charge defect is closed.** There is no optional external work left in ingestion at all,
+  so nothing can be charged before duplicate detection.
+- **324 tracked tests pass** (153 Part 1, unchanged + 171 Part 2), `tsc` exit 0, `git diff --check` exit 0.
+- **Schema v2 stays planning-only and can never persist; schema v3 is required for any INSERT.**
+- **Scorer/validator parity is proven by execution:** a tracked test calls the production
+  `scoreCompetitorBenchmarkAd()` for **ASSET, MANUAL and FALLBACK**, feeds each real return value
+  through the schema-v3 validator, and asserts it is accepted — plus a mutation of a scorer-produced
+  value is rejected. That is the extent of the claim: it covers the benchmark block, not end-to-end
+  preview→ingest integration.
+- **No paid preview, no Anthropic call, no browser run, and no real database access** occurred: the
+  database boundary is an injected lazy factory, and every test uses a fake that counts client
+  construction as well as calls.
 
 **Phase 1 — Reusable analysis handoff** (§12). Part 1 is:
 
@@ -54,25 +120,28 @@ _Last updated: 2026-07-17. Written after Phase 1 part 1 was reviewed (**Codex PA
 - **153 tracked tests passing** (87 → 139 → 153 as each correction added regression tests);
 - **DONE. Nothing is pending for Part 1** — no review, no commit, no push.
 
-**Phase 1 itself is NOT complete, and remains ACTIVE and partial (§11, §12).** Part 1 built the reusable
-handoff; **part 2 has not started**. Specifically:
+**Phase 1 itself is NOT complete, and remains ACTIVE and partial (§11, §12).** Part 1 is pushed and
+frozen; **part 2 is implemented locally and is still uncommitted.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests have passed the substantive reviews; what remains is final coordinator verification — no Codex PASS has been recorded, and no further Codex review is outstanding.** What remains:
 
-1. `scripts/ingest-browser-collected-ads.ts` is **not bundle-backed**;
-2. live ingestion still calls `resolveCreativeContext()` (line 695) **before** duplicate detection
-   (line 756), so it **can still repeat paid AI analysis** — including on dry runs;
-3. **no reusable bundle produced by a real paid preview exists** — every bundle exercised so far is
-   synthetic, or built from real assets with placeholder analysis text.
+1. **Part 2 needs final coordinator verification**, then commit and push approval. Until then it is
+   provisional and **must not be added to the frozen do-not-repeat list (§14)**.
+2. **No reusable bundle produced by a real paid preview exists** — and none can be a v3 bundle yet,
+   because no paid preview has been run since v3 landed. Every bundle exercised so far is synthetic or
+   carries placeholder analysis text. **The first real v3 paid-preview bundle is a later, separately
+   approved checkpoint** (§0.3).
+3. **Live ingestion has still never been run against the database.** The path is now bundle-backed and
+   insert-only, but writing remains unproven and unapproved.
 
-**The immediate action is the next implementation task in §0.4/§13, which requires its own explicit
-instruction. Do not start it merely because this tracker names it.**
+**The immediate action is final coordinator verification of part 2 (§0.4).**
 
 ### 0.3 What is blocked
 
 | Blocked item | Reason | Unblocks when |
 |---|---|---|
 | Paid Vision preview **from a Claude Code session** (checkpoint **A1**) | `ANTHROPIC_API_KEY` is **ABSENT** from the environment this session inherits. Verified three times. The script reads `process.env` directly — no dotenv loader — so a `.env` file will not work. *(The operator has separately run bounded paid previews from Windows Command Prompt, where the key is available — see §0.6.)* | The key is set at OS/user level **and a new session is started** so the shell inherits it — or the operator runs it from Command Prompt. |
-| A **bundle produced by a real paid preview** | Earlier paid runs were terminal-only and predate the bundle writer, so none produced a bundle. Every bundle exercised so far is synthetic, or built from real assets with **placeholder** analysis text. | After a paid preview is run with `AI_PREVIEW_OUTPUT_FILE` set (post-review). |
-| Live browser DB ingestion (checkpoint **A2**) | Not approved, and `browser:ingest` still calls Anthropic before dedup. | After the next task + explicit approval. |
+| A **bundle produced by a real paid preview** (now: a **v3** bundle) | Earlier paid runs were terminal-only and predate the bundle writer. Every bundle exercised so far is synthetic or carries **placeholder** analysis text, and none is v3 — no paid preview has run since v3 landed. **A real v3 bundle is a later, separately approved checkpoint**; without one, no live insert can be backed by real analysis. | A paid preview is explicitly approved and run with `AI_PREVIEW_OUTPUT_FILE` set. |
+| Live browser DB ingestion (checkpoint **A2**) | Not approved. `browser:ingest` no longer calls Anthropic at all (part 2), but it has still never been run against a real database. | Explicit approval, after a real v3 bundle exists. |
+| **Committing Phase 1 part 2** | Implemented locally, uncommitted. **Five Codex reviews, each NEEDS CHANGES, each closed by a correction pass** (nine findings; the benchmark semantic blocker; an overstated parity test + tracker contradictions; the ambiguous 6.4 regression + tracker contradictions; and tracker accuracy only, with production and tests ACCEPTED). **Final coordinator verification pending** — no further Codex review is outstanding. | Coordinator verification → explicit commit approval. |
 | ~~Committing Phase 1 part 1~~ | **DONE — the final Codex re-review returned PASS, then the operator approved the commit. Committed as `3cedf83` on 2026-07-17.** | Done. |
 | ~~Pushing `3cedf83` + `e208cbd` to `origin/main`~~ | **DONE — pushed 2026-07-17 (`c69866a..e208cbd`, fast-forward). `origin/main` contains both commits; local `main` verified level.** | Done. |
 | ~~Freezing Phase 1 part 1 on the do-not-repeat list (§14)~~ | **DONE — §14 requires a Codex PASS **and** a committed, pushed change. PASS ✅, committed ✅, pushed ✅. Moved to the frozen list.** | Done. |
@@ -82,26 +151,32 @@ part 2 and later phases.
 
 ### 0.4 The next exact task
 
-> **Integrate the validated reusable analysis bundle into the real browser-ingestion path, so ingestion
-> can reuse approved analysis without another Anthropic call.**
+> **Final coordinator verification of Phase 1 Part 2, then commit approval.**
 
-Phase 1 part 1 is **finished, reviewed, committed and pushed** — nothing about it is pending. This is
-**part 2**, and it is the next *implementation* task, not an authorisation to start: it **requires its own
-separate explicit task instruction.** Do not begin it because this tracker names it. The full spec is §13.
+Part 2 is implemented, reviewed **five times** (NEEDS CHANGES each time), corrected each time, and
+validated locally (**324 tracked tests**, `tsc` exit 0, `git diff --check` exit 0). It remains
+**uncommitted**. **The production implementation and tests have passed the substantive reviews** —
+Codex found no production-code defect in reviews 3, 4 or 5; those rounds were test and tracker accuracy
+only, and are fixed. **No further Codex review is outstanding, and no Codex PASS has been recorded.**
+What remains is the coordinator's own verification of the working tree before commit approval.
 
-**Required boundary for that task, when it is instructed:**
+Then: correct any findings → commit approval → push approval → **then**, separately approved, a paid
+preview to produce the first real v3 bundle.
+
+**The boundary part 2 was built to — a review should hold it to exactly this:**
 
 - **No second AI analysis.** A validated bundle is the only source of analysis; there is **no recompute
   fallback** — missing bundle → fail, invalid or stale bundle → fail, missing row → REVIEW.
-- **Validate the bundle and source identity BEFORE planning any write** — reuse `loadBundle()`,
-  `bundleRowIdentity()` and `sourceRowIdentityMismatch()`; fail closed on any drift.
-- **Deduplicate before any optional external work**, so a duplicate can never incur a charge first. This
-  is the exact defect today: `resolveCreativeContext()` at line 695 runs *before* the `prisma.ad.findMany`
-  dedup at line 756.
-- **Preserve per-row REVIEW/ERROR isolation** — one held or failed row must never block another valid row.
-- **No database write as part of tracker or planning work.** Keep the triple-flag live-write guard,
-  READY-only eligibility and verified-ACCEPT-only metadata. No Prisma/schema change.
-- Add tracked tests for the new ingestion path.
+- **Validate the bundle and source identity BEFORE planning any write.** Full disk validation stays on
+  (`checkFiles` is never disabled in the production path); whole-bundle failure ends the run before any
+  planning.
+- **Deduplicate before any optional external work.** There is now **no optional external work at all**,
+  so nothing can be charged before dedup. This closed the old defect where `resolveCreativeContext()`
+  at line 695 ran *before* the `prisma.ad.findMany` dedup at line 756.
+- **Preserve per-row REVIEW/ERROR isolation** — one held or failed row never blocks another valid row.
+- **Insert-only.** An existing ad is `SKIPPED_EXISTING`: no insert, no update, no analysis, no charge.
+- Triple-flag live-write guard, READY-only eligibility and verified-ACCEPT-only metadata all unchanged.
+  No Prisma/schema change. No UI change.
 
 Sequence already completed for part 1 — do not repeat or reorder:
 
@@ -122,13 +197,38 @@ Sequence already completed for part 1 — do not repeat or reorder:
 7. ~~Push~~ — **done** 2026-07-17: `c69866a..e208cbd`, fast-forward. `origin/main` = `e208cbd` and holds
    both `3cedf83` and `e208cbd`; local `main` verified level with `origin/main`.
 8. ~~Freeze the part 1 safeguards on the do-not-repeat list~~ — **done** (§14): PASS + committed + pushed.
-9. **Bundle-backed live-ingestion integration (part 2)** — the task named above. **Awaits its own
-   explicit instruction.**
+9. ~~Bundle-backed live-ingestion integration (part 2)~~ — **implemented 2026-07-17 after the mapping
+   audit gate failed and the additive schema-v3 decision was approved.** Local, uncommitted.
+10. **Independent Codex review of part 2** — the task named above. ← **immediate action**
+11. Correct any findings → commit approval → push approval.
+12. **Then**, separately approved: a paid preview producing the first real v3 bundle, and only after
+    that, an approved live ingestion run (checkpoint A2).
 
 ### 0.4b Do-not-repeat
 
 The complete list is **§14**. Read it before proposing any work. Nothing on it may be reopened without a
 specific, demonstrated regression.
+
+### 0.5a Phase 1 part 2 files — LOCAL AND UNCOMMITTED
+
+| File | State |
+|---|---|
+| `lib/analysis/benchmarkContract.ts` | **new** — pure, immutable benchmark enums + relationship tables (tier labels, evidence tokens/labels, confidence-per-source, weights, cardinalities). Imports nothing. Lets the validator check the scorer's guarantees **without a runtime route to the scorer** |
+| `lib/analysis/competitorScoring.ts` | modified — **consumes those tables instead of its own literals. No scoring behaviour change**, single source of truth so scorer and validator cannot drift |
+| `lib/analysis/browserAnalysisBundle.ts` | modified — additive **schema v3** (`analysis_result` / `benchmark_result`), real-scorer array invariants, media-keyed rubric completeness, exhaustive summary cross-check, benchmark semantic validation, and the `decidePersistence` gate. **v2 semantics untouched.** |
+| `lib/analysis/browserIngestBundleMapping.ts` | **new** — pure v3 SUCCESS row → Ad/AdAnalysis payload mapping; bundle-time `benchmarkScoredAt`; required-`adLink` guard |
+| `scripts/ingest-browser-collected-ads.ts` | modified — **bundle-backed**; all AI/scorer/browser routes removed; **sidecar bound to the bundle's declaration**; injected **lazy** `DbFactory` |
+| `scripts/preview-browser-collected-ads.ts` | modified — writes **v3**, serialising the already-computed result |
+| `tests/browser-ingest-from-bundle.test.ts` | **new** — 171 tracked tests |
+| `tests/browser-analysis-bundle.test.ts` | modified — the 153 v2 tests pinned explicitly to `BUNDLE_SCHEMA_V2` (assertions unchanged) |
+| `package.json` | modified — `test:browser-ingestion-bundle` |
+| `docs/PROJECT_STATUS.md` | modified — this tracker |
+
+**Unchanged by design:** `prisma/schema.prisma`, all migrations, all UI, capture/discovery, the Vision
+prompt and parser, the scheduler, the Meta API path, `lib/analysis/bundleAssembly.ts`,
+`lib/analysis/sourceRowIdentity.ts`, `scripts/plan-browser-ingest-from-bundle.ts` and
+`scripts/validate-browser-analysis-bundle.ts` (a v3 row is a superset, so assembly, planning and
+validation needed no change).
 
 ### 0.5 All files in Phase 1 part 1 — committed as `3cedf83`, pushed to `origin/main`
 
@@ -263,20 +363,32 @@ Two permanent policies:
 
 ## 2. Current stable baseline
 
+**Read this as two layers: what is COMMITTED, and what only exists in the local working tree.**
+
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| Latest stable commit | `e208cbd` — `docs: record final Phase 1 part 1 review`. **`main` and `origin/main` are level.** |
-| Latest implementation commit | `3cedf83` — `feat: add reusable browser-analysis bundle handoff (Phase 1 part 1)`, reviewed (Codex PASS), pushed |
+| **Committed baseline** | **`ed71513`** — `docs: finalise pushed Phase 1 part 1`. **`main` and `origin/main` are both at `ed71513`.** |
+| Latest committed implementation | `3cedf83` — `feat: add reusable browser-analysis bundle handoff (Phase 1 part 1)`, reviewed (Codex PASS), pushed, **frozen** (§14) |
+| **Local uncommitted work** | **Phase 1 Part 2** — schema v3 + bundle-backed ingestion. Implemented locally, **not committed, not pushed**, awaiting final coordinator verification |
 | Application | Local-first Next.js 14 (App Router) |
 | Database | Prisma ORM over SQLite (`prisma/dev.db`, local) |
 | Collection policy | Browser-first canonical; Meta API diagnostic only |
-| Canonical workflow ends at | **Terminal preview output only** — nothing is persisted |
-| Ingestion path | **Separate**, and currently **repeats Vision analysis** rather than consuming the completed preview |
+| Canonical workflow ends at | **Committed:** terminal preview output. **Locally (Part 2, uncommitted):** an opt-in checksummed schema-v3 bundle that ingestion consumes |
+| Ingestion path | **Committed:** separate, repeats Vision analysis. **Locally (Part 2, uncommitted):** bundle-backed, with **no route to Anthropic, Vision or scoring recomputation** |
 
-Working tree: `main` is **level with `origin/main`** at `e208cbd`; `3cedf83` (Phase 1 part 1) is pushed
-and present on the remote. Tracked files are clean; the known protected untracked files remain present
-and untouched (`AGENTS.md`, `dir`, `findstr`, `git`, `scripts/_orig_check.ts`).
+**Working tree — NOT clean.** It carries the complete uncommitted Part 2 implementation:
+
+- **Modified (tracked):** `lib/analysis/browserAnalysisBundle.ts`, `lib/analysis/competitorScoring.ts`,
+  `scripts/ingest-browser-collected-ads.ts`, `scripts/preview-browser-collected-ads.ts`,
+  `tests/browser-analysis-bundle.test.ts`, `package.json`, `docs/PROJECT_STATUS.md`.
+- **New (untracked, part of Part 2):** `lib/analysis/benchmarkContract.ts`,
+  `lib/analysis/browserIngestBundleMapping.ts`, `tests/browser-ingest-from-bundle.test.ts`.
+- **Protected untracked paths remain untouched:** `AGENTS.md`, `dir`, `findstr`, `git`,
+  `scripts/_orig_check.ts`.
+
+Phase 1 Part 1 is committed, pushed and frozen. Phase 1 Part 2 is implemented locally, uncommitted, and
+awaiting final coordinator verification — **no Codex PASS has been recorded for Part 2.**
 
 ---
 
@@ -288,19 +400,40 @@ browser-first collection pipeline: discovery with scope proof and five-state cla
 CSV validation, asset capture for image/carousel/video, fail-closed footer provenance, and a
 spend-guarded Vision preview with a no-spend preflight.
 
-**Where the real end-to-end workflow stops.** At the terminal. `browser:preview` prints a full
-report and exits. Nothing about that analysis is saved. To get data into the database you must run
-`browser:ingest`, which **re-analyses the same assets by calling Anthropic again**.
+**Where the real end-to-end workflow stops — as COMMITTED (`ed71513`).** At the terminal.
+`browser:preview` prints a report and exits, and `browser:ingest` **re-analyses the same assets by
+calling Anthropic again**. This is what is on `origin/main` today.
+
+**The local architecture (Phase 1 Part 2 — implemented, UNCOMMITTED, awaiting final coordinator
+verification).** The reusable handoff exists locally and the repeat-charge path is gone:
+
+- `browser:preview` can **opt in** (`AI_PREVIEW_OUTPUT_FILE`) to writing a **checksummed schema-v3
+  reusable analysis bundle** carrying the validated analysis, the complete benchmark result and
+  per-row visual confidence.
+- `browser:ingest` **consumes that validated bundle** and has **no route to Anthropic, Vision, the
+  static/video analysers or benchmark recomputation** — there is no recompute fallback.
+- **Schema v2 remains validation/planning-only and can never persist**; **schema v3 is required for any
+  INSERT**.
+- **LOW visual confidence routes the row to REVIEW and makes it unwritable.** Visual confidence is
+  **bundled and operationally enforced**, but is **not separately persisted as its own Prisma field**.
+
+**The remaining operational gap is not architectural.** It is that (a) **no schema-v3 bundle has yet
+been produced by a real paid preview** — every bundle exercised so far is synthetic or carries
+placeholder analysis text — and (b) **no approved live database ingestion has been executed**. Both are
+separately approved future checkpoints.
 
 **What is partial.** Competitor management (view/edit Meta config only), browser ingestion (writes
-`Ad` + `AdAnalysis` but no run boundary), the review queue (Meta API only), the dashboard and ad
-detail (live but not source-aware), `ScanRun` support (Meta only), and the one-command workflows
-(discovery → preview only).
+`Ad` + `AdAnalysis` but no run boundary; Part 2 is uncommitted), the review queue (Meta API only), the
+dashboard and ad detail (live but not source-aware), `ScanRun` support (Meta only), and the one-command
+workflows (discovery → preview only).
 
 **The three largest structural gaps:**
 
-1. **No reusable analysis bundle or validated handoff into ingestion.** Preview results, visual
-   confidence and model output are never saved with source/asset checksums.
+1. **No reusable analysis bundle produced by a REAL paid preview, and no approved live ingestion run.**
+   The architecture exists locally (Part 1 pushed and frozen; Part 2 uncommitted): preview can save a
+   checksummed schema-v3 bundle carrying visual confidence and the complete model output, and ingestion
+   consumes it with no Anthropic call. What does **not** yet exist is a bundle produced by a real paid
+   preview, and any executed live database ingestion — both separately approved future checkpoints.
 2. **No browser review and exception workflow.** The existing queue handles only Meta-API `PENDING`
    records. Browser `NEEDS_REVIEW`, `UNAVAILABLE`, low visual confidence and asset/copy mismatch are
    not persisted or reviewable.
@@ -336,7 +469,7 @@ demonstrated regression.
 | Exact-ID preview filter (`AI_PREVIEW_ONLY_AD_IDS`, exact match, no substring) | `resolveOnlyAdIds()` | `22c6c7a` | Filtered preflight matched exactly 2 IDs; `1442273137905726` excluded | **Yes** |
 | Numeric multi-frame ordering + `AI_VIDEO_MAX_FRAMES` (one request per ad) | `planVisionInputs()`, `analyseCreativeAsset()` | `22c6c7a`, `6564b41` | Preflight: all four video ads select 4 of 4 frames | **Yes** |
 | Strict VIDEO response parsing (4 required sections, unique + ordered, non-empty bodies, exact `FRAME n:` observations, neutral malformed fallback) | `lib/analysis/creativeAssetAnalyser.ts` | `6564b41` | Synthetic assertions (see §18 caveat: **not tracked**) | **Yes** |
-| Visual confidence **display** (HIGH/MEDIUM/LOW, fail-closed to LOW; separate from benchmark confidence) | parser + `scripts/preview-browser-collected-ads.ts` | `6564b41` | Terminal display only — **not persisted** (see §5, §8) | Display frozen; persistence outstanding |
+| Visual confidence **display** (HIGH/MEDIUM/LOW, fail-closed to LOW; separate from benchmark confidence) | parser + `scripts/preview-browser-collected-ads.ts` | `6564b41` | Displayed in preview and **carried in the bundle** (v2 and v3). **LOW is unwritable — it routes that row to REVIEW** (Part 2, uncommitted). Still not written to a database column | Display frozen; DB persistence outstanding (Phase 2) |
 | Deterministic behavioural-trigger hardening (evidence-required urgency / before-after / fear-of-loss / status / belonging) | `detectBehaviouralTriggers()` in `lib/analysis/scoring.ts` | `22c6c7a`, `6564b41` | Synthetic assertions (**not tracked**); triggers affect output only, not numeric scores | **Yes** |
 | TypeScript validation | `npx tsc --noEmit` | ongoing | Passing at `6564b41` | Run on every change |
 
@@ -351,13 +484,13 @@ this repository. See §10 and §18.
 | Feature | What works | What is missing | Exact files | Blocks local v1? | Deferrable after v1? |
 |---|---|---|---|---|---|
 | Competitor management | List, detail, Meta readiness, counts, last scan; CSV importer; PATCH edit of Facebook URL + Meta Page ID | No UI/API create; no edit of name/client/industry/status; no **country** field; no active/archive semantics; no frequency/next-scan; no delete/archive | `app/competitors/page.tsx`, `app/competitors/[id]/page.tsx`, `app/components/CompetitorMetaConfigForm.tsx`, `app/api/competitors/[id]/meta-config/route.ts`, `scripts/import-client-competitors.ts`, `prisma/schema.prisma` | Country + scheduling block Phase 5, not Phase 1 | Yes |
-| Browser ingestion | Per-row transaction inserting `Ad` + `AdAnalysis`; triple-flag live-write guard; duplicate isolation; verified-ACCEPT-only headline/description | Calls Anthropic again (incl. dry-run, before dedup); no `ScanRun`; no exact include/exclude IDs; no spend cap/confirmation; discards visual confidence and verification reasons | `scripts/ingest-browser-collected-ads.ts` | **Yes — this is the primary gap** | No |
+| Browser ingestion | **Bundle-backed (Part 2, uncommitted):** per-row transaction inserting `Ad` + `AdAnalysis`; triple-flag live-write guard; duplicate isolation; verified-ACCEPT-only headline/description; **no Anthropic call and no recomputation on any path**; LOW visual confidence routes to REVIEW and is unwritable; bundle-time `benchmarkScoredAt` | No `ScanRun`; verification reasons still not persisted; browser review states still not persisted (Phase 2). **Part 2 is uncommitted and awaiting final coordinator verification** | `scripts/ingest-browser-collected-ads.ts` | The repeat-charge gap is closed in code; `ScanRun` remains Phase 3 | No |
 | Meta review queue | `/meta-review` lists Meta `PENDING`; approve/reject persists `reviewStatus` + `qualified`; server-side score check | Meta-API only; no browser ads; no note/reviewer/timestamp/override; no ingestion gate | `app/meta-review/page.tsx`, `lib/queries/pendingAds.ts`, `app/api/ads/[id]/review/route.ts` | **Yes** (Phase 2) | No |
 | Dashboard + ad detail | Live Prisma queries; filters (industry, qualified, source, format, score, search); full stored analysis, AIDA, triggers, benchmark, asset gallery, card grid | Dashboard defaults to all ads incl. pending/rejected; no visual-confidence display; no review actions; no provenance labels | `app/page.tsx`, `app/ads/[id]/page.tsx`, `app/components/DashboardFilter.tsx` | No | Yes (Phase 4) |
 | ScanRun support | Schema models exist (`ScanRun`, `AdScanRecord`); Meta ingestion + seed create and complete runs; `getScanRunById()` exists | Browser ingestion creates **none** (verified: 0 references); no run-detail page; removed/skipped/capture/analysis counts absent; a failure can leave a run `IN_PROGRESS` | `prisma/schema.prisma`, `lib/ingestion/metaIngestion.ts`, `lib/queries/scanRuns.ts`, `scripts/ingest-browser-collected-ads.ts` | **Yes** (Phase 3) | No |
 | One-command browser workflows | `browser:workflow-one` / `workflow-db-one` / `workflow-client` chain discovery → validate → capture → validate → preview; continue-on-failure across competitors | No validation decision, ingestion, cards or display stage; no durable checkpoint/resume; preview can print FAIL without a non-zero exit when row errors are collected | `scripts/run-one-competitor-browser-workflow.ts`, `run-db-competitor-browser-workflow.ts`, `run-client-browser-workflow.ts` | Phase 5 | Yes |
 | Asset / card ingestion | `browser:ingest-cards` upserts `AdCreativeCard` idempotently by `(adId, cardIndex)`; FK-safe (never creates Ads) | Separate command, not part of one atomic run; card text not re-gated against verified-meta ACCEPT | `scripts/ingest-ad-creative-cards.ts` | Phase 3 | Yes |
-| Visual-confidence persistence | Parsed and displayed in preview | Not in Prisma, not in a bundle, not in the review queue, not in ad UI; ingestion discards it | `lib/analysis/creativeAssetAnalyser.ts`, `scripts/preview-browser-collected-ads.ts` | Phase 1/2 | Partly |
+| Visual-confidence persistence | Parsed, displayed in preview, and **carried per row in the bundle contract**. **Operationally enforced (Part 2, uncommitted): LOW is unwritable and routes that row to REVIEW** | **Not a Prisma field**, not in the review queue, not in the ad UI. "Bundled and enforced" is not the same as "separately persisted" — no `Ad`/`AdAnalysis` column stores it | `lib/analysis/creativeAssetAnalyser.ts`, `scripts/preview-browser-collected-ads.ts`, `lib/analysis/browserAnalysisBundle.ts` | Phase 2 (DB field + queue) | Partly |
 | Verified-metadata provenance persistence | `.verified-meta.csv` holds per-field status + reason + strategy; only ACCEPT reaches `Ad` | Status/reason never stored in DB, so the UI cannot show why a field is blank | `scripts/capture-browser-ad-assets.ts`, `scripts/ingest-browser-collected-ads.ts` | Phase 3 | Yes |
 
 ---
@@ -387,7 +520,7 @@ Existing implementation:
 | **UNAVAILABLE** | CSV `collection_status` only | Capture writes it on positive ad-specific end-state | **No** (CSV only) | No | Indirectly — skipped (READY-only) | Persist; show as an exception, not silent skip |
 | **ASSET_COPY_MISMATCH** | **Not implemented** | Nowhere | No | No | No | Define detector, schema field, queue filter and ingestion gate |
 | **MISSING_ANALYSIS** | Only implicit (`Ad.analysis = null`) | Ad detail shows fallback text | Implicitly | Fallback text only | No | Name the state; add a queue |
-| **LOW_VISUAL_CONFIDENCE** | Terminal display only | Video parser returns HIGH/MEDIUM/LOW | **No** | Preview terminal only | **No** | Persist; route LOW to review. Note: `benchmarkConfidence=LOW` is a **different** concept (evidence source, not visual certainty) |
+| **LOW_VISUAL_CONFIDENCE** | Preview display **+ carried in the bundle contract** (v2 and v3) | Video parser returns HIGH/MEDIUM/LOW; the bundle stores it per row | **Not as its own DB field** — it lives in the bundle, not in `Ad`/`AdAnalysis` | Preview terminal only; no UI | **Yes (Part 2, uncommitted)** — LOW is **unwritable** and routes that row to REVIEW | Persist as a DB field and surface it in a review queue. Note: `benchmarkConfidence=LOW` is a **different** concept (evidence source, not visual certainty) |
 
 ### Recorded inconsistency (verified)
 
@@ -402,21 +535,30 @@ Phase 2 — either by a source-neutral queue or by an explicit browser decision 
 
 **This is the immediate architectural priority.**
 
-Verified problems:
+**Status: CLOSED in code by Phase 1 part 2 (uncommitted, awaiting final coordinator verification — §0.2). Kept here as the record of
+what the defect was and how it was closed.**
 
-- Preview results are **printed only** — never saved.
-- Visual confidence is **transient** — parsed, displayed, discarded.
-- **No bundle, checksum or saved analysis artifact exists** anywhere in the repository.
-- `scripts/ingest-browser-collected-ads.ts` invokes `resolveCreativeContext()` again
-  (**line 695**), which calls Anthropic Vision for every asset-backed row.
-- **Dry-run ingestion still calls Anthropic.** The three live-write flags gate DB writes, not spend.
-- **Scoring runs before duplicate detection** — `resolveCreativeContext()` at line 695 precedes the
-  dedup query `prisma.ad.findMany` at **line 756**. An ad already in the database can therefore
-  **incur another Vision charge before being skipped as a duplicate**.
-- Browser ingestion has **no** preview-style spend confirmation, cap or exact-ID filter.
+The original verified problems:
 
-Consequence: the same assets are paid for at least twice, and there is no way to move a reviewed,
-validated analysis into the database without re-spending. Phase 1 closes this.
+- Preview results were **printed only** — never saved.
+- Visual confidence was **transient** — parsed, displayed, discarded.
+- **No bundle, checksum or saved analysis artifact existed** anywhere in the repository.
+- `scripts/ingest-browser-collected-ads.ts` invoked `resolveCreativeContext()` again (**line 695**),
+  calling Anthropic Vision for every asset-backed row.
+- **Dry-run ingestion still called Anthropic.** The three live-write flags gate DB writes, not spend.
+- **Scoring ran before duplicate detection** — `resolveCreativeContext()` at line 695 preceded the dedup
+  query `prisma.ad.findMany` at **line 756**, so an ad already in the database could **incur another
+  Vision charge before being skipped as a duplicate**.
+
+How part 2 closed it:
+
+- Preview saves a validated **v3** bundle (opt-in); ingestion consumes it and **never analyses anything**.
+- Ingestion has **no route to Anthropic, the analyser, the scorer, fetch or Playwright at all**, so
+  there is no optional external work left that could precede dedup — the ordering defect cannot recur.
+- **Dry-run costs nothing and contacts no database.** Visual confidence is carried by the bundle, and
+  LOW routes to REVIEW rather than a write.
+- Spend confirmation/cap/exact-ID filtering remain **preview-side**, which is now the only place spend
+  can occur.
 
 ---
 
@@ -494,7 +636,9 @@ verification labels; real video playback.
   method, LOW-confidence path) but **not proven fixed** — proving it requires paid runs.
 - **Only sampled video frames are analysed** — up to `AI_VIDEO_MAX_FRAMES` stills. No continuous
   video, motion or audio/transcript interpretation.
-- **Visual confidence is not persisted** — display only.
+- **Visual confidence is not persisted in the database** — it is displayed in preview and carried in the
+  bundle, and LOW routes a row to REVIEW so it can never be ingested (Part 2, uncommitted), but no
+  `Ad`/`AdAnalysis` column stores it. Persisting it is Phase 2.
 - **Limited competitor editing** — Meta config only; no country, status, schedule or archive.
 - **Incomplete retry/resume** — one zero-card discovery reload and forced recapture exist; no
   bounded automatic capture retry policy; no durable checkpoint.
@@ -529,7 +673,7 @@ verification labels; real video playback.
 
 Shortest non-duplicative sequence to complete local v1. Phases already complete are not listed.
 
-### Phase 1 — Reusable analysis handoff  ← **ACTIVE and PARTIAL** (part 1 done, reviewed, pushed, frozen; part 2 not started)
+### Phase 1 — Reusable analysis handoff  ← **ACTIVE and PARTIAL** (part 1 done, reviewed, pushed, frozen; part 2 implemented locally, uncommitted, awaiting final Codex re-review)
 
 - **Objective:** make a completed preview a durable, validated ingestion input.
 - **Delivered in `3cedf83` — corrected after the first independent review and again after both the final
@@ -562,18 +706,28 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
     Anthropic call; requested-output failure **exits non-zero**.
   - `tests/browser-analysis-bundle.test.ts` — **153 tracked tests** via `npm run test:browser-bundle`
     (Node's built-in `node:test` through tsx — no new framework).
+- **Part 2 (uncommitted, awaiting final coordinator verification):** schema **v3** (`analysis_result` / `benchmark_result` carrying the
+  complete computed scorer + benchmark output), the `decidePersistence` gate (v2 = planning-only, never
+  writable), the pure `browserIngestBundleMapping.ts`, and a **bundle-backed
+  `scripts/ingest-browser-collected-ads.ts`** with an injected database boundary and no AI/scorer/browser
+  route at all, a bundle-declared-only sidecar binding, a lazy database factory, and benchmark validation
+  against the shared pure contract. 171 tracked tests, including executable scorer→validator parity.
 - **Work remaining before Phase 1 is complete:**
-  1. **The real `browser:ingest` is still not bundle-backed.** It still calls `resolveCreativeContext()`
-     (line 695) **before** the duplicate check (line 756), so live browser ingestion can still be charged
-     twice. The planner is a separate safe path; the charging path is unchanged by design.
-  2. **No bundle produced by a real paid preview exists yet.** Earlier bounded paid previews did run
-     (from Command Prompt) but were terminal-only and predate the bundle writer, so none saved a bundle.
-     Every bundle exercised so far is synthetic or built from real assets with placeholder analysis text.
+  1. **Part 2 must pass final coordinator verification, then be committed and pushed.** Five Codex
+     reviews are complete; the production implementation and tests passed the substantive rounds.
+  2. **No bundle produced by a real paid preview exists yet**, and none is v3 — no paid preview has run
+     since v3 landed. Earlier bounded paid previews were terminal-only and predate the bundle writer.
+     Every bundle exercised so far is synthetic or carries placeholder analysis text. **The first real v3
+     paid-preview bundle is a later, separately approved checkpoint.**
+  3. **Live ingestion has never been run against the database.** Bundle-backed and insert-only now, but
+     unproven and unapproved.
 - **Dependencies:** existing planner/parser and exact-ID filter (both complete).
 - **Completion criteria:** preview can explicitly save a validated result ✅; a matching valid bundle causes
   **zero** Anthropic calls ✅ (planner, proven by tracked import-boundary test); stale/mismatched bundles and
   row-level drift fail closed ✅; exact selected ad IDs recorded ✅; deterministic scores and visual
-  confidence preserved ✅; **the real ingestion path consumes the bundle ❌ (outstanding)**.
+  confidence preserved ✅; **the real ingestion path consumes the bundle ✅ (part 2 — implemented,
+  uncommitted and awaiting final coordinator verification, so not yet proven)**. Phase 1 still cannot be called complete until part 2
+  is reviewed, committed and pushed, and a real v3 paid-preview bundle exists.
 - **Validation:** `npm run test:browser-bundle` (153 passing), `npx tsc --noEmit --incremental false`,
   `git diff --check`. The no-spend preflights were last exercised before the final correction (§0.6).
 - **Deferred:** all paid quality tuning; schema changes.
@@ -636,17 +790,20 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
 
 ## 12. Active phase
 
-> ### ACTIVE: **Phase 1 — Reusable analysis handoff** · **part 1 DONE (frozen), part 2 NOT STARTED**
+> ### ACTIVE: **Phase 1 — Reusable analysis handoff** · **part 1 DONE (frozen), part 2 IMPLEMENTED but
+> uncommitted — five Codex reviews, five corrections, final coordinator verification pending**
 
 **Phase 1 is ACTIVE and partial.** Part 1 — the bundle, validator, planner and 153 tracked tests — is
-reviewed (Codex PASS), committed (`3cedf83`), pushed and frozen (§14). Phase 1 is **not** complete, for
-three reasons that all belong to part 2:
+reviewed (Codex PASS), committed (`3cedf83`), pushed and frozen (§14). Part 2 — schema v3 and
+bundle-backed ingestion, 171 further tracked tests — is implemented locally. Phase 1 is **not** complete:
 
-1. `scripts/ingest-browser-collected-ads.ts` is **not bundle-backed**;
-2. live ingestion still calls `resolveCreativeContext()` (line 695) **before** the duplicate check
-   (line 756), so it **can still repeat paid AI analysis**, dry runs included;
-3. **no reusable bundle from a real paid preview exists** — every bundle so far is synthetic or carries
-   placeholder analysis text.
+1. **Part 2 is uncommitted and awaiting final coordinator verification.** It must be verified, then committed
+   and pushed, before any of it can be trusted or frozen (§14).
+2. **No reusable bundle from a real paid preview exists**, and none is v3 — every bundle so far is
+   synthetic or carries placeholder analysis text. That first real v3 bundle is a separately approved
+   checkpoint.
+3. **Live ingestion has never run against the database.** It is bundle-backed and insert-only now, but
+   unproven and unapproved.
 
 Browser collection and Vision prompt quality are **frozen** unless a concrete regression blocks
 implementation.
@@ -667,11 +824,8 @@ implementation.
 
 ## 13. Next exact task
 
-> **This IS the next exact task (Phase 1 part 2), and it has NOT been instructed yet.** Part 1 — the
-> bundle (schema v2), strict validator, bundle-backed planner and 153 tracked tests — passed its final
-> Codex re-review, is committed as `3cedf83`, pushed, and frozen (§14). The spec below is the agreed
-> next task, **not a licence to start**: it requires a separate explicit task instruction. §0.4 records
-> the required boundary.
+> **DELIVERED (part 2) — implemented 2026-07-17, corrected after Codex NEEDS CHANGES, uncommitted. §0.4 holds the immediate
+> action: the independent Codex review.** The spec below is what was built to, retained for reference.
 >
 > **Integrate the validated bundle into the real ingestion path without another AI call.**
 > Make `scripts/ingest-browser-collected-ads.ts` consume a validated bundle instead of calling
@@ -680,6 +834,13 @@ implementation.
 > `sourceRowIdentityMismatch()`; fail closed on a missing/invalid/stale bundle with **no** recompute
 > fallback. Keep the triple-flag live-write guard, READY-only eligibility and verified-ACCEPT-only
 > metadata. No Prisma/schema change. Add tracked tests for the new ingestion path.
+>
+> **How it was actually delivered, and the one deviation:** the mapping audit gate failed first — schema
+> v2 could not truthfully fill seven required non-null `AdAnalysis` fields — so the approved design added
+> **schema v3** (v2 frozen, planning-only, never writable) carrying the complete computed scorer and
+> benchmark output. Ingestion now has no route to any analysis code at all rather than merely calling it
+> later, and the injected database boundary means dry-run performs **zero** database calls (so it no
+> longer reports duplicates — it says so). See §0.2 and §19.
 >
 > The original Phase 1 scope below is retained for reference.
 
@@ -757,6 +918,30 @@ passing ✅. Do not redesign, rebuild or re-litigate any of it without a specifi
   documented narrowed guarantee where a filesystem cannot provide it, best-effort-but-reported cleanup,
   and fail-closed final checksum/byte-size verification.
 - The **tracked browser-bundle test suite** — `npm run test:browser-bundle`, currently **153 passing**.
+
+**NOT frozen — Phase 1 part 2 (schema v3 + bundle-backed ingestion).** Implemented 2026-07-17, local,
+**uncommitted**; **five Codex reviews, each NEEDS CHANGES, each closed by a correction pass; final coordinator verification is pending**. It meets none
+of the freeze conditions yet (no Codex PASS, not committed, not pushed), so it stays off the list above
+and a reviewer is expected to challenge all of it:
+
+- `lib/analysis/benchmarkContract.ts` — the complete pure semantic contract (thresholds, weights,
+  labels, formulas, warnings, rounding and the derivations), and the fact that `competitorScoring.ts`
+  now PRODUCES with those same functions (values identical; scoring behaviour unchanged).
+
+- Bundle **schema v3** — the `analysis_result` / `benchmark_result` blocks, their exact-key/enum/range
+  validation, the completeness rules, the summary-vs-authoritative cross-check, and the benchmark
+  semantic verification against the pure contract (thresholds, weights, formula, score, tier,
+  recommended_use, warning).
+- The **persistence gate** (`decidePersistence`) and the rule that **v2 can never authorise an INSERT**.
+- `lib/analysis/browserIngestBundleMapping.ts` — the bundle → Ad/AdAnalysis payload mapping.
+- The **bundle-backed `scripts/ingest-browser-collected-ads.ts`**, its injected database boundary, and
+  its ordering guarantees.
+- The **v3 preview writer** and the renamed `recommendations.headline_recommendation` /
+  `description_recommendation` keys (see the note in §19).
+- `tests/browser-ingest-from-bundle.test.ts` — the 171 tracked Part 2 tests, including the test-only
+  Prisma schema reader behind the AdAnalysis drift assertion.
+
+Freeze them only after a Codex PASS **and** a committed, pushed change — the same rule part 1 followed.
 
 **Not frozen — two accepted low-severity DEFERRED presentation items** (§10). These are display issues
 in preview only. They are **not** a reason to reopen any frozen architecture above:
@@ -853,6 +1038,17 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | — | Scheduler | Scheduled execution | **Not yet verified** | Cron disabled |
 | `3cedf83` | Phase 1 | `npm run test:browser-bundle` — bundle schema, validator, source binding, planner, atomic write + cleanup/verification reporting, held-only assembly | **PASS — 153 tests, 0 fail, 0 skipped** | **Repo-verifiable** — the suite is tracked at `3cedf83`. 87 → 139 → 153 across the two correction rounds |
 | `3cedf83` | Phase 1 | `npx tsc --noEmit --incremental false`; `git diff --check` | PASS (exit 0) | **Repo-verifiable** — run on the exact tree that was committed |
+| (uncommitted) | Phase 1 part 2 | `npm run test:browser-bundle` — the 153 part-1 tests, unchanged, now pinned explicitly to schema v2 | **PASS — 153 tests, 0 fail, 0 skipped** | v2 behaviour is provably unchanged by the v3 addition |
+| (uncommitted) | Phase 1 part 2 | `npm run test:browser-ingestion-bundle` — schema v3 completeness, the persistence gate, the pure mapping, and the ingestion orchestration against an injected fake database | **PASS — 171 tests, 0 fail, 0 skipped** | **324 tracked tests total.** Covers the nine corrections, the benchmark semantic contract, and executable scorer→validator parity. No real database, browser, asset or network was touched; the fake DB counts client construction too |
+| (uncommitted) | Phase 1 part 2 | `npx tsc --noEmit --incremental false`; `git diff --check` | PASS (exit 0) | **Repo-verifiable** |
+| 2026-07-17 | Phase 1 part 2 | **Codex review 1** | **NEEDS CHANGES** | **Operator-reported.** Architecture confirmed sound; zero-database dry-run accepted as safer. Nine findings → **correction pass 1 completed** (§19) |
+| 2026-07-17 | Phase 1 part 2 | **Codex review 2** (of correction pass 1) | **NEEDS CHANGES** | **Operator-reported.** All other boundaries pass. One material blocker: the benchmark validator accepted impossible combinations (score 6.4 + tier MODERATE) → **correction pass 2 completed** (§19) |
+| 2026-07-17 | Phase 1 part 2 | **Codex review 3** (of correction pass 2) | **NEEDS CHANGES** | **Operator-reported.** No production-code defect. Two accuracy findings: an overstated scorer/validator parity test, and contradictory tracker statements → **correction pass 3 completed** (§19) |
+| 2026-07-17 | Phase 1 part 2 | **Codex review 4** (of correction pass 3) | **NEEDS CHANGES** | **Operator-reported.** No production-code defect. The 6.4 negative regression was ambiguous, and live tracker sections still contradicted each other → **correction pass 4 completed** (§19) |
+| 2026-07-17 | Phase 1 part 2 | **Codex review 5** (of correction pass 4) | **NEEDS CHANGES — tracker accuracy only** | **Operator-reported.** **The production implementation and tests are ACCEPTED.** Three stale current-state tracker sections remained (stable baseline, executive workflow, fourth-review history) → reconciled in correction pass 5 (§19) |
+| 2026-07-17 | Phase 1 part 2 | `npm run test:browser-ingestion-bundle` — executable parity: the production `scoreCompetitorBenchmarkAd()` output for ASSET/MANUAL/FALLBACK, validated by the schema-v3 validator | **PASS — 171 tests, 0 fail, 0 skipped** | Proves the shipping scorer's output is accepted verbatim, and that a mutated scorer value is rejected |
+| — | Phase 1 part 2 | **Final coordinator verification** | **PENDING** | The immediate action (§0.4). Codex raised no production-code defect in reviews 3–5. **No Codex PASS has been recorded for Part 2**, which stays off the frozen list (§14) until verified, committed and pushed |
+| — | Phase 1 part 2 | A real **v3** bundle from a paid preview | **Not yet performed** | No paid preview has run since v3 landed. Separately approved checkpoint |
 | 2026-07-17, at the tree committed as `3cedf83` | Phase 1 part 1 | **Final minimal independent Codex read-only re-review** of the three focused-re-review corrections: ASSET empty-path bypass, temp-cleanup reporting, final checksum/byte-size verification | **PASS** | **Operator-reported** (Codex runs outside this repo, so the verdict itself is not repo-verifiable — the tree it reviewed is). Confirmed: 153 tests passed, 0 failed, 0 skipped; TypeScript passed; `git diff --check` passed; ASSET empty-path bypass resolved; temp cleanup correctly treated as best-effort; final checksum and byte-size verification fails closed; zero-AI / zero-browser / zero-database boundary passed. **Phase 1 part 1 declared safe to commit** — the commit followed this verdict |
 | — | Tests | Automated tests outside the Phase 1 bundle handoff | **Missing** | Discovery, capture, parser, scoring, ingestion and UI have no tracked spec files |
 
@@ -875,6 +1071,12 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | 2026-07-17 | (uncommitted) | **Phase 1 part 1 — focused Codex re-review correction.** The re-review of the previous row's work returned **NEEDS CHANGES** for three narrower defects, all now closed in `lib/analysis/browserAnalysisBundle.ts`. (1) **Empty-path ASSET bypass:** a SUCCESS row with `creative_source: ASSET` and a non-empty manifest could declare `creative_asset_path: ""`, which passed shape validation and then hit the empty-path skip in disk validation — so no file, checksum or byte-size check ran on a fabricated manifest. An ASSET SUCCESS row must now declare a non-empty (post-trim) path; the rule is structural, fires with `--no-file-checks`, and short-circuits before disk validation, so the skip can only apply to rows that consumed nothing. MANUAL/FALLBACK/REVIEW/SKIPPED/ERROR rules unchanged. (2) **Cleanup honesty:** temp-file unlink failures were swallowed while the docstring claimed removal was unconditional. Removal is still attempted on every exit, but is now documented and reported as best-effort: an unconfirmed cleanup surfaces as `warnings` on success and as an appended note on failure, never replacing the original failure, and never invalidating an already-correct final file. (3) **Final verification fails closed:** a `stat` failure previously returned `ok: true` with `bytes: 0`. The final file is now re-read, its checksum compared against the serialised bundle and its size compared against the bytes written; any gap returns a failure stating the file EXISTS but is UNVERIFIED, without deleting or rewriting it. A narrow `__testHooks` seam (unlink / statSize / hashFile) makes all three provable. Tests: **139 → 153**, all passing. Two display-only gaps recorded in §10 (preview does not print `warnings`, and labels the exists-but-unverified case `Bundle NOT written`). | Fabricated manifests can no longer skip asset verification; cleanup and byte-size reporting no longer claim more than the code proves | **One final minimal Codex re-review of these three corrections** (immediate next task); then approved exact-file commit/push; then make the real `browser:ingest` bundle-backed (still charges AI at line 695 before dedup at 756); produce a real bundle from an approved paid preview; fix the two §10 preview display gaps |
 | 2026-07-17 | `3cedf83` | **Phase 1 part 1 reviewed and committed.** The **final minimal independent Codex re-review returned PASS** on the tree — all three focused findings confirmed resolved, 153 tests passed / 0 failed / 0 skipped, TypeScript passed, `git diff --check` passed, zero-AI / zero-browser / zero-database boundary passed — and declared Part 1 **safe to commit**. The operator then approved the commit. Ten files staged by exact name (the four protected untracked files and `scripts/_orig_check.ts` were not touched): the three pure modules (`browserAnalysisBundle.ts`, `sourceRowIdentity.ts`, `creativeAssetFiles.ts`), the pure `bundleAssembly.ts`, the validator and planner CLIs, the preview bundle output, the analyser's allowlist re-export, `package.json`'s three scripts, and the 153-test tracked suite. No code changed at commit time — this is exactly the reviewed and validated tree. **Not pushed** — push was not approved. | Phase 1 part 1 is independently reviewed, PASSED and version-controlled; commit-ready work is complete | **Push approval** (the only outstanding item); then the real `browser:ingest` bundle-backed integration (§13, still charges AI at line 695 before dedup at 756); a real bundle from an approved paid preview; the two low-severity §10 preview display items |
 | 2026-07-17 | `65381a8` (amended) | **Tracker factual correction.** The tracker as first written at `65381a8` wrongly stated that the final minimal Codex re-review was still **outstanding** and that Part 1 had been committed **ahead of** independent verification. That was wrong on both counts: the re-review had already run **before** the commits and returned **PASS**. Corrected across every live-status section — §0 handover header, §0.1, §0.2, §0.3 blocked table, §0.4 next action, §11 Phase 1, §13, §14 provisional list, §18 validation log, and the `3cedf83` row above — so the tracker now records the PASS, states that **no further Codex review is required before push**, and names **push approval** as the immediate action. Phase 1 part 1 stays **provisional rather than frozen** for one reason only: §14 requires a Codex PASS *and* a **pushed** change, and the push has not happened. Historical rows above are unchanged: they were accurate when written. Phase 1 remains **ACTIVE and partial** — live ingestion is not bundle-backed, still repeats AI, and no bundle from a real paid preview exists. | An accurate record: review status, commit status and the immediate action are no longer contradicted by the tracker | Push approval |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 2 — bundle-backed live ingestion, after the mapping audit gate FAILED.** The gate found that schema v2 cannot truthfully populate seven required non-null `AdAnalysis` fields (`creativeAnalysis`, `copyAnalysis`, `headlineAnalysis`, `descriptionAnalysis`, `weaknessesJson`, `improvementsJson`, `rubricScoresJson`): they are scorer OUTPUTS, and v2 carries only a summary. `''`/`[]`/`{}` were rejected as substitutes — `weaknessesJson: '[]'` would assert "no weaknesses found", which is false, and the UI's `??` fallback never fires on an empty string. Implementation stopped; the operator approved the additive fix. **(1) Schema v3** (`lib/analysis/browserAnalysisBundle.ts`): v2 is untouched and still frozen; v3 adds `analysis_result` + `benchmark_result`, faithful mirrors of the `AnalysisOutput` and `CompetitorBenchmark` preview already held in memory, with exact-key/enum/range/bounded-string validation, rubric-completeness and one-format-half rules, the existing secret/base64/raw-response guards extended over the new prose, and a cross-check that the v2-shaped summary cannot contradict the authoritative result. A v3 SUCCESS row missing any required persistence input fails validation. **(2) Persistence gate** (`decidePersistence`): v2 loads, validates and plans but can **never** authorise an INSERT — a would-be writable v2 row becomes `BLOCKED_SCHEMA` with a precise reason and no payload. **(3) Pure mapping** (new `lib/analysis/browserIngestBundleMapping.ts`): one validated v3 SUCCESS row → database-neutral Ad/AdAnalysis payloads; every required field has one authoritative source; `rubricScoresJson` round-trips the scorer's object exactly (v3 stores explicit nulls for completeness, the mapper drops them); nullable columns are null only where the scorer genuinely produced nothing; ACCEPT-only verified metadata; no Prisma/analyser/scorer/Anthropic/Playwright import. **(4) Ingestion refactor** (`scripts/ingest-browser-collected-ads.ts`): every route to `resolveCreativeContext`, `analyseAdRow`, `scoreCompetitorBenchmarkAd`, the analyser, Anthropic and fetch is REMOVED; no recompute fallback; `ANTHROPIC_API_KEY` neither required nor read; Prisma is imported lazily behind the live-write gate; the database boundary is injected (`IngestDb`) so the real orchestration is testable with fakes; order is parse → validate bundle/source/sidecar/assets/identity → decisions → live-write authorisation → competitor resolution → dedup → insert. **Dry run now contacts the database not at all** and says so rather than implying a duplicate check it did not perform. Insert-only preserved: an existing ad is `SKIPPED_EXISTING`, never updated. **(5) v3 preview writer**: serialises the in-memory result; ordinary preview output, preflight write-freeness and held-row honesty unchanged. **Note:** the scorer's `recommendations.headline`/`.description` had to be stored as `headline_recommendation`/`description_recommendation` — a bare `headline`/`description` key is globally forbidden anywhere in a bundle (frozen raw-listing exclusion), and that guard was NOT weakened; the mapper restores the scorer's original shape on write. Tests **153 → 232** (153 part 1 unchanged, pinned explicitly to v2; 79 new), `tsc` exit 0, `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. | The repeated-charge defect is closed: ingestion contains no optional external work at all, so nothing can be charged before dedup, and dry-run costs nothing | **Independent Codex review of part 2** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 2 — correction after independent Codex review returned NEEDS CHANGES.** Codex confirmed the architecture sound (zero-AI ingestion, v2 refusal, v3 serialisation, pure mapping, skip-only duplicates, no update path, the transaction boundary, the three live-write flags, per-row isolation, the recommendation rename) and **accepted the zero-database dry-run as safer** — it is not a defect. Nine findings corrected. **(1) Sidecar binding:** ingestion had a duplicate, weaker sidecar parser that auto-discovered the canonical `*.verified-meta.csv` regardless of the bundle, so a sidecar created or edited AFTER the bundle could put advertiser copy into the database that no bundle vouched for. It now loads **only** `bundle.verified_meta_path`, re-checks containment, checksums **the exact bytes it parses** (no time-of-check/time-of-use gap), and reuses the shared strict `loadVerifiedMetaSidecar`; a null declaration means no metadata at all, and there is no discovery path left. **(2) Impossible arrays:** derived from the real analysers — `strengths`/`weaknesses` are never empty (they fall back to an explicit sentence), `improvements` is always exactly 3 (`[recommendations.copy, .headline, .creative]`), and the benchmark `breakdown` is always exactly 3. Empty, blank and wrong-cardinality arrays now fail: `[]` would assert "nothing found", which is false. **(3) Rubric:** completeness is keyed to the row's own `media_type` — IMAGE/CAROUSEL require all 7 static scores with the video half null, VIDEO the reverse; shared scores are never null; unknown keys fail; a genuine 0 survives. **(4) Cross-check:** now exhaustive over all 19 duplicated values (adding AIDA scores, all 7 component scores, behavioural triggers and strengths) using structural equality, so key order cannot create a false mismatch and neither side is silently preferred. **(5) Benchmark semantics:** tier↔tier_token, evidence token/label/confidence/warning all checked against `creative_source`, breakdown cardinality, score and weight ranges, and per-source formula weights — via the new pure `benchmarkContract.ts`, which `competitorScoring.ts` now also consumes (identical values, no behaviour change) so the two cannot drift. **(6) `benchmarkScoredAt`** now carries the validated `bundle.created_at`, not ingestion time; `firstSeenAt`/`lastSeenAt`/`lastSeenActiveAt` remain ingestion time. **(7) Drift detection:** a test-only Prisma schema reader extracts `AdAnalysis`'s required non-null scalars (ignoring comments, attributes, relations, nullables and db-generated fields), excludes `adId`, and compares both directions against the mapper contract; a fixture proves an added column is caught. **(8) Lazy Prisma:** `runIngestion` takes a `DbFactory` and calls it only after the flags, full validation and a genuinely writable row exist — dry-run, invalid bundles, source mismatches, v2 bundles and held-only workloads construct **zero** clients; disconnect only if one was created. **(9) `Ad.adLink`:** a blank `ad_library_url` now makes only that row ERROR rather than reaching a required-column insert; no URL is fabricated and the row contents are never echoed. Tests **232 → 297** (153 part 1 unchanged; part 2 79 → 144). `tsc` exit 0, `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. | Metadata can no longer come from bytes the bundle never vouched for; placeholder results, incomplete rubrics and contradictory summaries are rejected; the benchmark is no longer misdated; a new required column cannot be silently forgotten. **NOTE: this row's claim that "impossible benchmarks are rejected" was overstated — see the correction below** | **Codex re-review of these nine corrections** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 2 — benchmark semantic contract, after a second Codex NEEDS CHANGES.** Codex confirmed every other boundary (ingestion, mapping, sidecar, rubric, Prisma, duplicates, transaction, zero-AI) passes, and found **one material blocker**: the benchmark validator checked each field's range and a few pairwise relationships, but accepted benchmark COMBINATIONS the real scorer could never emit — concretely **`benchmark_score: 6.4` with `tier_token: MODERATE`**, when the real threshold is **6.5**, so 6.4 is WEAK. A tracked fixture carried exactly that impossible pair and passed. **Fix:** `lib/analysis/benchmarkContract.ts` is now the COMPLETE pure semantic contract — tier thresholds (≥8.0/≥6.5/≥5.0), token↔label, evidence token/label/confidence/warning per creative source, per-source weights and breakdown labels, the exact formula sentences, the exact warning strings, the clamp+2dp rounding rule, and pure derivations (`deriveTierToken`, `deriveTierLabel`, `deriveEvidenceForCreativeSource`, `deriveBenchmarkBreakdown`, `computeBenchmarkScoreFromBreakdown`, `deriveRecommendedUse`, `roundBenchmarkScore`). **`competitorScoring.ts` now PRODUCES with those same functions** — `benchmarkTierToken` and `recommendedUseFor` delegate to them, and the three scoring branches were replaced by one contract-driven path. Identical arithmetic, thresholds, rounding, formulas, labels, weights, confidences, warnings and guidance: a single-source-of-truth extraction, **not** a scoring change. **[SUPERSEDED CLAIM — this row originally added "asserted behaviourally rather than by source scanning". That was overstated: the parity test of the time called only the pure contract helpers, so it proved the contract agrees with itself, not that the shipping scorer does. A genuine test that invokes `scoreCompetitorBenchmarkAd()` was added in the next row.]** **Validation now recomputes the whole benchmark** from the row's own `analysis_result` + `creative_source` and requires a match: breakdown labels in order, each value traced to its authoritative analysis field (AIDA avg → rounded mean of the four AIDA scores; creative → `creative_score`; copy → `copy_score`; action → `aida_scores.action`), per-source weights, weights summing to the formula total, `benchmark_score` equal to the weighted sum under the scorer's rounding, `tier_token`/`tier` derived from that score's threshold band, `recommended_use` from tier+confidence, and the exact formula and warning strings. A self-consistent benchmark that contradicts `analysis_result` is now rejected. This is deterministic verification against a pure table — no analyser runs and ingestion still has no route to the scorer. **Fixtures are now DERIVED from the contract rather than hand-typed** (which is how the impossible pair appeared): the ASSET fixture is the real 6.1 → WEAK, FALLBACK/MANUAL are 6.3 → WEAK, and 6.4/MODERATE lives on as a negative regression test alongside boundary tests immediately below, at and above every threshold. Also corrected the stale ingestion ordering comment (documentation only — the accepted runtime order is unchanged). Tests **297 → 318** (153 part 1 unchanged; part 2 144 → 165). `tsc` exit 0, `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. | A bundle can no longer claim a benchmark the scorer could not have produced; scorer and validator share one contract, so they cannot drift | **Focused Codex re-review of this correction** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 2 — test and tracker accuracy, after a third Codex NEEDS CHANGES.** Codex found **no remaining production-code defect** and required only two corrections; **no production file was changed in this pass.** **(1) Genuine parity test.** The test claiming "the scorer and the validator agree" never invoked `scoreCompetitorBenchmarkAd()` — it called only pure contract helpers against a contract-derived fixture, so it proved the contract agrees with itself, and the tracker's claim of behavioural assertion was overstated (that claim is now marked SUPERSEDED in the row above). Replaced with executable tests that build a synthetic `AnalysisOutput`, call the **production scorer** for **ASSET, MANUAL and FALLBACK**, convert its actual returned `benchmarkScore`/`tier`/`tierToken`/`confidence`/`evidenceSource`/`evidenceToken`/`recommendedUse`/`formula`/`breakdown`/`warning` into a schema-v3 row by shape conversion only (no recomputation, no independent prediction), and assert the **real schema-v3 validator accepts it verbatim**; a mutated scorer-produced value is asserted to fail. Added a positive regression where the production scorer genuinely computes **6.4 → WEAK** (every ASSET term 6.4, so 6.4×0.70 + 6.4×0.20 + 6.4×0.10 = 6.4) — proving 6.4 itself is valid and only **6.4 + MODERATE** is impossible; that negative regression is retained. **(2) Tracker.** Made the review count consistent (three Codex reviews, three corrections, final re-review pending); corrected the visual-confidence rows in §4/§5/§6, which still said it was "not in a bundle" and did "not affect ingestion" — it is carried in the bundle contract and **LOW is unwritable and routes that row to REVIEW**, while still not being a Prisma field; and narrowed the parity claim to exactly what the test covers (the benchmark block, not end-to-end integration). Tests **318 → 324** (153 part 1 unchanged; part 2 165 → 171). `tsc` exit 0, `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. | Parity is now proven by running the shipping scorer, not by re-deriving it; the tracker no longer contradicts itself or overstates coverage | **Final focused Codex re-review** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 2 — isolated 6.4 regression and tracker reconciliation, after a fourth Codex NEEDS CHANGES.** No production-code defect; **no production file was changed in this pass** (test + tracker only). **(1) The 6.4 negative test was ambiguous.** It overrode `benchmark_score` to 6.4 and the tier to MODERATE on a row whose authoritative inputs and breakdown compute **6.1**, so validation could reject it because 6.4 disagreed with the computed 6.1 rather than because 6.4 is below the 6.5 MODERATE threshold — it never isolated the rule it claimed to test. Rebuilt as a threshold-only regression: it takes the **same synthetic `AnalysisOutput` as the positive test**, calls the production `scoreCompetitorBenchmarkAd()`, asserts the scorer itself returns `benchmarkScore === 6.4` and `tierToken === 'WEAK'`, builds the schema-v3 row from that exact output, **confirms the unmodified row validates**, then clones it and mutates **only** the tier fields (summary `benchmark_tier`, `benchmark_result.tier_token`, and its label — consistently, so the summary cross-check cannot fire first). The score, breakdown values/labels/weights, formula, evidence, confidence, warning, `recommended_use` and the whole `analysis_result` are the scorer's, untouched. It asserts the error names the expectation — `does not match the tier a score of 6.4 earns (WEAK)` — and asserts the ABSENCE of score/breakdown, summary-contradiction, recommended_use and breakdown errors, plus that **every** reported error concerns the tier. The positive production-scored 6.4 + WEAK test is retained. **(2) Tracker reconciled.** Every live section now uses one count — **four Codex reviews, four corrections, final focused re-review pending**: §0.1 handover, §0.2 phase summary, §0.3 blocked table, §0.4 next task, §11 heading, §12 active phase (also 79 → 171 tests) and §14 all previously disagreed. §3's structural-gap wording no longer claims the reusable bundle/checksummed handoff "does not exist" — the architecture exists locally; what does not exist is a bundle from a real paid preview or any executed live ingestion. Historical rows are preserved, with the superseded parity claim annotated in place. Tests **324** (153 part 1 unchanged; part 2 171). `tsc` exit 0, `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. **No Codex PASS has been given for Part 2.** | The 6.4 threshold rule is now pinned by a test that can only fail for that rule; the tracker tells one consistent story | **Final focused Codex re-review** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
+| 2026-07-17 | (uncommitted) | **Phase 1 part 2 — tracker reconciliation, after a fifth Codex review (NEEDS CHANGES, tracker accuracy only).** **Codex ACCEPTED the production implementation and the isolated 6.4 regression** — no code defect remained, and **no production or test file was changed in this pass** (docs only). Three stale current-state sections were reconciled. **(1) §2 stable baseline** named `e208cbd` as the latest commit, called the working tree clean, said the canonical workflow ends at terminal output, and said ingestion repeats Vision. It now separates the two layers: the **committed baseline is `ed71513`** (where `origin/main` and `main` both sit), Part 1 is committed/pushed/frozen, and the working tree is **explicitly NOT clean** — it carries the uncommitted Part 2 work, listed file by file (7 modified, 3 new), with the protected untracked paths untouched. **(2) §3 executive workflow** said preview output is only printed, nothing is saved, and ingestion re-calls Anthropic. It now states the committed reality separately from the local Part 2 architecture: opt-in checksummed schema-v3 bundle carrying validated analysis, benchmark and visual confidence; ingestion consumes it with **no route to Anthropic, Vision, the analysers or benchmark recomputation**; **v2 is planning-only and cannot persist, v3 is required for persistence**; **LOW visual confidence routes the row to REVIEW and is unwritable**, and visual confidence is **bundled and enforced but not a separate Prisma field**. The structural-gap wording no longer implies the reusable handoff does not exist — the accurate gap is that **no schema-v3 bundle from a real paid preview exists** and **no approved live ingestion has been executed**. **(3) §18 validation history** recorded only three NEEDS CHANGES reviews and marked the fourth as not performed. It now lists **Codex reviews 1–5, each NEEDS CHANGES, each followed by a completed correction pass**, with the **final tracker-only confirmation PENDING**. Also repaired two doubled bold markers left by an earlier scripted edit, and refreshed §0.2's stale "needs an independent Codex review" wording. Live sections now use one summary throughout: **four completed NEEDS CHANGES reviews, four completed correction passes, final focused confirmation pending.** Historical rows are preserved as written, with superseded claims annotated in place. Validation unchanged and re-confirmed: **Part 1 153, Part 2 171, combined 324 passed; 0 failed; 0 skipped**; `tsc` exit 0; `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. **Part 2 remains local and uncommitted; NO Codex PASS has been given.** | The tracker no longer contradicts the working tree it describes: committed state, local state and review history all tell the same story | **Final tracker-only Codex confirmation** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
 | 2026-07-17 | (docs-only, this commit) | **Phase 1 part 1 push finalisation.** `3cedf83` (implementation) and `e208cbd` (the review record) were pushed to `origin/main` — `c69866a..e208cbd`, fast-forward, no force. Verified after the push: `origin/main` = `e208cbd`, both commits present in remote history by ancestry, local `main` level with `origin/main`, tracked files clean. Tracker finalised accordingly: every live-status section now states that Part 1 is reviewed, committed **and pushed**, with **nothing pending** — no review, no commit, no push. §14: the part 1 safeguards **moved from provisional to FROZEN**, the full condition now being met (Codex PASS ✅ · committed ✅ · pushed ✅ · 153 tests ✅) — bundle schema v2; discriminated SUCCESS/REVIEW/SKIPPED/ERROR rows; honest failed-row and selected-ID accounting; strict source/sidecar/asset/per-row-identity validation; asset hash, byte-size, containment and VIDEO frame-limit checks; the pure allowlist and identity helpers; the structural zero-AI/zero-browser/zero-database boundary; the no-write planner; the atomic temp-file writer with fail-closed final verification; and the 153-test tracked suite. The two low-severity preview **presentation** items stay deferred and explicitly outside the frozen-complete list (§10) — they are display-only and are not grounds to reopen part 1. §0.4/§13 set the next exact task: **integrate the validated bundle into the real browser-ingestion path so ingestion reuses approved analysis with no second Anthropic call**, bounded by — no second AI analysis; validate bundle and source identity before planning writes; deduplicate before any optional external work; preserve per-row REVIEW/ERROR isolation; no DB write as part of tracker work; and a **separate explicit instruction required** before that implementation begins. | Phase 1 part 1 is complete, verified on the remote, and frozen against rework | **Phase 1 remains ACTIVE and partial** (part 2 not started): `ingest-browser-collected-ads.ts` is not bundle-backed and still calls `resolveCreativeContext()` at line 695 before dedup at line 756, so it can repeat paid AI; and no bundle from a real paid preview exists yet |
 
 ---

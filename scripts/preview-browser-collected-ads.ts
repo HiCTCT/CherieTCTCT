@@ -28,9 +28,105 @@ import {
   BUNDLE_SCHEMA_VERSION, BUNDLE_PROMPT_VERSION, BUNDLE_PLANNER_VERSION,
   buildAssetManifest, sha256File, writeBundleAtomic,
 } from '@/lib/analysis/browserAnalysisBundle';
-import type { BrowserAnalysisBundle, BundleRow } from '@/lib/analysis/browserAnalysisBundle';
+import type {
+  BrowserAnalysisBundle, BundleRow, BundleAnalysisResult, BundleBenchmarkResult,
+} from '@/lib/analysis/browserAnalysisBundle';
 import { assembleBundleRows, decideHeldOnlyBundleOutput } from '@/lib/analysis/bundleAssembly';
 import type { BundleSuccessPayload } from '@/lib/analysis/bundleAssembly';
+
+// ─── Schema-v3 result serialisation ───────────────────────────────────────────
+//
+// A faithful copy of what the scorer and benchmark ALREADY produced in this run.
+// Nothing is recomputed, reconstructed or summarised here: ingestion later persists
+// exactly these values, which is the whole point of the v3 handoff.
+//
+// SubScores keys the scorer left undefined become explicit null, so bundle validation
+// can prove the rubric complete. The mapping module drops the nulls again on write,
+// reproducing the scorer's original object exactly.
+
+function toBundleAnalysisResult(a: AnalysisOutput): BundleAnalysisResult {
+  const s = a.subScores;
+  const opt = (v: number | undefined): number | null => (v === undefined ? null : v);
+  return {
+    overall_score: a.overallScore,
+    qualified: a.qualified,
+    sub_scores: {
+      hook_stop_scroll: s.hookStopScroll,
+      audience_relevance: s.audienceRelevance,
+      value_clarity: s.valueClarity,
+      trust_proof_strength: s.trustProofStrength,
+      cta_clarity: s.ctaClarity,
+      visual_hierarchy: opt(s.visualHierarchy),
+      product_clarity: opt(s.productClarity),
+      offer_clarity: opt(s.offerClarity),
+      headline_strength: opt(s.headlineStrength),
+      description_usefulness: opt(s.descriptionUsefulness),
+      cta_visibility: opt(s.ctaVisibility),
+      trust_signals: opt(s.trustSignals),
+      first_three_seconds: opt(s.firstThreeSeconds),
+      sound_off_design: opt(s.soundOffDesign),
+      sound_on_enhancement: opt(s.soundOnEnhancement),
+      on_screen_text: opt(s.onScreenText),
+      story_flow: opt(s.storyFlow),
+      authenticity: opt(s.authenticity),
+      platform_native_feel: opt(s.platformNativeFeel),
+    },
+    creative_analysis: a.creativeAnalysis,
+    copy_analysis: a.copyAnalysis,
+    headline_analysis: a.headlineAnalysis,
+    description_analysis: a.descriptionAnalysis,
+    aida: { ...a.aida },
+    aida_explanations: { ...a.aidaExplanations },
+    aida_scores: { ...a.aidaScores },
+    funnel_stage: a.funnelStage,
+    race_stage: a.raceStage,
+    trust_funnel_stage: a.trustFunnelStage,
+    strengths: [...a.strengths],
+    weaknesses: [...a.weaknesses],
+    improvements: [...a.improvements],
+    copy_score: a.copyScore,
+    headline_score: a.headlineScore,
+    description_score: a.descriptionScore,
+    creative_score: a.creativeScore,
+    clarity_score: a.clarityScore,
+    connection_score: a.connectionScore,
+    conviction_score: a.convictionScore,
+    behavioural_triggers: a.behaviouralTriggers.map((t) => ({ name: t.name, strength: t.strength })),
+    recommendations: {
+      copy: a.recommendations.copy,
+      // Renamed, not altered: a bare `headline`/`description` key is forbidden anywhere
+      // in a bundle (raw-listing exclusion). The value is the scorer's advice, verbatim.
+      headline_recommendation: a.recommendations.headline,
+      description_recommendation: a.recommendations.description,
+      creative: a.recommendations.creative,
+      conversion_strength: a.recommendations.conversionStrength,
+    },
+    rewrite_direction: a.rewriteDirection
+      ? {
+          hook: a.rewriteDirection.hook,
+          body: a.rewriteDirection.body,
+          cta: a.rewriteDirection.cta,
+          creative_direction: a.rewriteDirection.creativeDirection,
+        }
+      : null,
+    final_verdict: a.finalVerdict,
+  };
+}
+
+function toBundleBenchmarkResult(b: CompetitorBenchmark): BundleBenchmarkResult {
+  return {
+    benchmark_score: b.benchmarkScore,
+    tier: b.tier,
+    tier_token: b.tierToken,
+    confidence: b.confidence,
+    evidence_source: b.evidenceSource,
+    evidence_token: b.evidenceToken,
+    recommended_use: b.recommendedUse,
+    formula: b.formula,
+    breakdown: b.breakdown.map((x) => ({ label: x.label, value: x.value, weight: x.weight })),
+    warning: b.warning,
+  };
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -1052,6 +1148,10 @@ function writeAnalysisBundle(args: {
     trust_funnel_stage: s.analysis.trustFunnelStage,
     behavioural_triggers: s.analysis.behaviouralTriggers.map((t) => ({ name: t.name, strength: t.strength })),
     strengths: s.analysis.strengths,
+    // v3: the COMPLETE computed result, serialised as-is. Nothing here is recomputed
+    // or composed — these objects were produced once, during scoring above.
+    analysis_result: toBundleAnalysisResult(s.analysis),
+    benchmark_result: toBundleBenchmarkResult(s.benchmark),
   }]));
 
   const assembled = assembleBundleRows({

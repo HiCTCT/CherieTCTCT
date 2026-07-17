@@ -16,7 +16,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import {
-  BUNDLE_SCHEMA_VERSION, BUNDLE_PROMPT_VERSION, BUNDLE_PLANNER_VERSION,
+  BUNDLE_SCHEMA_V2, BUNDLE_PROMPT_VERSION, BUNDLE_PLANNER_VERSION,
   validateBundle, validateBundleSourceBinding, writeBundleAtomic, sha256Buffer, loadVerifiedMetaSidecar,
 } from '../lib/analysis/browserAnalysisBundle';
 import type { BrowserAnalysisBundle, BundleAsset, BundleRow, BundleSuccessRow } from '../lib/analysis/browserAnalysisBundle';
@@ -131,7 +131,9 @@ const heldRow = (status: 'REVIEW' | 'SKIPPED' | 'ERROR', over: Partial<BundleRow
 } as BundleRow);
 
 const bundle = (rows: BundleRow[], over: Partial<BrowserAnalysisBundle> = {}): BrowserAnalysisBundle => ({
-  schema_version: BUNDLE_SCHEMA_VERSION,
+  // These are the schema-v2 tests. v2 is frozen, so they stay pinned to it explicitly:
+  // the v3 additions are covered separately in tests/browser-ingest-from-bundle.test.ts.
+  schema_version: BUNDLE_SCHEMA_V2,
   created_at: '2026-07-16T00:00:00.000Z',
   source_csv_path: CSV_REL,
   source_csv_sha256: CSV_SUM,
@@ -780,7 +782,7 @@ test('confirmed overwrite finalises the complete new file from the temp file', (
   assert.equal(duringTemp, 'OLD', 'the final file must stay untouched until finalisation');
   const written = JSON.parse(fs.readFileSync(out, 'utf-8')) as BrowserAnalysisBundle;
   assert.equal(written.rows.length, 1);
-  assert.equal(written.schema_version, BUNDLE_SCHEMA_VERSION);
+  assert.equal(written.schema_version, BUNDLE_SCHEMA_V2);
   if (r.ok) assert.equal(r.sha256, sha256Buffer(fs.readFileSync(out)));
   assert.deepEqual(tempsIn(ROOT), [], 'the temp file must be removed after a confirmed overwrite');
 });
