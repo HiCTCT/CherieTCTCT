@@ -14,8 +14,7 @@ the tracked repository. Status is based on that evidence — **not** on the mere
 ## 0. Session handover — READ FIRST
 
 _Last updated: 2026-07-17. Part 1 is reviewed (**Codex PASS**), committed and **pushed**. **Part 2 —
-bundle-backed live ingestion — is implemented locally, uncommitted, and awaiting final coordinator
-verification.**_
+bundle-backed live ingestion — is committed and pushed at `d060a69`; its review gate is closed.**_
 
 ### 0.1 What is complete
 
@@ -27,8 +26,10 @@ verification.**_
 - **Committed and pushed in earlier sessions:** `74789e7`, `3f3a76e`, `d379f81`, `b45778a`, `22c6c7a`,
   `6564b41`, `c69866a`.
 - **Committed and pushed on 2026-07-17:** `3cedf83` (Phase 1 part 1 implementation), `e208cbd` (tracker
-  recording the final Codex PASS) and `ed71513` (tracker finalisation). **The latest committed baseline
-  is `ed71513`**, which is where `origin/main` and local `main` both sit.
+  recording the final Codex PASS) and `ed71513` (tracker finalisation).
+- **Committed and pushed on 2026-07-17:** **`d060a69`** — `feat: add bundle-backed browser ingestion
+  (Phase 1 part 2)`. **The latest committed baseline is `d060a69`**, which is where `origin/main` and
+  local `main` both sit.
 - **Phase 1 part 1 — reviewed, committed and pushed. COMPLETE and FROZEN (§14):** versioned bundle
   (schema **v2**), strict fail-closed validator, bundle-backed **no-write planner**, opt-in preview
   bundle output, and **153 tracked tests passing**. Three review rounds ran in all: the first review,
@@ -41,7 +42,7 @@ verification.**_
 
 ### 0.2 What is currently being worked on
 
-**Phase 1 part 2 — bundle-backed live ingestion. Implemented locally, UNCOMMITTED.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests have passed the substantive reviews; what remains is final coordinator verification — no Codex PASS has been recorded, and no further Codex review is outstanding.**
+**Phase 1 part 2 — bundle-backed live ingestion. COMMITTED and PUSHED as `d060a69`.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests passed the substantive reviews; the final documentation correction was verified by the coordinator, and **the Part 2 review gate is CLOSED under the lean workflow**. Honest caveat: **no formal Codex PASS was ever issued for Part 2** — the last two rounds accepted the production code and tests without recording one. Part 2 is committed and pushed at `d060a69`.**
 
 Codex confirmed sound and unchanged: zero-AI/zero-browser/zero-recomputation ingestion, v2 persistence
 refusal, v3 preview serialisation, the pure mapping, duplicate skip-only handling, no update path, the
@@ -72,7 +73,8 @@ the recommendation-key rename.
 10. **Codex review 5 → NEEDS CHANGES — tracker accuracy only.** The **production implementation and
     tests were ACCEPTED**; three stale current-state tracker sections remained.
 11. **Correction pass 5** — the stable baseline, executive workflow and validation history reconciled.
-12. **Final coordinator verification pending.** No Codex PASS has been recorded for Part 2, and no
+12. **Coordinator verification COMPLETE**, and Part 2 committed and pushed as `d060a69`. The review
+    gate is closed under the lean workflow. **No formal Codex PASS was issued for Part 2**, and no
     further Codex review is outstanding.
 
 Summary of the whole part:
@@ -121,10 +123,10 @@ Summary of the whole part:
 - **DONE. Nothing is pending for Part 1** — no review, no commit, no push.
 
 **Phase 1 itself is NOT complete, and remains ACTIVE and partial (§11, §12).** Part 1 is pushed and
-frozen; **part 2 is implemented locally and is still uncommitted.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests have passed the substantive reviews; what remains is final coordinator verification — no Codex PASS has been recorded, and no further Codex review is outstanding.** What remains:
+frozen; **part 2 is committed and pushed as `d060a69`.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests passed the substantive reviews; the final documentation correction was verified by the coordinator, and **the Part 2 review gate is CLOSED under the lean workflow**. Honest caveat: **no formal Codex PASS was ever issued for Part 2** — the last two rounds accepted the production code and tests without recording one. Part 2 is committed and pushed at `d060a69`.** What remains:
 
-1. **Part 2 needs final coordinator verification**, then commit and push approval. Until then it is
-   provisional and **must not be added to the frozen do-not-repeat list (§14)**.
+1. ~~Part 2 needs final coordinator verification, then commit and push approval.~~ **DONE** — verified,
+   committed and pushed as `d060a69`; its safeguards are now frozen (§14).
 2. **No reusable bundle produced by a real paid preview exists** — and none can be a v3 bundle yet,
    because no paid preview has been run since v3 landed. Every bundle exercised so far is synthetic or
    carries placeholder analysis text. **The first real v3 paid-preview bundle is a later, separately
@@ -132,7 +134,8 @@ frozen; **part 2 is implemented locally and is still uncommitted.** **Five Codex
 3. **Live ingestion has still never been run against the database.** The path is now bundle-backed and
    insert-only, but writing remains unproven and unapproved.
 
-**The immediate action is final coordinator verification of part 2 (§0.4).**
+**Phase 1 part 2 is DONE. The immediate action is the next Phase 1 checkpoint (§0.4): a separately
+approved paid preview to produce the first real schema-v3 bundle.**
 
 ### 0.3 What is blocked
 
@@ -141,7 +144,8 @@ frozen; **part 2 is implemented locally and is still uncommitted.** **Five Codex
 | Paid Vision preview **from a Claude Code session** (checkpoint **A1**) | `ANTHROPIC_API_KEY` is **ABSENT** from the environment this session inherits. Verified three times. The script reads `process.env` directly — no dotenv loader — so a `.env` file will not work. *(The operator has separately run bounded paid previews from Windows Command Prompt, where the key is available — see §0.6.)* | The key is set at OS/user level **and a new session is started** so the shell inherits it — or the operator runs it from Command Prompt. |
 | A **bundle produced by a real paid preview** (now: a **v3** bundle) | Earlier paid runs were terminal-only and predate the bundle writer. Every bundle exercised so far is synthetic or carries **placeholder** analysis text, and none is v3 — no paid preview has run since v3 landed. **A real v3 bundle is a later, separately approved checkpoint**; without one, no live insert can be backed by real analysis. | A paid preview is explicitly approved and run with `AI_PREVIEW_OUTPUT_FILE` set. |
 | Live browser DB ingestion (checkpoint **A2**) | Not approved. `browser:ingest` no longer calls Anthropic at all (part 2), but it has still never been run against a real database. | Explicit approval, after a real v3 bundle exists. |
-| **Committing Phase 1 part 2** | Implemented locally, uncommitted. **Five Codex reviews, each NEEDS CHANGES, each closed by a correction pass** (nine findings; the benchmark semantic blocker; an overstated parity test + tracker contradictions; the ambiguous 6.4 regression + tracker contradictions; and tracker accuracy only, with production and tests ACCEPTED). **Final coordinator verification pending** — no further Codex review is outstanding. | Coordinator verification → explicit commit approval. |
+| ~~Committing and pushing Phase 1 part 2~~ | **DONE — five Codex reviews (each NEEDS CHANGES, each closed by a correction pass), coordinator verification complete, committed and pushed as `d060a69` on 2026-07-17 (`ed71513..d060a69`, fast-forward).** | Done. |
+| ~~Freezing the Part 2 safeguards on the do-not-repeat list (§14)~~ | **DONE — frozen under the lean workflow: coordinator verification + committed + pushed. See the §14 note on the absent formal Codex PASS.** | Done. |
 | ~~Committing Phase 1 part 1~~ | **DONE — the final Codex re-review returned PASS, then the operator approved the commit. Committed as `3cedf83` on 2026-07-17.** | Done. |
 | ~~Pushing `3cedf83` + `e208cbd` to `origin/main`~~ | **DONE — pushed 2026-07-17 (`c69866a..e208cbd`, fast-forward). `origin/main` contains both commits; local `main` verified level.** | Done. |
 | ~~Freezing Phase 1 part 1 on the do-not-repeat list (§14)~~ | **DONE — §14 requires a Codex PASS **and** a committed, pushed change. PASS ✅, committed ✅, pushed ✅. Moved to the frozen list.** | Done. |
@@ -151,14 +155,20 @@ part 2 and later phases.
 
 ### 0.4 The next exact task
 
-> **Final coordinator verification of Phase 1 Part 2, then commit approval.**
+> **A separately approved paid preview, to produce the first real schema-v3 bundle.**
 
-Part 2 is implemented, reviewed **five times** (NEEDS CHANGES each time), corrected each time, and
-validated locally (**324 tracked tests**, `tsc` exit 0, `git diff --check` exit 0). It remains
-**uncommitted**. **The production implementation and tests have passed the substantive reviews** —
-Codex found no production-code defect in reviews 3, 4 or 5; those rounds were test and tracker accuracy
-only, and are fixed. **No further Codex review is outstanding, and no Codex PASS has been recorded.**
-What remains is the coordinator's own verification of the working tree before commit approval.
+**Phase 1 part 2 is DONE**: reviewed five times (NEEDS CHANGES each, each corrected), coordinator-verified,
+validated (**324 tracked tests**, `tsc` exit 0, `git diff --check` exit 0), and **committed and pushed as
+`d060a69`**. Its safeguards are frozen (§14). **No formal Codex PASS was issued** — the gate was closed by
+coordinator verification under the lean workflow, and that is recorded honestly rather than as a PASS.
+
+**Phase 1 is still ACTIVE and partial.** Two checkpoints remain, each needing its own explicit approval:
+
+1. **A paid preview producing the first real schema-v3 bundle.** Every bundle exercised so far is
+   synthetic or carries placeholder analysis text. Blocked on `ANTHROPIC_API_KEY` in a Claude Code
+   session (§0.3) — the operator can run it from Command Prompt.
+2. **An approved live ingestion run** (checkpoint A2). The path is bundle-backed and insert-only, but has
+   never been executed against a database.
 
 Then: correct any findings → commit approval → push approval → **then**, separately approved, a paid
 preview to produce the first real v3 bundle.
@@ -198,7 +208,7 @@ Sequence already completed for part 1 — do not repeat or reorder:
    both `3cedf83` and `e208cbd`; local `main` verified level with `origin/main`.
 8. ~~Freeze the part 1 safeguards on the do-not-repeat list~~ — **done** (§14): PASS + committed + pushed.
 9. ~~Bundle-backed live-ingestion integration (part 2)~~ — **implemented 2026-07-17 after the mapping
-   audit gate failed and the additive schema-v3 decision was approved.** Local, uncommitted.
+   audit gate failed and the additive schema-v3 decision was approved.** Committed as `d060a69`.
 10. **Independent Codex review of part 2** — the task named above. ← **immediate action**
 11. Correct any findings → commit approval → push approval.
 12. **Then**, separately approved: a paid preview producing the first real v3 bundle, and only after
@@ -209,7 +219,7 @@ Sequence already completed for part 1 — do not repeat or reorder:
 The complete list is **§14**. Read it before proposing any work. Nothing on it may be reopened without a
 specific, demonstrated regression.
 
-### 0.5a Phase 1 part 2 files — LOCAL AND UNCOMMITTED
+### 0.5a Phase 1 part 2 files — committed and pushed as `d060a69`
 
 | File | State |
 |---|---|
@@ -363,32 +373,23 @@ Two permanent policies:
 
 ## 2. Current stable baseline
 
-**Read this as two layers: what is COMMITTED, and what only exists in the local working tree.**
-
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| **Committed baseline** | **`ed71513`** — `docs: finalise pushed Phase 1 part 1`. **`main` and `origin/main` are both at `ed71513`.** |
-| Latest committed implementation | `3cedf83` — `feat: add reusable browser-analysis bundle handoff (Phase 1 part 1)`, reviewed (Codex PASS), pushed, **frozen** (§14) |
-| **Local uncommitted work** | **Phase 1 Part 2** — schema v3 + bundle-backed ingestion. Implemented locally, **not committed, not pushed**, awaiting final coordinator verification |
+| **Committed baseline** | **`d060a69`** — `feat: add bundle-backed browser ingestion (Phase 1 part 2)`. **`main` and `origin/main` are both at `d060a69`.** |
+| Phase 1 part 1 | `3cedf83` — reviewed (Codex PASS), committed, pushed, **frozen** (§14) |
+| Phase 1 part 2 | `d060a69` — schema v3 + bundle-backed ingestion. Five Codex NEEDS CHANGES reviews, five corrections, coordinator-verified, committed and pushed. Safeguards **frozen** (§14). **No formal Codex PASS was issued** — see the §14 note |
 | Application | Local-first Next.js 14 (App Router) |
 | Database | Prisma ORM over SQLite (`prisma/dev.db`, local) |
 | Collection policy | Browser-first canonical; Meta API diagnostic only |
-| Canonical workflow ends at | **Committed:** terminal preview output. **Locally (Part 2, uncommitted):** an opt-in checksummed schema-v3 bundle that ingestion consumes |
-| Ingestion path | **Committed:** separate, repeats Vision analysis. **Locally (Part 2, uncommitted):** bundle-backed, with **no route to Anthropic, Vision or scoring recomputation** |
+| Canonical workflow ends at | An opt-in **checksummed schema-v3 bundle** that ingestion consumes. **Never executed against a real paid preview or a real database** |
+| Ingestion path | **Bundle-backed**, with **no route to Anthropic, Vision or scoring recomputation**. Never run live |
 
-**Working tree — NOT clean.** It carries the complete uncommitted Part 2 implementation:
+**Working tree:** tracked files clean; `main` level with `origin/main` at `d060a69`. The known protected
+untracked paths remain present and untouched (`AGENTS.md`, `dir`, `findstr`, `git`,
+`scripts/_orig_check.ts`).
 
-- **Modified (tracked):** `lib/analysis/browserAnalysisBundle.ts`, `lib/analysis/competitorScoring.ts`,
-  `scripts/ingest-browser-collected-ads.ts`, `scripts/preview-browser-collected-ads.ts`,
-  `tests/browser-analysis-bundle.test.ts`, `package.json`, `docs/PROJECT_STATUS.md`.
-- **New (untracked, part of Part 2):** `lib/analysis/benchmarkContract.ts`,
-  `lib/analysis/browserIngestBundleMapping.ts`, `tests/browser-ingest-from-bundle.test.ts`.
-- **Protected untracked paths remain untouched:** `AGENTS.md`, `dir`, `findstr`, `git`,
-  `scripts/_orig_check.ts`.
-
-Phase 1 Part 1 is committed, pushed and frozen. Phase 1 Part 2 is implemented locally, uncommitted, and
-awaiting final coordinator verification — **no Codex PASS has been recorded for Part 2.**
+Phase 1 parts 1 and 2 are both committed, pushed and frozen. **Phase 1 itself is NOT complete** — see §3.
 
 ---
 
@@ -400,12 +401,8 @@ browser-first collection pipeline: discovery with scope proof and five-state cla
 CSV validation, asset capture for image/carousel/video, fail-closed footer provenance, and a
 spend-guarded Vision preview with a no-spend preflight.
 
-**Where the real end-to-end workflow stops — as COMMITTED (`ed71513`).** At the terminal.
-`browser:preview` prints a report and exits, and `browser:ingest` **re-analyses the same assets by
-calling Anthropic again**. This is what is on `origin/main` today.
-
-**The local architecture (Phase 1 Part 2 — implemented, UNCOMMITTED, awaiting final coordinator
-verification).** The reusable handoff exists locally and the repeat-charge path is gone:
+**The architecture on `origin/main` today (`d060a69`).** The reusable handoff is committed, pushed and
+frozen, and the repeat-charge path is gone:
 
 - `browser:preview` can **opt in** (`AI_PREVIEW_OUTPUT_FILE`) to writing a **checksummed schema-v3
   reusable analysis bundle** carrying the validated analysis, the complete benchmark result and
@@ -423,14 +420,14 @@ placeholder analysis text — and (b) **no approved live database ingestion has 
 separately approved future checkpoints.
 
 **What is partial.** Competitor management (view/edit Meta config only), browser ingestion (writes
-`Ad` + `AdAnalysis` but no run boundary; Part 2 is uncommitted), the review queue (Meta API only), the
+`Ad` + `AdAnalysis` but no run boundary), the review queue (Meta API only), the
 dashboard and ad detail (live but not source-aware), `ScanRun` support (Meta only), and the one-command
 workflows (discovery → preview only).
 
 **The three largest structural gaps:**
 
 1. **No reusable analysis bundle produced by a REAL paid preview, and no approved live ingestion run.**
-   The architecture exists locally (Part 1 pushed and frozen; Part 2 uncommitted): preview can save a
+   The architecture is committed, pushed and frozen (parts 1 and 2): preview can save a
    checksummed schema-v3 bundle carrying visual confidence and the complete model output, and ingestion
    consumes it with no Anthropic call. What does **not** yet exist is a bundle produced by a real paid
    preview, and any executed live database ingestion — both separately approved future checkpoints.
@@ -469,7 +466,7 @@ demonstrated regression.
 | Exact-ID preview filter (`AI_PREVIEW_ONLY_AD_IDS`, exact match, no substring) | `resolveOnlyAdIds()` | `22c6c7a` | Filtered preflight matched exactly 2 IDs; `1442273137905726` excluded | **Yes** |
 | Numeric multi-frame ordering + `AI_VIDEO_MAX_FRAMES` (one request per ad) | `planVisionInputs()`, `analyseCreativeAsset()` | `22c6c7a`, `6564b41` | Preflight: all four video ads select 4 of 4 frames | **Yes** |
 | Strict VIDEO response parsing (4 required sections, unique + ordered, non-empty bodies, exact `FRAME n:` observations, neutral malformed fallback) | `lib/analysis/creativeAssetAnalyser.ts` | `6564b41` | Synthetic assertions (see §18 caveat: **not tracked**) | **Yes** |
-| Visual confidence **display** (HIGH/MEDIUM/LOW, fail-closed to LOW; separate from benchmark confidence) | parser + `scripts/preview-browser-collected-ads.ts` | `6564b41` | Displayed in preview and **carried in the bundle** (v2 and v3). **LOW is unwritable — it routes that row to REVIEW** (Part 2, uncommitted). Still not written to a database column | Display frozen; DB persistence outstanding (Phase 2) |
+| Visual confidence **display** (HIGH/MEDIUM/LOW, fail-closed to LOW; separate from benchmark confidence) | parser + `scripts/preview-browser-collected-ads.ts` | `6564b41` | Displayed in preview and **carried in the bundle** (v2 and v3). **LOW is unwritable — it routes that row to REVIEW** (`d060a69`). Still not written to a database column | Display frozen; DB persistence outstanding (Phase 2) |
 | Deterministic behavioural-trigger hardening (evidence-required urgency / before-after / fear-of-loss / status / belonging) | `detectBehaviouralTriggers()` in `lib/analysis/scoring.ts` | `22c6c7a`, `6564b41` | Synthetic assertions (**not tracked**); triggers affect output only, not numeric scores | **Yes** |
 | TypeScript validation | `npx tsc --noEmit` | ongoing | Passing at `6564b41` | Run on every change |
 
@@ -484,13 +481,13 @@ this repository. See §10 and §18.
 | Feature | What works | What is missing | Exact files | Blocks local v1? | Deferrable after v1? |
 |---|---|---|---|---|---|
 | Competitor management | List, detail, Meta readiness, counts, last scan; CSV importer; PATCH edit of Facebook URL + Meta Page ID | No UI/API create; no edit of name/client/industry/status; no **country** field; no active/archive semantics; no frequency/next-scan; no delete/archive | `app/competitors/page.tsx`, `app/competitors/[id]/page.tsx`, `app/components/CompetitorMetaConfigForm.tsx`, `app/api/competitors/[id]/meta-config/route.ts`, `scripts/import-client-competitors.ts`, `prisma/schema.prisma` | Country + scheduling block Phase 5, not Phase 1 | Yes |
-| Browser ingestion | **Bundle-backed (Part 2, uncommitted):** per-row transaction inserting `Ad` + `AdAnalysis`; triple-flag live-write guard; duplicate isolation; verified-ACCEPT-only headline/description; **no Anthropic call and no recomputation on any path**; LOW visual confidence routes to REVIEW and is unwritable; bundle-time `benchmarkScoredAt` | No `ScanRun`; verification reasons still not persisted; browser review states still not persisted (Phase 2). **Part 2 is uncommitted and awaiting final coordinator verification** | `scripts/ingest-browser-collected-ads.ts` | The repeat-charge gap is closed in code; `ScanRun` remains Phase 3 | No |
+| Browser ingestion | **Bundle-backed (`d060a69`):** per-row transaction inserting `Ad` + `AdAnalysis`; triple-flag live-write guard; duplicate isolation; verified-ACCEPT-only headline/description; **no Anthropic call and no recomputation on any path**; LOW visual confidence routes to REVIEW and is unwritable; bundle-time `benchmarkScoredAt` | No `ScanRun`; verification reasons still not persisted; browser review states still not persisted (Phase 2). **Never run live against a database** | `scripts/ingest-browser-collected-ads.ts` | The repeat-charge gap is closed in code; `ScanRun` remains Phase 3 | No |
 | Meta review queue | `/meta-review` lists Meta `PENDING`; approve/reject persists `reviewStatus` + `qualified`; server-side score check | Meta-API only; no browser ads; no note/reviewer/timestamp/override; no ingestion gate | `app/meta-review/page.tsx`, `lib/queries/pendingAds.ts`, `app/api/ads/[id]/review/route.ts` | **Yes** (Phase 2) | No |
 | Dashboard + ad detail | Live Prisma queries; filters (industry, qualified, source, format, score, search); full stored analysis, AIDA, triggers, benchmark, asset gallery, card grid | Dashboard defaults to all ads incl. pending/rejected; no visual-confidence display; no review actions; no provenance labels | `app/page.tsx`, `app/ads/[id]/page.tsx`, `app/components/DashboardFilter.tsx` | No | Yes (Phase 4) |
 | ScanRun support | Schema models exist (`ScanRun`, `AdScanRecord`); Meta ingestion + seed create and complete runs; `getScanRunById()` exists | Browser ingestion creates **none** (verified: 0 references); no run-detail page; removed/skipped/capture/analysis counts absent; a failure can leave a run `IN_PROGRESS` | `prisma/schema.prisma`, `lib/ingestion/metaIngestion.ts`, `lib/queries/scanRuns.ts`, `scripts/ingest-browser-collected-ads.ts` | **Yes** (Phase 3) | No |
 | One-command browser workflows | `browser:workflow-one` / `workflow-db-one` / `workflow-client` chain discovery → validate → capture → validate → preview; continue-on-failure across competitors | No validation decision, ingestion, cards or display stage; no durable checkpoint/resume; preview can print FAIL without a non-zero exit when row errors are collected | `scripts/run-one-competitor-browser-workflow.ts`, `run-db-competitor-browser-workflow.ts`, `run-client-browser-workflow.ts` | Phase 5 | Yes |
 | Asset / card ingestion | `browser:ingest-cards` upserts `AdCreativeCard` idempotently by `(adId, cardIndex)`; FK-safe (never creates Ads) | Separate command, not part of one atomic run; card text not re-gated against verified-meta ACCEPT | `scripts/ingest-ad-creative-cards.ts` | Phase 3 | Yes |
-| Visual-confidence persistence | Parsed, displayed in preview, and **carried per row in the bundle contract**. **Operationally enforced (Part 2, uncommitted): LOW is unwritable and routes that row to REVIEW** | **Not a Prisma field**, not in the review queue, not in the ad UI. "Bundled and enforced" is not the same as "separately persisted" — no `Ad`/`AdAnalysis` column stores it | `lib/analysis/creativeAssetAnalyser.ts`, `scripts/preview-browser-collected-ads.ts`, `lib/analysis/browserAnalysisBundle.ts` | Phase 2 (DB field + queue) | Partly |
+| Visual-confidence persistence | Parsed, displayed in preview, and **carried per row in the bundle contract**. **Operationally enforced (`d060a69`): LOW is unwritable and routes that row to REVIEW** | **Not a Prisma field**, not in the review queue, not in the ad UI. "Bundled and enforced" is not the same as "separately persisted" — no `Ad`/`AdAnalysis` column stores it | `lib/analysis/creativeAssetAnalyser.ts`, `scripts/preview-browser-collected-ads.ts`, `lib/analysis/browserAnalysisBundle.ts` | Phase 2 (DB field + queue) | Partly |
 | Verified-metadata provenance persistence | `.verified-meta.csv` holds per-field status + reason + strategy; only ACCEPT reaches `Ad` | Status/reason never stored in DB, so the UI cannot show why a field is blank | `scripts/capture-browser-ad-assets.ts`, `scripts/ingest-browser-collected-ads.ts` | Phase 3 | Yes |
 
 ---
@@ -520,7 +517,7 @@ Existing implementation:
 | **UNAVAILABLE** | CSV `collection_status` only | Capture writes it on positive ad-specific end-state | **No** (CSV only) | No | Indirectly — skipped (READY-only) | Persist; show as an exception, not silent skip |
 | **ASSET_COPY_MISMATCH** | **Not implemented** | Nowhere | No | No | No | Define detector, schema field, queue filter and ingestion gate |
 | **MISSING_ANALYSIS** | Only implicit (`Ad.analysis = null`) | Ad detail shows fallback text | Implicitly | Fallback text only | No | Name the state; add a queue |
-| **LOW_VISUAL_CONFIDENCE** | Preview display **+ carried in the bundle contract** (v2 and v3) | Video parser returns HIGH/MEDIUM/LOW; the bundle stores it per row | **Not as its own DB field** — it lives in the bundle, not in `Ad`/`AdAnalysis` | Preview terminal only; no UI | **Yes (Part 2, uncommitted)** — LOW is **unwritable** and routes that row to REVIEW | Persist as a DB field and surface it in a review queue. Note: `benchmarkConfidence=LOW` is a **different** concept (evidence source, not visual certainty) |
+| **LOW_VISUAL_CONFIDENCE** | Preview display **+ carried in the bundle contract** (v2 and v3) | Video parser returns HIGH/MEDIUM/LOW; the bundle stores it per row | **Not as its own DB field** — it lives in the bundle, not in `Ad`/`AdAnalysis` | Preview terminal only; no UI | **Yes (`d060a69`)** — LOW is **unwritable** and routes that row to REVIEW | Persist as a DB field and surface it in a review queue. Note: `benchmarkConfidence=LOW` is a **different** concept (evidence source, not visual certainty) |
 
 ### Recorded inconsistency (verified)
 
@@ -535,7 +532,7 @@ Phase 2 — either by a source-neutral queue or by an explicit browser decision 
 
 **This is the immediate architectural priority.**
 
-**Status: CLOSED in code by Phase 1 part 2 (uncommitted, awaiting final coordinator verification — §0.2). Kept here as the record of
+**Status: CLOSED in code by Phase 1 part 2 (`d060a69`, committed and pushed). Never exercised against a real paid preview or a real database. Kept here as the record of
 what the defect was and how it was closed.**
 
 The original verified problems:
@@ -637,7 +634,7 @@ verification labels; real video playback.
 - **Only sampled video frames are analysed** — up to `AI_VIDEO_MAX_FRAMES` stills. No continuous
   video, motion or audio/transcript interpretation.
 - **Visual confidence is not persisted in the database** — it is displayed in preview and carried in the
-  bundle, and LOW routes a row to REVIEW so it can never be ingested (Part 2, uncommitted), but no
+  bundle, and LOW routes a row to REVIEW so it can never be ingested (`d060a69`), but no
   `Ad`/`AdAnalysis` column stores it. Persisting it is Phase 2.
 - **Limited competitor editing** — Meta config only; no country, status, schedule or archive.
 - **Incomplete retry/resume** — one zero-card discovery reload and forced recapture exist; no
@@ -673,7 +670,7 @@ verification labels; real video playback.
 
 Shortest non-duplicative sequence to complete local v1. Phases already complete are not listed.
 
-### Phase 1 — Reusable analysis handoff  ← **ACTIVE and PARTIAL** (part 1 done, reviewed, pushed, frozen; part 2 implemented locally, uncommitted, awaiting final Codex re-review)
+### Phase 1 — Reusable analysis handoff  ← **ACTIVE and PARTIAL** (parts 1 and 2 both committed, pushed and frozen; no real paid-preview bundle and no live ingestion run yet)
 
 - **Objective:** make a completed preview a durable, validated ingestion input.
 - **Delivered in `3cedf83` — corrected after the first independent review and again after both the final
@@ -706,15 +703,14 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
     Anthropic call; requested-output failure **exits non-zero**.
   - `tests/browser-analysis-bundle.test.ts` — **153 tracked tests** via `npm run test:browser-bundle`
     (Node's built-in `node:test` through tsx — no new framework).
-- **Part 2 (uncommitted, awaiting final coordinator verification):** schema **v3** (`analysis_result` / `benchmark_result` carrying the
+- **Part 2 (`d060a69`, committed and pushed):** schema **v3** (`analysis_result` / `benchmark_result` carrying the
   complete computed scorer + benchmark output), the `decidePersistence` gate (v2 = planning-only, never
   writable), the pure `browserIngestBundleMapping.ts`, and a **bundle-backed
   `scripts/ingest-browser-collected-ads.ts`** with an injected database boundary and no AI/scorer/browser
   route at all, a bundle-declared-only sidecar binding, a lazy database factory, and benchmark validation
   against the shared pure contract. 171 tracked tests, including executable scorer→validator parity.
 - **Work remaining before Phase 1 is complete:**
-  1. **Part 2 must pass final coordinator verification, then be committed and pushed.** Five Codex
-     reviews are complete; the production implementation and tests passed the substantive rounds.
+  1. ~~Part 2 must be reviewed, verified, committed and pushed.~~ **DONE** — `d060a69`.
   2. **No bundle produced by a real paid preview exists yet**, and none is v3 — no paid preview has run
      since v3 landed. Earlier bounded paid previews were terminal-only and predate the bundle writer.
      Every bundle exercised so far is synthetic or carries placeholder analysis text. **The first real v3
@@ -726,7 +722,7 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
   **zero** Anthropic calls ✅ (planner, proven by tracked import-boundary test); stale/mismatched bundles and
   row-level drift fail closed ✅; exact selected ad IDs recorded ✅; deterministic scores and visual
   confidence preserved ✅; **the real ingestion path consumes the bundle ✅ (part 2 — implemented,
-  uncommitted and awaiting final coordinator verification, so not yet proven)**. Phase 1 still cannot be called complete until part 2
+  committed and pushed as `d060a69`, but never exercised against a real paid preview or a real database)**. Phase 1 still cannot be called complete until part 2
   is reviewed, committed and pushed, and a real v3 paid-preview bundle exists.
 - **Validation:** `npm run test:browser-bundle` (153 passing), `npx tsc --noEmit --incremental false`,
   `git diff --check`. The no-spend preflights were last exercised before the final correction (§0.6).
@@ -791,13 +787,13 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
 ## 12. Active phase
 
 > ### ACTIVE: **Phase 1 — Reusable analysis handoff** · **part 1 DONE (frozen), part 2 IMPLEMENTED but
-> uncommitted — five Codex reviews, five corrections, final coordinator verification pending**
+> committed and pushed as `d060a69` — five Codex reviews, five corrections, coordinator-verified**
 
 **Phase 1 is ACTIVE and partial.** Part 1 — the bundle, validator, planner and 153 tracked tests — is
 reviewed (Codex PASS), committed (`3cedf83`), pushed and frozen (§14). Part 2 — schema v3 and
 bundle-backed ingestion, 171 further tracked tests — is implemented locally. Phase 1 is **not** complete:
 
-1. **Part 2 is uncommitted and awaiting final coordinator verification.** It must be verified, then committed
+1. ~~Part 2 is uncommitted and awaiting verification.~~ **DONE** — committed
    and pushed, before any of it can be trusted or frozen (§14).
 2. **No reusable bundle from a real paid preview exists**, and none is v3 — every bundle so far is
    synthetic or carries placeholder analysis text. That first real v3 bundle is a separately approved
@@ -824,7 +820,7 @@ implementation.
 
 ## 13. Next exact task
 
-> **DELIVERED (part 2) — implemented 2026-07-17, corrected after Codex NEEDS CHANGES, uncommitted. §0.4 holds the immediate
+> **DELIVERED (part 2) — implemented 2026-07-17, corrected across five Codex NEEDS CHANGES rounds, committed and pushed as `d060a69`. §0.4 holds the immediate
 > action: the independent Codex review.** The spec below is what was built to, retained for reference.
 >
 > **Integrate the validated bundle into the real ingestion path without another AI call.**
@@ -919,10 +915,20 @@ passing ✅. Do not redesign, rebuild or re-litigate any of it without a specifi
   and fail-closed final checksum/byte-size verification.
 - The **tracked browser-bundle test suite** — `npm run test:browser-bundle`, currently **153 passing**.
 
-**NOT frozen — Phase 1 part 2 (schema v3 + bundle-backed ingestion).** Implemented 2026-07-17, local,
-**uncommitted**; **five Codex reviews, each NEEDS CHANGES, each closed by a correction pass; final coordinator verification is pending**. It meets none
-of the freeze conditions yet (no Codex PASS, not committed, not pushed), so it stays off the list above
-and a reviewer is expected to challenge all of it:
+**Phase 1 part 2 — the schema-v3 handoff and bundle-backed ingestion. FROZEN on 2026-07-17** at
+`d060a69`. Five Codex reviews (each NEEDS CHANGES, each closed by a correction pass) · coordinator
+verification ✅ · committed ✅ · pushed ✅ · 324 tracked tests passing ✅.
+
+> **Honest caveat on the gate.** Part 1 was frozen under this section's original rule: *a Codex PASS
+> **and** a committed, pushed change*. **Part 2 has no formal Codex PASS** — reviews 4 and 5 accepted the
+> production implementation and tests but recorded NEEDS CHANGES for test/tracker accuracy, and no PASS
+> was ever issued. The coordinator closed the gate under the **lean workflow**, substituting their own
+> verification for the formal PASS. That is a deliberate, operator-approved variation, recorded here
+> rather than papered over as a PASS. Anyone auditing Part 2 should know its evidence is: five review
+> rounds with every finding corrected, coordinator verification, and 324 tracked tests — **not** a Codex
+> PASS.
+
+Do not redesign, rebuild or re-litigate any of the following without a specific, demonstrated regression:
 
 - `lib/analysis/benchmarkContract.ts` — the complete pure semantic contract (thresholds, weights,
   labels, formulas, warnings, rounding and the derivations), and the fact that `competitorScoring.ts`
@@ -941,7 +947,9 @@ and a reviewer is expected to challenge all of it:
 - `tests/browser-ingest-from-bundle.test.ts` — the 171 tracked Part 2 tests, including the test-only
   Prisma schema reader behind the AdAnalysis drift assertion.
 
-Freeze them only after a Codex PASS **and** a committed, pushed change — the same rule part 1 followed.
+Both parts of Phase 1 are now frozen. Part 1 met the original rule (Codex PASS + committed + pushed);
+Part 2 was closed under the lean workflow described above (coordinator verification + committed +
+pushed, **no formal Codex PASS**).
 
 **Not frozen — two accepted low-severity DEFERRED presentation items** (§10). These are display issues
 in preview only. They are **not** a reason to reopen any frozen architecture above:
@@ -1038,16 +1046,17 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | — | Scheduler | Scheduled execution | **Not yet verified** | Cron disabled |
 | `3cedf83` | Phase 1 | `npm run test:browser-bundle` — bundle schema, validator, source binding, planner, atomic write + cleanup/verification reporting, held-only assembly | **PASS — 153 tests, 0 fail, 0 skipped** | **Repo-verifiable** — the suite is tracked at `3cedf83`. 87 → 139 → 153 across the two correction rounds |
 | `3cedf83` | Phase 1 | `npx tsc --noEmit --incremental false`; `git diff --check` | PASS (exit 0) | **Repo-verifiable** — run on the exact tree that was committed |
-| (uncommitted) | Phase 1 part 2 | `npm run test:browser-bundle` — the 153 part-1 tests, unchanged, now pinned explicitly to schema v2 | **PASS — 153 tests, 0 fail, 0 skipped** | v2 behaviour is provably unchanged by the v3 addition |
-| (uncommitted) | Phase 1 part 2 | `npm run test:browser-ingestion-bundle` — schema v3 completeness, the persistence gate, the pure mapping, and the ingestion orchestration against an injected fake database | **PASS — 171 tests, 0 fail, 0 skipped** | **324 tracked tests total.** Covers the nine corrections, the benchmark semantic contract, and executable scorer→validator parity. No real database, browser, asset or network was touched; the fake DB counts client construction too |
-| (uncommitted) | Phase 1 part 2 | `npx tsc --noEmit --incremental false`; `git diff --check` | PASS (exit 0) | **Repo-verifiable** |
+| `d060a69` | Phase 1 part 2 | `npm run test:browser-bundle` — the 153 part-1 tests, unchanged, now pinned explicitly to schema v2 | **PASS — 153 tests, 0 fail, 0 skipped** | v2 behaviour is provably unchanged by the v3 addition |
+| `d060a69` | Phase 1 part 2 | `npm run test:browser-ingestion-bundle` — schema v3 completeness, the persistence gate, the pure mapping, and the ingestion orchestration against an injected fake database | **PASS — 171 tests, 0 fail, 0 skipped** | **324 tracked tests total.** Covers the nine corrections, the benchmark semantic contract, and executable scorer→validator parity. No real database, browser, asset or network was touched; the fake DB counts client construction too |
+| `d060a69` | Phase 1 part 2 | `npx tsc --noEmit --incremental false`; `git diff --check` | PASS (exit 0) | **Repo-verifiable** |
 | 2026-07-17 | Phase 1 part 2 | **Codex review 1** | **NEEDS CHANGES** | **Operator-reported.** Architecture confirmed sound; zero-database dry-run accepted as safer. Nine findings → **correction pass 1 completed** (§19) |
 | 2026-07-17 | Phase 1 part 2 | **Codex review 2** (of correction pass 1) | **NEEDS CHANGES** | **Operator-reported.** All other boundaries pass. One material blocker: the benchmark validator accepted impossible combinations (score 6.4 + tier MODERATE) → **correction pass 2 completed** (§19) |
 | 2026-07-17 | Phase 1 part 2 | **Codex review 3** (of correction pass 2) | **NEEDS CHANGES** | **Operator-reported.** No production-code defect. Two accuracy findings: an overstated scorer/validator parity test, and contradictory tracker statements → **correction pass 3 completed** (§19) |
 | 2026-07-17 | Phase 1 part 2 | **Codex review 4** (of correction pass 3) | **NEEDS CHANGES** | **Operator-reported.** No production-code defect. The 6.4 negative regression was ambiguous, and live tracker sections still contradicted each other → **correction pass 4 completed** (§19) |
 | 2026-07-17 | Phase 1 part 2 | **Codex review 5** (of correction pass 4) | **NEEDS CHANGES — tracker accuracy only** | **Operator-reported.** **The production implementation and tests are ACCEPTED.** Three stale current-state tracker sections remained (stable baseline, executive workflow, fourth-review history) → reconciled in correction pass 5 (§19) |
 | 2026-07-17 | Phase 1 part 2 | `npm run test:browser-ingestion-bundle` — executable parity: the production `scoreCompetitorBenchmarkAd()` output for ASSET/MANUAL/FALLBACK, validated by the schema-v3 validator | **PASS — 171 tests, 0 fail, 0 skipped** | Proves the shipping scorer's output is accepted verbatim, and that a mutated scorer value is rejected |
-| — | Phase 1 part 2 | **Final coordinator verification** | **PENDING** | The immediate action (§0.4). Codex raised no production-code defect in reviews 3–5. **No Codex PASS has been recorded for Part 2**, which stays off the frozen list (§14) until verified, committed and pushed |
+| 2026-07-17 | Phase 1 part 2 | **Final coordinator verification** | **COMPLETE** | Codex raised no production-code defect in reviews 3–5. The coordinator verified the final documentation correction and closed the review gate under the **lean workflow**. **No formal Codex PASS was issued for Part 2** — see the §14 caveat |
+| 2026-07-17 | Phase 1 part 2 | Commit + push | **DONE** | `d060a69` — `feat: add bundle-backed browser ingestion (Phase 1 part 2)`; `ed71513..d060a69`, fast-forward. `origin/main` = `d060a69`; local `main` verified level. Safeguards frozen (§14) |
 | — | Phase 1 part 2 | A real **v3** bundle from a paid preview | **Not yet performed** | No paid preview has run since v3 landed. Separately approved checkpoint |
 | 2026-07-17, at the tree committed as `3cedf83` | Phase 1 part 1 | **Final minimal independent Codex read-only re-review** of the three focused-re-review corrections: ASSET empty-path bypass, temp-cleanup reporting, final checksum/byte-size verification | **PASS** | **Operator-reported** (Codex runs outside this repo, so the verdict itself is not repo-verifiable — the tree it reviewed is). Confirmed: 153 tests passed, 0 failed, 0 skipped; TypeScript passed; `git diff --check` passed; ASSET empty-path bypass resolved; temp cleanup correctly treated as best-effort; final checksum and byte-size verification fails closed; zero-AI / zero-browser / zero-database boundary passed. **Phase 1 part 1 declared safe to commit** — the commit followed this verdict |
 | — | Tests | Automated tests outside the Phase 1 bundle handoff | **Missing** | Discovery, capture, parser, scoring, ingestion and UI have no tracked spec files |
@@ -1077,6 +1086,7 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | 2026-07-17 | (uncommitted) | **Phase 1 part 2 — test and tracker accuracy, after a third Codex NEEDS CHANGES.** Codex found **no remaining production-code defect** and required only two corrections; **no production file was changed in this pass.** **(1) Genuine parity test.** The test claiming "the scorer and the validator agree" never invoked `scoreCompetitorBenchmarkAd()` — it called only pure contract helpers against a contract-derived fixture, so it proved the contract agrees with itself, and the tracker's claim of behavioural assertion was overstated (that claim is now marked SUPERSEDED in the row above). Replaced with executable tests that build a synthetic `AnalysisOutput`, call the **production scorer** for **ASSET, MANUAL and FALLBACK**, convert its actual returned `benchmarkScore`/`tier`/`tierToken`/`confidence`/`evidenceSource`/`evidenceToken`/`recommendedUse`/`formula`/`breakdown`/`warning` into a schema-v3 row by shape conversion only (no recomputation, no independent prediction), and assert the **real schema-v3 validator accepts it verbatim**; a mutated scorer-produced value is asserted to fail. Added a positive regression where the production scorer genuinely computes **6.4 → WEAK** (every ASSET term 6.4, so 6.4×0.70 + 6.4×0.20 + 6.4×0.10 = 6.4) — proving 6.4 itself is valid and only **6.4 + MODERATE** is impossible; that negative regression is retained. **(2) Tracker.** Made the review count consistent (three Codex reviews, three corrections, final re-review pending); corrected the visual-confidence rows in §4/§5/§6, which still said it was "not in a bundle" and did "not affect ingestion" — it is carried in the bundle contract and **LOW is unwritable and routes that row to REVIEW**, while still not being a Prisma field; and narrowed the parity claim to exactly what the test covers (the benchmark block, not end-to-end integration). Tests **318 → 324** (153 part 1 unchanged; part 2 165 → 171). `tsc` exit 0, `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. | Parity is now proven by running the shipping scorer, not by re-deriving it; the tracker no longer contradicts itself or overstates coverage | **Final focused Codex re-review** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
 | 2026-07-17 | (uncommitted) | **Phase 1 part 2 — isolated 6.4 regression and tracker reconciliation, after a fourth Codex NEEDS CHANGES.** No production-code defect; **no production file was changed in this pass** (test + tracker only). **(1) The 6.4 negative test was ambiguous.** It overrode `benchmark_score` to 6.4 and the tier to MODERATE on a row whose authoritative inputs and breakdown compute **6.1**, so validation could reject it because 6.4 disagreed with the computed 6.1 rather than because 6.4 is below the 6.5 MODERATE threshold — it never isolated the rule it claimed to test. Rebuilt as a threshold-only regression: it takes the **same synthetic `AnalysisOutput` as the positive test**, calls the production `scoreCompetitorBenchmarkAd()`, asserts the scorer itself returns `benchmarkScore === 6.4` and `tierToken === 'WEAK'`, builds the schema-v3 row from that exact output, **confirms the unmodified row validates**, then clones it and mutates **only** the tier fields (summary `benchmark_tier`, `benchmark_result.tier_token`, and its label — consistently, so the summary cross-check cannot fire first). The score, breakdown values/labels/weights, formula, evidence, confidence, warning, `recommended_use` and the whole `analysis_result` are the scorer's, untouched. It asserts the error names the expectation — `does not match the tier a score of 6.4 earns (WEAK)` — and asserts the ABSENCE of score/breakdown, summary-contradiction, recommended_use and breakdown errors, plus that **every** reported error concerns the tier. The positive production-scored 6.4 + WEAK test is retained. **(2) Tracker reconciled.** Every live section now uses one count — **four Codex reviews, four corrections, final focused re-review pending**: §0.1 handover, §0.2 phase summary, §0.3 blocked table, §0.4 next task, §11 heading, §12 active phase (also 79 → 171 tests) and §14 all previously disagreed. §3's structural-gap wording no longer claims the reusable bundle/checksummed handoff "does not exist" — the architecture exists locally; what does not exist is a bundle from a real paid preview or any executed live ingestion. Historical rows are preserved, with the superseded parity claim annotated in place. Tests **324** (153 part 1 unchanged; part 2 171). `tsc` exit 0, `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. **No Codex PASS has been given for Part 2.** | The 6.4 threshold rule is now pinned by a test that can only fail for that rule; the tracker tells one consistent story | **Final focused Codex re-review** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
 | 2026-07-17 | (uncommitted) | **Phase 1 part 2 — tracker reconciliation, after a fifth Codex review (NEEDS CHANGES, tracker accuracy only).** **Codex ACCEPTED the production implementation and the isolated 6.4 regression** — no code defect remained, and **no production or test file was changed in this pass** (docs only). Three stale current-state sections were reconciled. **(1) §2 stable baseline** named `e208cbd` as the latest commit, called the working tree clean, said the canonical workflow ends at terminal output, and said ingestion repeats Vision. It now separates the two layers: the **committed baseline is `ed71513`** (where `origin/main` and `main` both sit), Part 1 is committed/pushed/frozen, and the working tree is **explicitly NOT clean** — it carries the uncommitted Part 2 work, listed file by file (7 modified, 3 new), with the protected untracked paths untouched. **(2) §3 executive workflow** said preview output is only printed, nothing is saved, and ingestion re-calls Anthropic. It now states the committed reality separately from the local Part 2 architecture: opt-in checksummed schema-v3 bundle carrying validated analysis, benchmark and visual confidence; ingestion consumes it with **no route to Anthropic, Vision, the analysers or benchmark recomputation**; **v2 is planning-only and cannot persist, v3 is required for persistence**; **LOW visual confidence routes the row to REVIEW and is unwritable**, and visual confidence is **bundled and enforced but not a separate Prisma field**. The structural-gap wording no longer implies the reusable handoff does not exist — the accurate gap is that **no schema-v3 bundle from a real paid preview exists** and **no approved live ingestion has been executed**. **(3) §18 validation history** recorded only three NEEDS CHANGES reviews and marked the fourth as not performed. It now lists **Codex reviews 1–5, each NEEDS CHANGES, each followed by a completed correction pass**, with the **final tracker-only confirmation PENDING**. Also repaired two doubled bold markers left by an earlier scripted edit, and refreshed §0.2's stale "needs an independent Codex review" wording. Live sections now use one summary throughout: **four completed NEEDS CHANGES reviews, four completed correction passes, final focused confirmation pending.** Historical rows are preserved as written, with superseded claims annotated in place. Validation unchanged and re-confirmed: **Part 1 153, Part 2 171, combined 324 passed; 0 failed; 0 skipped**; `tsc` exit 0; `git diff --check` exit 0. No paid preview, no Anthropic call, no browser run, no real database access, no Prisma/migration/schema change. **Part 2 remains local and uncommitted; NO Codex PASS has been given.** | The tracker no longer contradicts the working tree it describes: committed state, local state and review history all tell the same story | **Final tracker-only Codex confirmation** (immediate action); then commit + push approval; then a separately approved paid preview for the first real v3 bundle; then approved live ingestion (checkpoint A2) |
+| 2026-07-17 | `d060a69` | **Phase 1 part 2 committed, pushed and frozen.** After five Codex reviews (each NEEDS CHANGES, each closed by a correction pass) the coordinator verified the final documentation correction and closed the review gate under the **lean workflow**. Ten files staged by exact name — `docs/PROJECT_STATUS.md`, `lib/analysis/benchmarkContract.ts`, `lib/analysis/browserAnalysisBundle.ts`, `lib/analysis/browserIngestBundleMapping.ts`, `lib/analysis/competitorScoring.ts`, `scripts/ingest-browser-collected-ads.ts`, `scripts/preview-browser-collected-ads.ts`, `tests/browser-analysis-bundle.test.ts`, `tests/browser-ingest-from-bundle.test.ts`, `package.json` — 3,963 insertions / 1,157 deletions; the protected untracked paths were never staged. Pushed `ed71513..d060a69` (fast-forward, no force); `origin/main` = `d060a69`, local `main` verified level, tracked tree clean. **§14: the schema-v3 and bundle-backed-ingestion safeguards are now FROZEN** — with an explicit caveat recorded there that **no formal Codex PASS was ever issued for Part 2**; the gate was closed by coordinator verification, not by a PASS, which is a deliberate operator-approved variation on the rule Part 1 followed. This tracker pass reconciled every live section that still said Part 2 was uncommitted, unpushed or awaiting verification: §0 handover, §0.1, §0.2, §0.3 blocked table, §0.4 next task, §0.5a, §2 baseline (now `d060a69`, working tree clean), §3 executive workflow, §4, §5, §6, §7, §10, §11, §12, §13, §14 and §18. **Phase 1 remains ACTIVE and partial**: no schema-v3 bundle has been produced by a real paid preview, and no approved live ingestion run has occurred — both separately approved checkpoints. No production or test file changed in this pass. | Both parts of Phase 1 are on `origin/main` and frozen; the tracker matches the remote | **A separately approved paid preview producing the first real schema-v3 bundle**, then an approved live ingestion run (checkpoint A2) |
 | 2026-07-17 | (docs-only, this commit) | **Phase 1 part 1 push finalisation.** `3cedf83` (implementation) and `e208cbd` (the review record) were pushed to `origin/main` — `c69866a..e208cbd`, fast-forward, no force. Verified after the push: `origin/main` = `e208cbd`, both commits present in remote history by ancestry, local `main` level with `origin/main`, tracked files clean. Tracker finalised accordingly: every live-status section now states that Part 1 is reviewed, committed **and pushed**, with **nothing pending** — no review, no commit, no push. §14: the part 1 safeguards **moved from provisional to FROZEN**, the full condition now being met (Codex PASS ✅ · committed ✅ · pushed ✅ · 153 tests ✅) — bundle schema v2; discriminated SUCCESS/REVIEW/SKIPPED/ERROR rows; honest failed-row and selected-ID accounting; strict source/sidecar/asset/per-row-identity validation; asset hash, byte-size, containment and VIDEO frame-limit checks; the pure allowlist and identity helpers; the structural zero-AI/zero-browser/zero-database boundary; the no-write planner; the atomic temp-file writer with fail-closed final verification; and the 153-test tracked suite. The two low-severity preview **presentation** items stay deferred and explicitly outside the frozen-complete list (§10) — they are display-only and are not grounds to reopen part 1. §0.4/§13 set the next exact task: **integrate the validated bundle into the real browser-ingestion path so ingestion reuses approved analysis with no second Anthropic call**, bounded by — no second AI analysis; validate bundle and source identity before planning writes; deduplicate before any optional external work; preserve per-row REVIEW/ERROR isolation; no DB write as part of tracker work; and a **separate explicit instruction required** before that implementation begins. | Phase 1 part 1 is complete, verified on the remote, and frozen against rework | **Phase 1 remains ACTIVE and partial** (part 2 not started): `ingest-browser-collected-ads.ts` is not bundle-backed and still calls `resolveCreativeContext()` at line 695 before dedup at line 756, so it can repeat paid AI; and no bundle from a real paid preview exists yet |
 
 ---
