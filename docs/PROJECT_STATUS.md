@@ -13,8 +13,8 @@ the tracked repository. Status is based on that evidence — **not** on the mere
 
 ## 0. Session handover — READ FIRST
 
-_Last updated: 2026-07-17. Written after the final Codex re-review returned **PASS** and Phase 1 part 1
-was committed locally as `3cedf83`._
+_Last updated: 2026-07-17. Written after Phase 1 part 1 was reviewed (**Codex PASS**), committed and
+**pushed to `origin/main`**. Nothing is pending for Part 1._
 
 ### 0.1 What is complete
 
@@ -25,19 +25,18 @@ was committed locally as `3cedf83`._
   parsing, visual-confidence **display**, deterministic trigger hardening.
 - **Committed and pushed in earlier sessions:** `74789e7`, `3f3a76e`, `d379f81`, `b45778a`, `22c6c7a`,
   `6564b41`, `c69866a`.
-- **Committed (NOT pushed) on 2026-07-17:** `3cedf83` — Phase 1 part 1. HEAD = **`3cedf83`**, which is
-  now **ahead of `origin/main` by 2 commits** (`3cedf83` plus this tracker commit). Pushing was not
-  approved and has not happened.
-- **Phase 1 part 1 — independently reviewed, PASSED, and COMMITTED as `3cedf83` on 2026-07-17; not
-  pushed:** versioned bundle (schema **v2**), strict fail-closed validator, bundle-backed **no-write
-  planner**, opt-in preview bundle output, and **153 tracked tests passing**. Three review rounds ran in
-  all: the first review, then the final review (**NEEDS CHANGES**, six findings), then the focused
-  re-review (**NEEDS CHANGES**, three narrower findings — an empty-`creative_asset_path` ASSET bypass and
-  two atomic-write reporting qualifications). Every finding was corrected, and the **final minimal Codex
-  re-review of those corrections returned PASS before the commit**, declaring Phase 1 part 1 safe to
-  commit (§18). **No further Codex review is required before push.** Details in §11 Phase 1.
-  **Provisional until pushed, not yet frozen** (§14) — §14 requires a Codex PASS *and* a committed,
-  **pushed** change; the PASS and the commit are done, so only the push is outstanding.
+- **Committed and pushed on 2026-07-17:** `3cedf83` (Phase 1 part 1 implementation) and `e208cbd`
+  (tracker recording the final Codex PASS). `origin/main` contains both; local `main` was verified
+  **level with `origin/main`** after the push.
+- **Phase 1 part 1 — reviewed, committed and pushed. COMPLETE and FROZEN (§14):** versioned bundle
+  (schema **v2**), strict fail-closed validator, bundle-backed **no-write planner**, opt-in preview
+  bundle output, and **153 tracked tests passing**. Three review rounds ran in all: the first review,
+  then the final review (**NEEDS CHANGES**, six findings), then the focused re-review (**NEEDS CHANGES**,
+  three narrower findings — an empty-`creative_asset_path` ASSET bypass and two atomic-write reporting
+  qualifications). Every finding was corrected, and the **final minimal Codex re-review returned PASS**
+  before the commit (§18). **Nothing is pending for Part 1: no further review, no further commit, no
+  further push.** Details in §11 Phase 1. Its safeguards are now on the frozen do-not-repeat list (§14)
+  and must not be reopened without a specific, demonstrated regression.
 
 ### 0.2 What is currently being worked on
 
@@ -50,13 +49,22 @@ was committed locally as `3cedf83`._
   resolved; temp cleanup correctly treated as best-effort; final checksum and byte-size verification
   fails closed; the zero-AI / zero-browser / zero-database boundary passed. Part 1 was declared **safe to
   commit**;
-- **committed as `3cedf83`** (operator-approved 2026-07-17); **not pushed** — pushing was not approved;
+- **committed as `3cedf83`** and **pushed to `origin/main`** on 2026-07-17, together with the tracker
+  commit `e208cbd`; local `main` verified level with `origin/main` afterwards;
 - **153 tracked tests passing** (87 → 139 → 153 as each correction added regression tests);
-- **commit-ready work is complete. No further Codex review is required before push.**
+- **DONE. Nothing is pending for Part 1** — no review, no commit, no push.
 
-**The immediate action is explicit user approval to push the local commits** (§0.4).
+**Phase 1 itself is NOT complete, and remains ACTIVE and partial (§11, §12).** Part 1 built the reusable
+handoff; **part 2 has not started**. Specifically:
 
-Phase 1 is **not complete**: the real ingestion path is not yet bundle-backed.
+1. `scripts/ingest-browser-collected-ads.ts` is **not bundle-backed**;
+2. live ingestion still calls `resolveCreativeContext()` (line 695) **before** duplicate detection
+   (line 756), so it **can still repeat paid AI analysis** — including on dry runs;
+3. **no reusable bundle produced by a real paid preview exists** — every bundle exercised so far is
+   synthetic, or built from real assets with placeholder analysis text.
+
+**The immediate action is the next implementation task in §0.4/§13, which requires its own explicit
+instruction. Do not start it merely because this tracker names it.**
 
 ### 0.3 What is blocked
 
@@ -65,23 +73,37 @@ Phase 1 is **not complete**: the real ingestion path is not yet bundle-backed.
 | Paid Vision preview **from a Claude Code session** (checkpoint **A1**) | `ANTHROPIC_API_KEY` is **ABSENT** from the environment this session inherits. Verified three times. The script reads `process.env` directly — no dotenv loader — so a `.env` file will not work. *(The operator has separately run bounded paid previews from Windows Command Prompt, where the key is available — see §0.6.)* | The key is set at OS/user level **and a new session is started** so the shell inherits it — or the operator runs it from Command Prompt. |
 | A **bundle produced by a real paid preview** | Earlier paid runs were terminal-only and predate the bundle writer, so none produced a bundle. Every bundle exercised so far is synthetic, or built from real assets with **placeholder** analysis text. | After a paid preview is run with `AI_PREVIEW_OUTPUT_FILE` set (post-review). |
 | Live browser DB ingestion (checkpoint **A2**) | Not approved, and `browser:ingest` still calls Anthropic before dedup. | After the next task + explicit approval. |
-| ~~Committing Phase 1 part 1~~ | **UNBLOCKED — the final Codex re-review returned PASS, then the operator approved the commit. Committed as `3cedf83` on 2026-07-17.** | Done. |
-| **Pushing `3cedf83` + this tracker commit to `origin/main`** | Not approved. The commit approval covered the commit only. **No review is outstanding — push needs approval only.** | Explicit push approval in the current message. |
-| Freezing Phase 1 part 1 on the do-not-repeat list (§14) | §14 requires a Codex PASS **and** a committed, **pushed** change. PASS ✅, committed ✅, pushed ❌. | The push lands. |
+| ~~Committing Phase 1 part 1~~ | **DONE — the final Codex re-review returned PASS, then the operator approved the commit. Committed as `3cedf83` on 2026-07-17.** | Done. |
+| ~~Pushing `3cedf83` + `e208cbd` to `origin/main`~~ | **DONE — pushed 2026-07-17 (`c69866a..e208cbd`, fast-forward). `origin/main` contains both commits; local `main` verified level.** | Done. |
+| ~~Freezing Phase 1 part 1 on the do-not-repeat list (§14)~~ | **DONE — §14 requires a Codex PASS **and** a committed, pushed change. PASS ✅, committed ✅, pushed ✅. Moved to the frozen list.** | Done. |
+
+**Nothing in Phase 1 part 1 is blocked or pending.** The remaining blocked items above belong to Phase 1
+part 2 and later phases.
 
 ### 0.4 The next exact task
 
-> **Explicit user approval to push the local commits (`3cedf83` + this tracker commit) to
-> `origin/main`.**
+> **Integrate the validated reusable analysis bundle into the real browser-ingestion path, so ingestion
+> can reuse approved analysis without another Anthropic call.**
 
-Review and implementation for Phase 1 part 1 are **finished**: the final Codex re-review returned PASS
-and the work is committed. Nothing technical is outstanding — the only thing standing between the local
-branch and `origin/main` is push approval.
+Phase 1 part 1 is **finished, reviewed, committed and pushed** — nothing about it is pending. This is
+**part 2**, and it is the next *implementation* task, not an authorisation to start: it **requires its own
+separate explicit task instruction.** Do not begin it because this tracker names it. The full spec is §13.
 
-**Do not begin bundle-backed live-ingestion integration (§13) before the push**, unless the operator
-explicitly reprioritises. It remains the next *implementation* task and needs its own approval.
+**Required boundary for that task, when it is instructed:**
 
-Required sequence — do not skip or reorder:
+- **No second AI analysis.** A validated bundle is the only source of analysis; there is **no recompute
+  fallback** — missing bundle → fail, invalid or stale bundle → fail, missing row → REVIEW.
+- **Validate the bundle and source identity BEFORE planning any write** — reuse `loadBundle()`,
+  `bundleRowIdentity()` and `sourceRowIdentityMismatch()`; fail closed on any drift.
+- **Deduplicate before any optional external work**, so a duplicate can never incur a charge first. This
+  is the exact defect today: `resolveCreativeContext()` at line 695 runs *before* the `prisma.ad.findMany`
+  dedup at line 756.
+- **Preserve per-row REVIEW/ERROR isolation** — one held or failed row must never block another valid row.
+- **No database write as part of tracker or planning work.** Keep the triple-flag live-write guard,
+  READY-only eligibility and verified-ACCEPT-only metadata. No Prisma/schema change.
+- Add tracked tests for the new ingestion path.
+
+Sequence already completed for part 1 — do not repeat or reorder:
 
 1. ~~Codex review of the corrected code~~ — **done**: verdict **NEEDS CHANGES**, six findings.
 2. ~~Correct those findings~~ — **done** (§19). Temp-file-only bundle writes with atomic no-clobber
@@ -97,18 +119,21 @@ Required sequence — do not skip or reorder:
    findings confirmed resolved; 153/153 tests, TypeScript and `git diff --check` all passing; the
    zero-AI / zero-browser / zero-database boundary confirmed; Part 1 declared safe to commit.
 6. ~~Exact-file commit~~ — **done**: `3cedf83`, operator-approved 2026-07-17, after the PASS.
-7. **Push `3cedf83` + the tracker commit**, after explicit user approval (§15). ← **immediate action**
-8. **Then** begin bundle-backed live-ingestion integration (the spec kept in §13), under its own approval.
+7. ~~Push~~ — **done** 2026-07-17: `c69866a..e208cbd`, fast-forward. `origin/main` = `e208cbd` and holds
+   both `3cedf83` and `e208cbd`; local `main` verified level with `origin/main`.
+8. ~~Freeze the part 1 safeguards on the do-not-repeat list~~ — **done** (§14): PASS + committed + pushed.
+9. **Bundle-backed live-ingestion integration (part 2)** — the task named above. **Awaits its own
+   explicit instruction.**
 
 ### 0.4b Do-not-repeat
 
 The complete list is **§14**. Read it before proposing any work. Nothing on it may be reopened without a
 specific, demonstrated regression.
 
-### 0.5 All files in Phase 1 part 1 — now committed as `3cedf83`
+### 0.5 All files in Phase 1 part 1 — committed as `3cedf83`, pushed to `origin/main`
 
 Ten files, staged by exact name. `docs/PROJECT_STATUS.md` is deliberately **not** in `3cedf83`: it is
-committed separately so it can record the real hash.
+committed separately (`e208cbd`, and this finalisation) so it can record the real hashes.
 
 | File | State |
 |---|---|
@@ -241,18 +266,17 @@ Two permanent policies:
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| Latest **pushed** commit | `c69866a` — `docs: add canonical project status tracker` |
-| Local HEAD | `3cedf83` — `feat: add reusable browser-analysis bundle handoff (Phase 1 part 1)`, **unpushed**, plus this tracker commit |
+| Latest stable commit | `e208cbd` — `docs: record final Phase 1 part 1 review`. **`main` and `origin/main` are level.** |
+| Latest implementation commit | `3cedf83` — `feat: add reusable browser-analysis bundle handoff (Phase 1 part 1)`, reviewed (Codex PASS), pushed |
 | Application | Local-first Next.js 14 (App Router) |
 | Database | Prisma ORM over SQLite (`prisma/dev.db`, local) |
 | Collection policy | Browser-first canonical; Meta API diagnostic only |
 | Canonical workflow ends at | **Terminal preview output only** — nothing is persisted |
 | Ingestion path | **Separate**, and currently **repeats Vision analysis** rather than consuming the completed preview |
 
-Working tree: HEAD is `3cedf83` (Phase 1 part 1) plus this tracker commit, both **ahead of
-`origin/main`, unpushed**. `c69866a` remains the last pushed commit. Tracked files are otherwise clean;
-the known protected untracked files remain present and untouched (`AGENTS.md`, `dir`, `findstr`, `git`,
-`scripts/_orig_check.ts`).
+Working tree: `main` is **level with `origin/main`** at `e208cbd`; `3cedf83` (Phase 1 part 1) is pushed
+and present on the remote. Tracked files are clean; the known protected untracked files remain present
+and untouched (`AGENTS.md`, `dir`, `findstr`, `git`, `scripts/_orig_check.ts`).
 
 ---
 
@@ -505,7 +529,7 @@ verification labels; real video playback.
 
 Shortest non-duplicative sequence to complete local v1. Phases already complete are not listed.
 
-### Phase 1 — Reusable analysis handoff  ← **ACTIVE (partially delivered)**
+### Phase 1 — Reusable analysis handoff  ← **ACTIVE and PARTIAL** (part 1 done, reviewed, pushed, frozen; part 2 not started)
 
 - **Objective:** make a completed preview a durable, validated ingestion input.
 - **Delivered in `3cedf83` — corrected after the first independent review and again after both the final
@@ -612,15 +636,26 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
 
 ## 12. Active phase
 
-> ### ACTIVE: **Phase 1 — Reusable analysis handoff**
+> ### ACTIVE: **Phase 1 — Reusable analysis handoff** · **part 1 DONE (frozen), part 2 NOT STARTED**
+
+**Phase 1 is ACTIVE and partial.** Part 1 — the bundle, validator, planner and 153 tracked tests — is
+reviewed (Codex PASS), committed (`3cedf83`), pushed and frozen (§14). Phase 1 is **not** complete, for
+three reasons that all belong to part 2:
+
+1. `scripts/ingest-browser-collected-ads.ts` is **not bundle-backed**;
+2. live ingestion still calls `resolveCreativeContext()` (line 695) **before** the duplicate check
+   (line 756), so it **can still repeat paid AI analysis**, dry runs included;
+3. **no reusable bundle from a real paid preview exists** — every bundle so far is synthetic or carries
+   placeholder analysis text.
 
 Browser collection and Vision prompt quality are **frozen** unless a concrete regression blocks
 implementation.
 
 - **Goal:** a versioned, checksum-validated browser-analysis bundle that ingestion consumes with
   zero Anthropic calls.
-- **Files likely involved:** new `lib/analysis/browserAnalysisBundle.ts`;
-  `scripts/preview-browser-collected-ads.ts`; `scripts/ingest-browser-collected-ads.ts`.
+- **Files likely involved (part 2):** `scripts/ingest-browser-collected-ads.ts` — the part 1 modules
+  (`lib/analysis/browserAnalysisBundle.ts`, `sourceRowIdentity.ts`) are complete and are **reused, not
+  rewritten**.
 - **Boundaries:** no Prisma/schema change yet; no DB writes; no paid calls; no browser runs; no
   capture or prompt changes.
 - **Validation:** `npx tsc --noEmit`; `git diff --check`; no-spend preflights unchanged; tracked unit
@@ -632,11 +667,11 @@ implementation.
 
 ## 13. Next exact task
 
-> **Superseded, and NOT the immediate action.** The bundle (schema v2), strict validator, bundle-backed
-> **planner** and **153 tracked tests** passed their final Codex re-review and are committed as
-> `3cedf83`, unpushed (§11 Phase 1). **§0.4 holds the immediate action: push approval.** The work below
-> is the task that follows the push — kept here as the agreed spec, not as a licence to start now.
-> **Do not begin it before the push** unless the operator explicitly reprioritises.
+> **This IS the next exact task (Phase 1 part 2), and it has NOT been instructed yet.** Part 1 — the
+> bundle (schema v2), strict validator, bundle-backed planner and 153 tracked tests — passed its final
+> Codex re-review, is committed as `3cedf83`, pushed, and frozen (§14). The spec below is the agreed
+> next task, **not a licence to start**: it requires a separate explicit task instruction. §0.4 records
+> the required boundary.
 >
 > **Integrate the validated bundle into the real ingestion path without another AI call.**
 > Make `scripts/ingest-browser-collected-ads.ts` consume a validated bundle instead of calling
@@ -699,27 +734,36 @@ no-spend Castlery preflights unchanged.
 - Repeated paid tuning of individual video descriptions.
 - Behavioural-trigger tuning via paid reruns.
 
-### Provisional — NOT yet frozen
+**Phase 1 part 1 — the reusable analysis handoff. FROZEN on 2026-07-17**, having met this section's full
+condition: Codex **PASS** ✅ · committed (`3cedf83`) ✅ · pushed to `origin/main` ✅ · 153 tracked tests
+passing ✅. Do not redesign, rebuild or re-litigate any of it without a specific, demonstrated regression:
 
-The following are **reviewed (Codex PASS), committed as `3cedf83` and covered by 153 tracked tests, but
-remain provisional until the commit is PUSHED.** This section's rule requires a Codex PASS **and** a
-committed, pushed change; the PASS and the commit are done, so the **push is the only thing keeping these
-off the frozen list** — not any doubt about the review. Move them onto the do-not-repeat list above once
-the push lands:
-
-- The bundle schema (v2) and its strict validator — discriminated rows, checksum/realpath integrity,
-  enum/range/ISO rules, sensitive-content guards, VIDEO manifest cardinality, the required non-empty
-  `creative_asset_path` on ASSET SUCCESS rows.
-- The standalone source-row binding in full disk validation.
-- The temp-file bundle writer and its atomic no-clobber finalisation (`link`), including the documented
-  narrowed guarantee when a filesystem cannot provide it, the best-effort-but-reported cleanup contract,
+- Reusable browser-analysis bundle **schema v2**.
+- The **discriminated SUCCESS / REVIEW / SKIPPED / ERROR** row structure, and the rule that held rows
+  carry a reason and no result fields at all.
+- **Honest failed-row and selected-ID accounting** — every scoped ad gets exactly one row, a failed
+  analysis survives as an ERROR row, and counts derive from the rows and are never reset.
+- **Strict source-CSV, verified-sidecar, asset and per-row source-identity validation**, including the
+  standalone source-row binding in full disk validation.
+- **Asset hash, byte-size, realpath containment and VIDEO frame-limit checks**, and the required
+  non-empty `creative_asset_path` on ASSET SUCCESS rows.
+- The **pure creative-file allowlist and source-row identity helpers** (`creativeAssetFiles.ts`,
+  `sourceRowIdentity.ts`, `bundleAssembly.ts`).
+- The **structural zero-AI, zero-browser, zero-database planner/validator boundary** and its tracked
+  import-boundary test.
+- The **bundle-backed no-write ingestion planner**, the opt-in preview bundle output and held-only
+  bundle output.
+- The **atomic same-directory temp-file bundle writer** with no-clobber `link()` finalisation, its
+  documented narrowed guarantee where a filesystem cannot provide it, best-effort-but-reported cleanup,
   and fail-closed final checksum/byte-size verification.
-- The pure-module boundary (`creativeAssetFiles.ts`, `sourceRowIdentity.ts`, `bundleAssembly.ts`) and its
-  tracked import-boundary test.
-- The bundle-backed no-write planner, the opt-in preview bundle output and held-only bundle output.
+- The **tracked browser-bundle test suite** — `npm run test:browser-bundle`, currently **153 passing**.
 
-They may be added to the do-not-repeat list **only after** a Codex PASS and a committed, pushed change.
-Status: Codex PASS ✅ · committed (`3cedf83`) ✅ · **pushed ❌** — freeze them when the push lands.
+**Not frozen — two accepted low-severity DEFERRED presentation items** (§10). These are display issues
+in preview only. They are **not** a reason to reopen any frozen architecture above:
+
+1. Preview does not display the writer's `warnings`, so an unconfirmed temp-file cleanup is not surfaced.
+2. Preview prints `Bundle NOT written` for an existing-but-unverified file — **the detail lines are
+   accurate and the exit status is still non-zero.**
 
 ---
 
@@ -831,6 +875,7 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | 2026-07-17 | (uncommitted) | **Phase 1 part 1 — focused Codex re-review correction.** The re-review of the previous row's work returned **NEEDS CHANGES** for three narrower defects, all now closed in `lib/analysis/browserAnalysisBundle.ts`. (1) **Empty-path ASSET bypass:** a SUCCESS row with `creative_source: ASSET` and a non-empty manifest could declare `creative_asset_path: ""`, which passed shape validation and then hit the empty-path skip in disk validation — so no file, checksum or byte-size check ran on a fabricated manifest. An ASSET SUCCESS row must now declare a non-empty (post-trim) path; the rule is structural, fires with `--no-file-checks`, and short-circuits before disk validation, so the skip can only apply to rows that consumed nothing. MANUAL/FALLBACK/REVIEW/SKIPPED/ERROR rules unchanged. (2) **Cleanup honesty:** temp-file unlink failures were swallowed while the docstring claimed removal was unconditional. Removal is still attempted on every exit, but is now documented and reported as best-effort: an unconfirmed cleanup surfaces as `warnings` on success and as an appended note on failure, never replacing the original failure, and never invalidating an already-correct final file. (3) **Final verification fails closed:** a `stat` failure previously returned `ok: true` with `bytes: 0`. The final file is now re-read, its checksum compared against the serialised bundle and its size compared against the bytes written; any gap returns a failure stating the file EXISTS but is UNVERIFIED, without deleting or rewriting it. A narrow `__testHooks` seam (unlink / statSize / hashFile) makes all three provable. Tests: **139 → 153**, all passing. Two display-only gaps recorded in §10 (preview does not print `warnings`, and labels the exists-but-unverified case `Bundle NOT written`). | Fabricated manifests can no longer skip asset verification; cleanup and byte-size reporting no longer claim more than the code proves | **One final minimal Codex re-review of these three corrections** (immediate next task); then approved exact-file commit/push; then make the real `browser:ingest` bundle-backed (still charges AI at line 695 before dedup at 756); produce a real bundle from an approved paid preview; fix the two §10 preview display gaps |
 | 2026-07-17 | `3cedf83` | **Phase 1 part 1 reviewed and committed.** The **final minimal independent Codex re-review returned PASS** on the tree — all three focused findings confirmed resolved, 153 tests passed / 0 failed / 0 skipped, TypeScript passed, `git diff --check` passed, zero-AI / zero-browser / zero-database boundary passed — and declared Part 1 **safe to commit**. The operator then approved the commit. Ten files staged by exact name (the four protected untracked files and `scripts/_orig_check.ts` were not touched): the three pure modules (`browserAnalysisBundle.ts`, `sourceRowIdentity.ts`, `creativeAssetFiles.ts`), the pure `bundleAssembly.ts`, the validator and planner CLIs, the preview bundle output, the analyser's allowlist re-export, `package.json`'s three scripts, and the 153-test tracked suite. No code changed at commit time — this is exactly the reviewed and validated tree. **Not pushed** — push was not approved. | Phase 1 part 1 is independently reviewed, PASSED and version-controlled; commit-ready work is complete | **Push approval** (the only outstanding item); then the real `browser:ingest` bundle-backed integration (§13, still charges AI at line 695 before dedup at 756); a real bundle from an approved paid preview; the two low-severity §10 preview display items |
 | 2026-07-17 | `65381a8` (amended) | **Tracker factual correction.** The tracker as first written at `65381a8` wrongly stated that the final minimal Codex re-review was still **outstanding** and that Part 1 had been committed **ahead of** independent verification. That was wrong on both counts: the re-review had already run **before** the commits and returned **PASS**. Corrected across every live-status section — §0 handover header, §0.1, §0.2, §0.3 blocked table, §0.4 next action, §11 Phase 1, §13, §14 provisional list, §18 validation log, and the `3cedf83` row above — so the tracker now records the PASS, states that **no further Codex review is required before push**, and names **push approval** as the immediate action. Phase 1 part 1 stays **provisional rather than frozen** for one reason only: §14 requires a Codex PASS *and* a **pushed** change, and the push has not happened. Historical rows above are unchanged: they were accurate when written. Phase 1 remains **ACTIVE and partial** — live ingestion is not bundle-backed, still repeats AI, and no bundle from a real paid preview exists. | An accurate record: review status, commit status and the immediate action are no longer contradicted by the tracker | Push approval |
+| 2026-07-17 | (docs-only, this commit) | **Phase 1 part 1 push finalisation.** `3cedf83` (implementation) and `e208cbd` (the review record) were pushed to `origin/main` — `c69866a..e208cbd`, fast-forward, no force. Verified after the push: `origin/main` = `e208cbd`, both commits present in remote history by ancestry, local `main` level with `origin/main`, tracked files clean. Tracker finalised accordingly: every live-status section now states that Part 1 is reviewed, committed **and pushed**, with **nothing pending** — no review, no commit, no push. §14: the part 1 safeguards **moved from provisional to FROZEN**, the full condition now being met (Codex PASS ✅ · committed ✅ · pushed ✅ · 153 tests ✅) — bundle schema v2; discriminated SUCCESS/REVIEW/SKIPPED/ERROR rows; honest failed-row and selected-ID accounting; strict source/sidecar/asset/per-row-identity validation; asset hash, byte-size, containment and VIDEO frame-limit checks; the pure allowlist and identity helpers; the structural zero-AI/zero-browser/zero-database boundary; the no-write planner; the atomic temp-file writer with fail-closed final verification; and the 153-test tracked suite. The two low-severity preview **presentation** items stay deferred and explicitly outside the frozen-complete list (§10) — they are display-only and are not grounds to reopen part 1. §0.4/§13 set the next exact task: **integrate the validated bundle into the real browser-ingestion path so ingestion reuses approved analysis with no second Anthropic call**, bounded by — no second AI analysis; validate bundle and source identity before planning writes; deduplicate before any optional external work; preserve per-row REVIEW/ERROR isolation; no DB write as part of tracker work; and a **separate explicit instruction required** before that implementation begins. | Phase 1 part 1 is complete, verified on the remote, and frozen against rework | **Phase 1 remains ACTIVE and partial** (part 2 not started): `ingest-browser-collected-ads.ts` is not bundle-backed and still calls `resolveCreativeContext()` at line 695 before dedup at line 756, so it can repeat paid AI; and no bundle from a real paid preview exists yet |
 
 ---
 
