@@ -12,7 +12,9 @@ Project rules for all future Claude Code sessions. Read this before doing any wo
 
 ## Current state — read `docs/PROJECT_STATUS.md` for the full picture
 
-**Remote baseline: `d80ab94`** (`main` and `origin/main` level).
+**Phase 1 production-code baseline: `d80ab94`.** Later **documentation-only** commits may sit on top of
+it, so this is not necessarily the current Git head. **Confirm the actual head with `git status` and
+`git log` before starting work** — do not assume this line is the tip.
 
 **Phase 0 browser-safety validation is complete.** Do **not** extend Phase 0, seek more
 test advertisers, run browser/API diagnostics, or run live discovery merely to validate

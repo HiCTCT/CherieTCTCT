@@ -127,12 +127,12 @@ frozen; **part 2 is committed and pushed as `d060a69`.** **Five Codex reviews co
 
 1. ~~Part 2 needs final coordinator verification, then commit and push approval.~~ **DONE** — verified,
    committed and pushed as `d060a69`; its safeguards are now frozen (§14).
-2. **No reusable bundle produced by a real paid preview exists** — and none can be a v3 bundle yet,
-   because no paid preview has been run since v3 landed. Every bundle exercised so far is synthetic or
-   carries placeholder analysis text. **The first real v3 paid-preview bundle is a later, separately
-   approved checkpoint** (§0.3).
-3. **Live ingestion has still never been run against the database.** The path is now bundle-backed and
-   insert-only, but writing remains unproven and unapproved.
+2. ~~No reusable bundle from a real paid preview exists.~~ **DONE — checkpoint 1** produced the **first
+   real schema-v3 bundle** (`3831676167136939`), **checkpoint 2** validated it offline (exit 0),
+   **checkpoint 3A** passed a bundle-backed dry run with zero database access, and the **3B preflight**
+   backup was taken and verified (§18).
+3. **Live ingestion has still never been run against the database — the only remaining item.** The path
+   is bundle-backed and insert-only, but writing remains unproven and **unapproved**.
 
 **Phase 1 part 2 is DONE, and operational checkpoints 1, 2, 3A and the 3B preflight are all COMPLETE**
 (§18): the first real schema-v3 bundle exists, it validates offline, the bundle-backed dry run produced a
@@ -432,10 +432,11 @@ frozen, and the repeat-charge path is gone:
 - **LOW visual confidence routes the row to REVIEW and makes it unwritable.** Visual confidence is
   **bundled and operationally enforced**, but is **not separately persisted as its own Prisma field**.
 
-**The remaining operational gap is not architectural.** It is that (a) **no schema-v3 bundle has yet
-been produced by a real paid preview** — every bundle exercised so far is synthetic or carries
-placeholder analysis text — and (b) **no approved live database ingestion has been executed**. Both are
-separately approved future checkpoints.
+**The remaining operational gap is not architectural, and it is now a single item.** A real schema-v3
+bundle **has** been produced by an approved paid preview, validated offline, and carried through a
+zero-database dry run, with the database backed up (checkpoints 1, 2, 3A and the 3B preflight — §18).
+What remains is that **no approved live database ingestion has been executed** — a separately approved
+checkpoint, and the last one in Phase 1.
 
 **What is partial.** Competitor management (view/edit Meta config only), browser ingestion (writes
 `Ad` + `AdAnalysis` but no run boundary), the review queue (Meta API only), the
@@ -729,12 +730,12 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
   against the shared pure contract. 171 tracked tests, including executable scorer→validator parity.
 - **Work remaining before Phase 1 is complete:**
   1. ~~Part 2 must be reviewed, verified, committed and pushed.~~ **DONE** — `d060a69`.
-  2. **No bundle produced by a real paid preview exists yet**, and none is v3 — no paid preview has run
-     since v3 landed. Earlier bounded paid previews were terminal-only and predate the bundle writer.
-     Every bundle exercised so far is synthetic or carries placeholder analysis text. **The first real v3
-     paid-preview bundle is a later, separately approved checkpoint.**
-  3. **Live ingestion has never been run against the database.** Bundle-backed and insert-only now, but
-     unproven and unapproved.
+  2. ~~No bundle produced by a real paid preview exists yet.~~ **DONE** — an approved paid preview
+     produced the **first real schema-v3 bundle** for `3831676167136939` (checkpoint 1); it passed
+     offline validation (checkpoint 2), a zero-database dry run (checkpoint 3A) and the backup preflight
+     (3B preflight). See §18.
+  3. **Live ingestion has never been run against the database — the only remaining item.** Bundle-backed
+     and insert-only now, but unproven and **unapproved**.
 - **Dependencies:** existing planner/parser and exact-ID filter (both complete).
 - **Completion criteria:** preview can explicitly save a validated result ✅; a matching valid bundle causes
   **zero** Anthropic calls ✅ (planner, proven by tracked import-boundary test); stale/mismatched bundles and
@@ -811,13 +812,13 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
 reviewed (Codex PASS), committed (`3cedf83`), pushed and frozen (§14). Part 2 — schema v3 and
 bundle-backed ingestion, 171 further tracked tests — is implemented locally. Phase 1 is **not** complete:
 
-1. ~~Part 2 is uncommitted and awaiting verification.~~ **DONE** — committed
-   and pushed, before any of it can be trusted or frozen (§14).
-2. **No reusable bundle from a real paid preview exists**, and none is v3 — every bundle so far is
-   synthetic or carries placeholder analysis text. That first real v3 bundle is a separately approved
-   checkpoint.
-3. **Live ingestion has never run against the database.** It is bundle-backed and insert-only now, but
-   unproven and unapproved.
+1. ~~Part 2 is uncommitted and awaiting verification.~~ **DONE** — committed and pushed as `d060a69`;
+   its safeguards are frozen (§14).
+2. ~~No reusable bundle from a real paid preview exists.~~ **DONE** — checkpoint 1 produced the first
+   real schema-v3 bundle, checkpoint 2 validated it, checkpoint 3A's dry run passed with zero database
+   access, and the 3B preflight backup was verified (§18).
+3. **Live ingestion has never run against the database — the only remaining item.** It is bundle-backed
+   and insert-only now, but unproven and **unapproved**.
 
 Browser collection and Vision prompt quality are **frozen** unless a concrete regression blocks
 implementation.
