@@ -7,7 +7,7 @@ tsconfig.tsbuildinfo
 data/imports/*.csv
 # Local database backups
 prisma/dev.db.backup*
-*.db.backup*data/creative-assets/
+*.db.backup*
 
 /data/creative-assets/
 data/imports/*.extraction-log.txt
