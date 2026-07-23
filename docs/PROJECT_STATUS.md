@@ -23,7 +23,8 @@ source-neutral review-state contract, the `ReviewCandidate` Prisma model, the pu
 contracts, and the additive migration — which was REHEARSED on a disposable copy and then APPLIED to
 `prisma/dev.db` on 2026-07-23 (integrity ok; existing rows unchanged; `ReviewCandidate` empty).
 Checkpoint 2.2 provides the SCHEMA and PURE CONTRACTS ONLY — live candidate creation, promotion wiring,
-review UI and Meta-row migration are NOT yet implemented.**_
+review UI and Meta-row migration are NOT yet implemented. The tracker closeout, the SQLite sidecar
+ignore rules and the completed migration verification are committed and pushed as `7cf3342`.**_
 
 ### 0.1 What is complete
 
@@ -37,8 +38,10 @@ review UI and Meta-row migration are NOT yet implemented.**_
 - **Committed and pushed on 2026-07-17:** `3cedf83` (Phase 1 part 1 implementation), `e208cbd` (tracker
   recording the final Codex PASS) and `ed71513` (tracker finalisation).
 - **Committed and pushed on 2026-07-17:** **`d060a69`** — `feat: add bundle-backed browser ingestion
-  (Phase 1 part 2)`. **The latest committed baseline is `d060a69`**, which is where `origin/main` and
-  local `main` both sit.
+  (Phase 1 part 2)`. **`d060a69` is the frozen Phase 1 part 2 implementation baseline** — it is NOT the
+  current branch tip. Later commits sit above it: the Phase 2 implementation baseline **`27c7c0e`** and
+  the tracker-closeout commit **`7cf3342`** (see §2). Verify the actual tip with Git, never from this
+  document.
 - **Phase 1 part 1 — reviewed, committed and pushed. COMPLETE and FROZEN (§14):** versioned bundle
   (schema **v2**), strict fail-closed validator, bundle-backed **no-write planner**, opt-in preview
   bundle output, and **153 tracked tests passing**. Three review rounds ran in all: the first review,
@@ -68,6 +71,23 @@ review UI and Meta-row migration are NOT yet implemented.**_
   Meta-row migration exists yet.**
 
 ### 0.2 What is currently being worked on
+
+**Current state (2026-07-23): Phase 1 is COMPLETE and FROZEN** (both parts committed, pushed, frozen;
+all operational checkpoints done — §0.1, §18). **Phase 2 checkpoints 2.1 (`15584ec`) and 2.2
+(`27c7c0e`) are COMPLETE**, and the **`ReviewCandidate` migration is APPLIED and VERIFIED** on
+`prisma/dev.db` (integrity ok; table empty; existing rows unchanged — §18). **The next Phase 2
+capabilities are NOT yet implemented**: no live candidate creation, no promotion wiring, no review
+queue/UI, no Meta-row migration.
+
+**Immediate work direction — a bounded, READ-ONLY design step for the first live wiring slice:**
+design how **browser-collected `ReviewCandidate` rows are created from an already validated schema-v3
+bundle** — identity/upsert rules, payload construction, exception mapping — with **no final Ad
+promotion, no review UI, and no Meta-row migration** in scope. **This tracker edit authorises no
+database write.**
+
+---
+
+**HISTORICAL — Phase 1 part 2 review record (completed; retained verbatim, no longer current work):**
 
 **Phase 1 part 2 — bundle-backed live ingestion. COMMITTED and PUSHED as `d060a69`.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests passed the substantive reviews; the final documentation correction was verified by the coordinator, and **the Part 2 review gate is CLOSED under the lean workflow**. Honest caveat: **no formal Codex PASS was ever issued for Part 2** — the last two rounds accepted the production code and tests without recording one. Part 2 is committed and pushed at `d060a69`.**
 
@@ -199,10 +219,16 @@ part 2 and later phases.
 > **PHASE 2 status:** checkpoints **2.1** (`15584ec`, review-state contract) and **2.2** (`27c7c0e`,
 > `ReviewCandidate` model + pure persistence/payload contracts + additive migration) are **committed,
 > pushed and complete**; the migration was **rehearsed on a disposable copy and applied to
-> `prisma/dev.db` on 2026-07-23** (integrity ok, existing rows unchanged, `ReviewCandidate` empty — §18).
-> **What exists is the schema and the pure contracts.** The next Phase 2 work — wiring live candidate
-> creation, the atomic promotion transaction, the review queue/UI and any Meta-row migration — is **NOT
-> implemented** and each step needs its own explicit approval.
+> `prisma/dev.db` on 2026-07-23** (integrity ok, existing rows unchanged, `ReviewCandidate` empty — §18);
+> the tracker closeout + sidecar ignore rules + migration verification are recorded in **`7cf3342`**.
+> **What exists is the schema and the pure contracts.** Live candidate creation, the atomic promotion
+> transaction, the review queue/UI and any Meta-row migration are **NOT implemented** and each step
+> needs its own explicit approval.
+>
+> **Next exact task:** *Design the browser-collected `ReviewCandidate` creation wiring from a validated
+> schema-v3 bundle* — a bounded, READ-ONLY design/audit step (identity/upsert rules, payload
+> construction, exception mapping; no promotion, no UI, no Meta migration, no database write). **This
+> wiring is a design target only — it has NOT been implemented.**
 
 **Phase 1 part 2 is DONE**: reviewed five times (NEEDS CHANGES each, each corrected), coordinator-verified,
 validated (**324 tracked tests**, `tsc` exit 0, `git diff --check` exit 0), and **committed and pushed as
@@ -441,7 +467,7 @@ Two permanent policies:
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| **Committed baseline** | **`27c7c0e`** — `feat: add ReviewCandidate model and review contract` (Phase 2 checkpoint 2.2). **`main` and `origin/main` are both at `27c7c0e`.** Phase 1 production baseline remains `d060a69`; Phase 2 checkpoint 2.1 is `15584ec`. |
+| **Committed baselines** | **Latest production implementation baseline: `27c7c0e`** — `feat: add ReviewCandidate model and review contract` (Phase 2 checkpoint 2.2). **Tracker + sidecar-ignore closeout commit: `7cf3342`** — `docs: close Phase 2 checkpoint 2.2 and ignore SQLite sidecars`. Phase 1 production baseline remains `d060a69`; Phase 2 checkpoint 2.1 is `15584ec`. **The tracker records known implementation and closeout commits only — the current branch tip must be verified with Git, never inferred from this document's own commit hash** (documentation commits sit above the baselines). |
 | Phase 1 part 1 | `3cedf83` — reviewed (Codex PASS), committed, pushed, **frozen** (§14) |
 | Phase 1 part 2 | `d060a69` — schema v3 + bundle-backed ingestion. Five Codex NEEDS CHANGES reviews, five corrections, coordinator-verified, committed and pushed. Safeguards **frozen** (§14). **No formal Codex PASS was issued** — see the §14 note |
 | Application | Local-first Next.js 14 (App Router) |
@@ -450,7 +476,9 @@ Two permanent policies:
 | Canonical workflow ends at | An opt-in **checksummed schema-v3 bundle** that ingestion consumes. **Exercised end to end on 2026-07-23**: a real paid-preview bundle drove one approved live database ingestion (checkpoint 3B) |
 | Ingestion path | **Bundle-backed**, with **no route to Anthropic, Vision or scoring recomputation**. Run live **once** (checkpoint 3B, 2026-07-23): one atomic `Ad` + `AdAnalysis` insert for `3831676167136939` |
 
-**Working tree:** tracked files clean; `main` level with `origin/main` at `27c7c0e`. The `ReviewCandidate`
+**Working tree (last verified state):** after `7cf3342` was pushed on 2026-07-23, tracked files were
+clean, local `main` and `origin/main` were level, and the protected untracked paths were untouched.
+**Always recheck live Git status — this line is a snapshot, not a guarantee.** The `ReviewCandidate`
 migration is **applied** to `prisma/dev.db` (2026-07-23; integrity ok; table empty). The known protected
 untracked paths remain present and untouched (`AGENTS.md`, `dir`, `findstr`, `git`,
 `scripts/_orig_check.ts`).
@@ -1147,6 +1175,7 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | 2026-07-23 | **Phase 2 — migration rehearsal** | `prisma migrate deploy` against a DISPOSABLE copy outside the repo | **PASS** | Backup via the SQLite backup API from a read-only source (integrity ok), rehearsal copy migrated: only the 1 pending migration applied; `ReviewCandidate` created with 0 rows, all 6 named indexes + both FKs correct; Ad 54 / AdAnalysis 54 / Competitor 21 unchanged; `_prisma_migrations` 8 → 9; real `prisma/dev.db` stayed **byte-identical** (SHA-256 `336e0f6d…b2d09`) |
 | 2026-07-23 | **Phase 2 — LIVE migration** | `prisma migrate deploy` against the REAL `prisma/dev.db` | **DONE — integrity ok** | Pre-migration DB **708,608 bytes**, SHA-256 `336e0f6d805e59c27b25b8a3980e9bb8783f712cc70ec91158e7811bb00b2d09`; fresh live backup first (SQLite backup API, read-only source): `CherieTCTCT-phase2-live-pre-migration-dev.db`, SHA-256 `fe90378ed556fd8af58d0c382f551b17aebeb02b00276ff66cf77fcfc83c0d35`, **preserved outside the repository**. Post-migration DB **741,376 bytes**, SHA-256 `a29523e1c294d02ada414851fc2a540d852f47a4174c709fd0332bcc4c138f5d`; `integrity_check: ok`; **Ad 54, AdAnalysis 54, Competitor 21 unchanged; `ReviewCandidate` exists with 0 rows; `_prisma_migrations` 9; migration recorded once, finished, not rolled back**; 24 columns, both FKs RESTRICT/CASCADE, six named indexes. No `migrate dev`/`db push`/`generate`/`seed`; no data written |
 | 2026-07-23 | **Phase 2 — journal recovery** | Residual `dev.db-journal` (16,928 bytes) left by migrate deploy | **RESOLVED — deleted after verification** | A controlled read-write open proved the journal **non-hot** (no rollback occurred; DB byte-identical; migration intact) but read-only work cannot clear a stale `delete`-mode journal. After exclusive-handle checks (`FileShare.None`, both files unlocked) and hash re-verification, ONLY `prisma/dev.db-journal` was deleted. `dev.db` stayed byte-identical (`a29523e1…`), integrity ok, counts 54/54/21/0/9, migration still recorded once; **no WAL/SHM/journal sidecar remains** |
+| 2026-07-23 | **Phase 2 — tracker closeout** | Commit + push of the checkpoint 2.2 closeout | **DONE — `7cf3342`** | `docs: close Phase 2 checkpoint 2.2 and ignore SQLite sidecars`; exactly `.gitignore` (+4: the three narrow `prisma/*.db-journal` / `*.db-wal` / `*.db-shm` rules) and `docs/PROJECT_STATUS.md` (+47/−5, §19 append-only); `27c7c0e..7cf3342` fast-forward; local and remote verified level after the push; no database action; protected paths untouched |
 | 2026-07-17, at the tree committed as `3cedf83` | Phase 1 part 1 | **Final minimal independent Codex read-only re-review** of the three focused-re-review corrections: ASSET empty-path bypass, temp-cleanup reporting, final checksum/byte-size verification | **PASS** | **Operator-reported** (Codex runs outside this repo, so the verdict itself is not repo-verifiable — the tree it reviewed is). Confirmed: 153 tests passed, 0 failed, 0 skipped; TypeScript passed; `git diff --check` passed; ASSET empty-path bypass resolved; temp cleanup correctly treated as best-effort; final checksum and byte-size verification fails closed; zero-AI / zero-browser / zero-database boundary passed. **Phase 1 part 1 declared safe to commit** — the commit followed this verdict |
 | — | Tests | Automated tests outside the Phase 1 bundle handoff | **Missing** | Discovery, capture, parser, scoring, ingestion and UI have no tracked spec files |
 
@@ -1182,6 +1211,7 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | 2026-07-23 | `15584ec` | **Phase 2 checkpoint 2.1 — source-neutral review-state contract, committed and pushed.** Pure `lib/analysis/reviewState.ts` + `tests/review-state.test.ts` + one npm script. Decisions are **ACCEPT and EXCLUDE only**; **NOTE is metadata**, never a decision; review states **PENDING / HELD / ACCEPTED / EXCLUDED**; no silent ACCEPTED⇄EXCLUDED switch (explicit reopen only); persistence-neutral candidate value (no Prisma import). Exception taxonomy later finalised in 2.2 as three categories: **terminal** (`UNAVAILABLE` — never acceptable, never resolvable), **resolution-required** (`COMPETITOR_CONFLICT`, `MISSING_ANALYSIS` — ACCEPT blocked while present; `resolveException` removes them without accepting), **review-overridable** (`NEEDS_REVIEW`, `LOW_VISUAL_CONFIDENCE`, `ASSET_COPY_MISMATCH`). | Source-neutral review lifecycle contract exists, tested and frozen in code | Checkpoint 2.2 persistence design |
 | 2026-07-23 | `27c7c0e` | **Phase 2 checkpoint 2.2 — `ReviewCandidate` model + pure persistence/payload contracts + additive migration, committed and pushed.** Additive Prisma model `ReviewCandidate` (24 columns; `candidateKey` unique; `promotedAdId` unique; FKs → `Competitor(id)` and `Ad(id)`, both **ON DELETE RESTRICT / ON UPDATE CASCADE**; 4 ordinary indexes). Pure `lib/analysis/reviewCandidatePersistence.ts`: canonical **hashed Meta identity** `meta:ad:sha256:<sha256(canonicalJson({platform, external_ad_id}))>` (one shared builder for creation AND payload validation — no delimiter concatenation, no collision); **advertiser-scoped fallback identity** (platform + advertiser identity + media type + durable content hash; CSV/row/paths/timestamps are provenance only); one schema-versioned **`PromotionPayloadV1`** envelope (immutable Ad content EXCLUDES competitorId/clientId/industryId/reviewStatus/qualified — bound only at promotion; `qualification_recommendation` copied verbatim from the frozen mapping, never recomputed; deterministic canonical-JSON SHA-256 over the whole envelope); **per-field verified-metadata gates** (only `headline_status=ACCEPT` authorises headline, only `description_status=ACCEPT` authorises description; row-level ACCEPTED alone authorises neither; Checkpoint 1's real REVIEW case representable with blank copy); **strict Phase-1-faithful AdAnalysis completeness** (non-blank prose; strengths/weaknesses non-empty string arrays; improvements exactly 3; rubric a non-empty object of finite numbers; malformed JSON/placeholder/empty structures rejected; completeness DERIVED by validation — no trusted boolean). Independent Codex review (**operator-reported**): 1 BLOCKER + 2 MATERIAL, all corrected in one consolidated pass; confirmation **PASS**. **422 tests** (38+60+153+171), `prisma validate` ok, `tsc` 0. | Phase 2 persistence schema and pure contracts exist, reviewed and pushed | Wire live candidate creation; atomic promotion transaction; review queue/UI; Meta-row migration — **none of these exist yet**, each needs its own approval |
 | 2026-07-23 | (docs-only, this pass) | **`ReviewCandidate` migration rehearsed, applied live, and journal resolved.** **(1) Rehearsal:** consistent backup via the SQLite backup API from a read-only source (integrity ok), disposable copy migrated — only the pending migration applied; table created empty; all counts unchanged; real DB untouched (byte-identical). **(2) LIVE apply (2026-07-23):** fresh live backup first (`CherieTCTCT-phase2-live-pre-migration-dev.db`, SHA-256 `fe90378e…c0d35`, preserved outside the repo); `prisma migrate deploy` against `prisma/dev.db` — pre **708,608 B / `336e0f6d…b2d09`** → post **741,376 B / `a29523e1…138f5d`**; `integrity_check: ok`; **Ad 54 / AdAnalysis 54 / Competitor 21 unchanged; ReviewCandidate 0 rows; `_prisma_migrations` 9; migration recorded once, finished, not rolled back**; both FKs RESTRICT/CASCADE; six named indexes. **(3) Journal:** migrate deploy left a 16,928-byte `dev.db-journal`; a controlled read-write open proved it **non-hot** (no rollback; DB byte-identical); after exclusive-handle checks it was deleted — only that file; DB re-verified byte-identical and consistent; **no sidecar remains**. **(4) This pass:** tracker updated (§0 header, §0.1, §0.4, §2, §18, §19) and `.gitignore` gained three narrow rules (`prisma/*.db-journal`, `prisma/*.db-wal`, `prisma/*.db-shm`). **Honesty note: checkpoint 2.2 delivers schema + pure contracts only — no live candidate creation, promotion wiring, review UI or Meta-row migration exists yet.** | The Phase 2 persistence layer is live in the development database, empty and verified; SQLite sidecars can no longer surface in `git status` | Phase 2 wiring (candidate creation → promotion → queue/UI → Meta migration), each step separately approved |
+| 2026-07-23 | `7cf3342` | **Phase 2 checkpoint 2.2 tracker closeout committed and pushed.** Exactly two files: `.gitignore` (three narrow SQLite sidecar rules — `prisma/*.db-journal`, `prisma/*.db-wal`, `prisma/*.db-shm`; nothing broader) and `docs/PROJECT_STATUS.md` (checkpoints 2.1/2.2, the migration rehearsal, the live apply with pre/post hashes, and the journal verification-and-removal recorded across §0/§0.1/§0.4/§2/§18/§19; history preserved append-only). Pushed `27c7c0e..7cf3342`, fast-forward; local and remote verified level. | The tracker and ignore rules for the completed checkpoint 2.2 are on `origin/main` | **Live Phase 2 wiring remains outstanding** — candidate creation from a validated schema-v3 bundle (design first), then promotion, queue/UI and Meta migration, each separately approved |
 
 ---
 
