@@ -8,6 +8,10 @@ data/imports/*.csv
 # Local database backups
 prisma/dev.db.backup*
 *.db.backup*
+# SQLite sidecar files (journal/WAL/SHM) — created and removed by SQLite itself
+prisma/*.db-journal
+prisma/*.db-wal
+prisma/*.db-shm
 
 /data/creative-assets/
 data/imports/*.extraction-log.txt
