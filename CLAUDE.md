@@ -42,10 +42,13 @@ Validated Phase 0 outcomes:
 Do **not** redesign or "improve" the frozen safeguards without a specific, demonstrated
 regression — see the do-not-repeat list in `docs/PROJECT_STATUS.md` §14.
 
-**Phase 1 remains ACTIVE and partial.** Completed operational checkpoints: a real schema-v3
+**Phase 1 operational checkpoints are COMPLETE.** Completed checkpoints: a real schema-v3
 bundle from an approved paid preview, its offline validation, a bundle-backed dry run
-(zero database access), and a verified database backup. **The one-ad live ingestion
-(checkpoint 3B) is NOT approved and has never been run.**
+(zero database access), a verified database backup, and — on 2026-07-23 — the **approved
+one-ad live ingestion (checkpoint 3B)**. That run executed exactly once for ad
+`3831676167136939` and inserted one `Ad` + one `AdAnalysis` atomically (INSERTED 1, REVIEW 8,
+UNAVAILABLE 1, WRITE_ERROR 0); no existing record was updated or deleted and no AI, analyser,
+scorer, browser or external call occurred. See `docs/PROJECT_STATUS.md` §18.
 
 ## Data-safety rules
 

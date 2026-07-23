@@ -13,8 +13,11 @@ the tracked repository. Status is based on that evidence — **not** on the mere
 
 ## 0. Session handover — READ FIRST
 
-_Last updated: 2026-07-17. Part 1 is reviewed (**Codex PASS**), committed and **pushed**. **Part 2 —
-bundle-backed live ingestion — is committed and pushed at `d060a69`; its review gate is closed.**_
+_Last updated: 2026-07-23. Part 1 is reviewed (**Codex PASS**), committed and **pushed**. **Part 2 —
+bundle-backed live ingestion — is committed and pushed at `d060a69`; its review gate is closed.**
+**Checkpoint 3B — the approved one-ad live ingestion — RAN EXACTLY ONCE on 2026-07-23 and inserted ad
+`3831676167136939` (one `Ad` + one `AdAnalysis`, atomic). All Phase 1 operational checkpoints are now
+COMPLETE.**_
 
 ### 0.1 What is complete
 
@@ -122,8 +125,8 @@ Summary of the whole part:
 - **153 tracked tests passing** (87 → 139 → 153 as each correction added regression tests);
 - **DONE. Nothing is pending for Part 1** — no review, no commit, no push.
 
-**Phase 1 itself is NOT complete, and remains ACTIVE and partial (§11, §12).** Part 1 is pushed and
-frozen; **part 2 is committed and pushed as `d060a69`.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests passed the substantive reviews; the final documentation correction was verified by the coordinator, and **the Part 2 review gate is CLOSED under the lean workflow**. Honest caveat: **no formal Codex PASS was ever issued for Part 2** — the last two rounds accepted the production code and tests without recording one. Part 2 is committed and pushed at `d060a69`.** What remains:
+**Phase 1's production code and all operational checkpoints are COMPLETE (§11, §12).** Part 1 is pushed and
+frozen; **part 2 is committed and pushed as `d060a69`.** **Five Codex reviews completed, each NEEDS CHANGES, each closed by a focused correction pass. The production implementation and tests passed the substantive reviews; the final documentation correction was verified by the coordinator, and **the Part 2 review gate is CLOSED under the lean workflow**. Honest caveat: **no formal Codex PASS was ever issued for Part 2** — the last two rounds accepted the production code and tests without recording one. Part 2 is committed and pushed at `d060a69`.** The operational sequence is now finished:
 
 1. ~~Part 2 needs final coordinator verification, then commit and push approval.~~ **DONE** — verified,
    committed and pushed as `d060a69`; its safeguards are now frozen (§14).
@@ -131,16 +134,21 @@ frozen; **part 2 is committed and pushed as `d060a69`.** **Five Codex reviews co
    real schema-v3 bundle** (`3831676167136939`), **checkpoint 2** validated it offline (exit 0),
    **checkpoint 3A** passed a bundle-backed dry run with zero database access, and the **3B preflight**
    backup was taken and verified (§18).
-3. **Live ingestion has still never been run against the database — the only remaining item.** The path
-   is bundle-backed and insert-only, but writing remains unproven and **unapproved**.
+3. ~~Live ingestion has never been run against the database — the only remaining item.~~ **DONE —
+   checkpoint 3B, 2026-07-23.** The approved one-ad live ingestion ran **exactly once**: INSERTED 1,
+   REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0; one atomic `Ad` + `AdAnalysis` insert for `3831676167136939`;
+   post-run verification and backup/bundle checksum re-verification all passed (§18).
 
-**Phase 1 part 2 is DONE, and operational checkpoints 1, 2, 3A and the 3B preflight are all COMPLETE**
-(§18): the first real schema-v3 bundle exists, it validates offline, the bundle-backed dry run produced a
-clean plan with zero database access, and the database is backed up outside the repository.
+**Phase 1 part 2 is DONE, and operational checkpoints 1, 2, 3A, the 3B preflight and 3B itself are all
+COMPLETE** (§18): the first real schema-v3 bundle exists, it validates offline, the bundle-backed dry run
+produced a clean plan with zero database access, the database was backed up outside the repository, and
+the approved one-ad live ingestion ran exactly once.
 
-**The immediate action is the separately approved one-ad LIVE INGESTION of `3831676167136939` (§0.4).
-It remains UNAPPROVED and has never been executed — no database action of any kind until that approval
-arrives.**
+**Checkpoint 3B — the one-ad LIVE INGESTION of `3831676167136939` — was approved and RAN EXACTLY ONCE
+on 2026-07-23 (§0.4, §18): INSERTED 1, REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0; one `Ad` + one
+`AdAnalysis` inserted atomically; no existing record updated or deleted; no AI/analyser/scorer/browser/
+external call. All Phase 1 operational checkpoints are complete. No further database action is
+authorised without a new explicit approval.**
 
 ### 0.3 What is blocked
 
@@ -148,7 +156,7 @@ arrives.**
 |---|---|---|
 | Paid Vision preview **from a Claude Code session** | **Still blocked, and expected to stay that way.** `ANTHROPIC_API_KEY` is **ABSENT** from the environment a Claude Code session inherits; the script reads `process.env` directly — no dotenv loader — so a `.env` file will not work. **This is the operating model, not a defect:** paid previews are operator-run from an explicitly authorised shell. | Not applicable — the operator runs paid previews from Command Prompt. Claude Code must never assume the key is available. |
 | ~~A bundle produced by a real paid preview (a **v3** bundle)~~ | **DONE — checkpoint 1, 2026-07-17.** The operator ran an approved one-ad paid preview for `3831676167136939`, producing the first real schema-v3 bundle. Offline-validated at checkpoint 2 (exit 0). See §18 and §19. | Done. |
-| **Live browser DB ingestion (checkpoint 3B)** | **Not approved — this is the only remaining Phase 1 blocker.** The dry run (checkpoint 3A) and the database backup preflight are both complete, so everything is staged for it; it has still never been executed against a real database. | **Separate explicit approval of the exact command.** |
+| ~~Live browser DB ingestion (checkpoint 3B)~~ | **DONE — 2026-07-23.** Approved, executed **exactly once** for `3831676167136939`: INSERTED 1, REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0; one `Ad` + one `AdAnalysis` inserted atomically; post-run read-only verification and backup/bundle checksum re-verification all passed. See §18. | Done. |
 | ~~Committing and pushing Phase 1 part 2~~ | **DONE — five Codex reviews (each NEEDS CHANGES, each closed by a correction pass), coordinator verification complete, committed and pushed as `d060a69` on 2026-07-17 (`ed71513..d060a69`, fast-forward).** | Done. |
 | ~~Freezing the Part 2 safeguards on the do-not-repeat list (§14)~~ | **DONE — frozen under the lean workflow: coordinator verification + committed + pushed. See the §14 note on the absent formal Codex PASS.** | Done. |
 | ~~Committing Phase 1 part 1~~ | **DONE — the final Codex re-review returned PASS, then the operator approved the commit. Committed as `3cedf83` on 2026-07-17.** | Done. |
@@ -160,30 +168,35 @@ part 2 and later phases.
 
 ### 0.4 The next exact task
 
-> **A separately approved one-ad LIVE INGESTION of `3831676167136939` — the first write to the database.**
+> **None outstanding for Phase 1 operational work. Checkpoint 3B — the one-ad LIVE INGESTION of
+> `3831676167136939` — was approved and completed on 2026-07-23. All Phase 1 operational checkpoints
+> are COMPLETE.** No further database action is authorised without a new explicit approval; the next
+> substantive work belongs to Phase 2 (§11).
 
 **Phase 1 part 2 is DONE**: reviewed five times (NEEDS CHANGES each, each corrected), coordinator-verified,
 validated (**324 tracked tests**, `tsc` exit 0, `git diff --check` exit 0), and **committed and pushed as
 `d060a69`**. Its safeguards are frozen (§14). **No formal Codex PASS was issued** — the gate was closed by
 coordinator verification under the lean workflow, and that is recorded honestly rather than as a PASS.
 
-**Operational checkpoints 1, 2, 3A and the 3B preflight are COMPLETE** (§18, §19): a real schema-v3 bundle
-exists, it validates offline, the dry run produced a clean plan with zero database access, and the
-database is backed up outside the repository.
+**All operational checkpoints — 1, 2, 3A, the 3B preflight, and 3B itself — are COMPLETE** (§18, §19): a
+real schema-v3 bundle exists, it validates offline, the dry run produced a clean plan with zero database
+access, the database was backed up outside the repository, and the **approved one-ad live ingestion ran
+exactly once**.
 
-**Phase 1 is still ACTIVE and partial.** One checkpoint remains, and it needs its own explicit approval:
-
-> **Checkpoint 3B — one-ad live ingestion.** Required shape, agreed in advance:
+> **Checkpoint 3B — one-ad live ingestion. DONE 2026-07-23.** The required shape, agreed in advance, was
+> met exactly:
 >
-> - all three live-write flags (`BROWSER_DRY_RUN=false`, `BROWSER_INGEST_WRITE=true`,
+> - all three live-write flags set (`BROWSER_DRY_RUN=false`, `BROWSER_INGEST_WRITE=true`,
 >   `BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND`);
-> - **exact duplicate read first** — dedup runs before any write;
-> - **if the ad already exists: skip, never update** (the path is insert-only by design);
-> - otherwise **one atomic `Ad` + `AdAnalysis` insert**, and nothing else;
-> - **post-run read-only database verification**;
-> - **backup checksum re-verification** afterwards.
+> - **exact duplicate read first** — dedup ran before any write;
+> - the ad did not already exist, so **one atomic `Ad` + `AdAnalysis` insert** was made, and nothing else;
+> - **post-run read-only database verification** confirmed adCount 1, analysisCount 1, `adSource`
+>   `browser_collected`, `creativeSource` ASSET, `capturedAssetType` VIDEO_FRAME, headline null,
+>   description null;
+> - **backup and bundle checksum re-verification** afterwards both matched (see §18).
 >
-> Until that approval arrives, **no database action of any kind.**
+> Result: **INSERTED 1, REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0.** No existing record updated or deleted;
+> no AI/analyser/scorer/browser/external call; no WAL/SHM/journal sidecar remained.
 
 **The boundary part 2 was built to — a review should hold it to exactly this:**
 
@@ -229,8 +242,11 @@ Sequence already completed for part 1 — do not repeat or reorder:
     **passed offline validation**, exit 0 (checkpoint 2); the bundle-backed **dry run** produced
     WOULD_INSERT 1 / REVIEW 8 / UNAVAILABLE 1 with **zero database access** (checkpoint 3A); and the
     **database backup** was taken and verified outside the repository (3B preflight).
-13. **The only remaining operational checkpoint is the separately approved one-ad LIVE INGESTION**
-    (checkpoint 3B) — **unapproved and never executed**. ← **immediate action**
+13. ~~The only remaining operational checkpoint is the separately approved one-ad LIVE INGESTION
+    (checkpoint 3B).~~ **DONE — 2026-07-23.** Approved and executed **exactly once**: INSERTED 1,
+    REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0; one atomic `Ad` + `AdAnalysis` insert for
+    `3831676167136939`; post-run read-only verification and backup/bundle checksum re-verification all
+    passed (§18). **All Phase 1 operational checkpoints are now complete.**
 
 ### 0.4b Do-not-repeat
 
@@ -400,14 +416,15 @@ Two permanent policies:
 | Application | Local-first Next.js 14 (App Router) |
 | Database | Prisma ORM over SQLite (`prisma/dev.db`, local) |
 | Collection policy | Browser-first canonical; Meta API diagnostic only |
-| Canonical workflow ends at | An opt-in **checksummed schema-v3 bundle** that ingestion consumes. **Never executed against a real paid preview or a real database** |
-| Ingestion path | **Bundle-backed**, with **no route to Anthropic, Vision or scoring recomputation**. Never run live |
+| Canonical workflow ends at | An opt-in **checksummed schema-v3 bundle** that ingestion consumes. **Exercised end to end on 2026-07-23**: a real paid-preview bundle drove one approved live database ingestion (checkpoint 3B) |
+| Ingestion path | **Bundle-backed**, with **no route to Anthropic, Vision or scoring recomputation**. Run live **once** (checkpoint 3B, 2026-07-23): one atomic `Ad` + `AdAnalysis` insert for `3831676167136939` |
 
 **Working tree:** tracked files clean; `main` level with `origin/main` at `d060a69`. The known protected
 untracked paths remain present and untouched (`AGENTS.md`, `dir`, `findstr`, `git`,
 `scripts/_orig_check.ts`).
 
-Phase 1 parts 1 and 2 are both committed, pushed and frozen. **Phase 1 itself is NOT complete** — see §3.
+Phase 1 parts 1 and 2 are both committed, pushed and frozen, and **all Phase 1 operational checkpoints
+(1, 2, 3A, 3B preflight and 3B) are COMPLETE** — see §3 and §18.
 
 ---
 
@@ -432,11 +449,12 @@ frozen, and the repeat-charge path is gone:
 - **LOW visual confidence routes the row to REVIEW and makes it unwritable.** Visual confidence is
   **bundled and operationally enforced**, but is **not separately persisted as its own Prisma field**.
 
-**The remaining operational gap is not architectural, and it is now a single item.** A real schema-v3
-bundle **has** been produced by an approved paid preview, validated offline, and carried through a
-zero-database dry run, with the database backed up (checkpoints 1, 2, 3A and the 3B preflight — §18).
-What remains is that **no approved live database ingestion has been executed** — a separately approved
-checkpoint, and the last one in Phase 1.
+**The operational gap is now closed.** A real schema-v3 bundle was produced by an approved paid preview,
+validated offline, and carried through a zero-database dry run, with the database backed up (checkpoints
+1, 2, 3A and the 3B preflight — §18). On 2026-07-23 the **approved one-ad live ingestion (checkpoint 3B)
+ran exactly once** and inserted `3831676167136939` (one atomic `Ad` + `AdAnalysis`; INSERTED 1, REVIEW 8,
+UNAVAILABLE 1, WRITE_ERROR 0), with post-run verification and backup/bundle checksum re-verification all
+passing. **All Phase 1 operational checkpoints are complete.**
 
 **What is partial.** Competitor management (view/edit Meta config only), browser ingestion (writes
 `Ad` + `AdAnalysis` but no run boundary), the review queue (Meta API only), the
@@ -445,11 +463,12 @@ workflows (discovery → preview only).
 
 **The three largest structural gaps:**
 
-1. **No reusable analysis bundle produced by a REAL paid preview, and no approved live ingestion run.**
-   The architecture is committed, pushed and frozen (parts 1 and 2): preview can save a
+1. ~~No reusable analysis bundle produced by a REAL paid preview, and no approved live ingestion run.~~
+   **CLOSED.** The architecture is committed, pushed and frozen (parts 1 and 2): preview can save a
    checksummed schema-v3 bundle carrying visual confidence and the complete model output, and ingestion
-   consumes it with no Anthropic call. What does **not** yet exist is a bundle produced by a real paid
-   preview, and any executed live database ingestion — both separately approved future checkpoints.
+   consumes it with no Anthropic call. A real paid-preview bundle now exists (checkpoint 1), and the
+   approved live database ingestion ran once (checkpoint 3B, 2026-07-23 — §18). This is no longer a gap;
+   the remaining structural gaps below (Phases 2–3) are unaffected.
 2. **No browser review and exception workflow.** The existing queue handles only Meta-API `PENDING`
    records. Browser `NEEDS_REVIEW`, `UNAVAILABLE`, low visual confidence and asset/copy mismatch are
    not persisted or reviewable.
@@ -728,21 +747,24 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
   `scripts/ingest-browser-collected-ads.ts`** with an injected database boundary and no AI/scorer/browser
   route at all, a bundle-declared-only sidecar binding, a lazy database factory, and benchmark validation
   against the shared pure contract. 171 tracked tests, including executable scorer→validator parity.
-- **Work remaining before Phase 1 is complete:**
+- **Work remaining before Phase 1 is complete:** none — the operational sequence is finished.
   1. ~~Part 2 must be reviewed, verified, committed and pushed.~~ **DONE** — `d060a69`.
   2. ~~No bundle produced by a real paid preview exists yet.~~ **DONE** — an approved paid preview
      produced the **first real schema-v3 bundle** for `3831676167136939` (checkpoint 1); it passed
      offline validation (checkpoint 2), a zero-database dry run (checkpoint 3A) and the backup preflight
      (3B preflight). See §18.
-  3. **Live ingestion has never been run against the database — the only remaining item.** Bundle-backed
-     and insert-only now, but unproven and **unapproved**.
+  3. ~~Live ingestion has never been run against the database — the only remaining item.~~ **DONE —
+     checkpoint 3B, 2026-07-23.** Approved and executed **exactly once**: INSERTED 1, REVIEW 8,
+     UNAVAILABLE 1, WRITE_ERROR 0; one atomic `Ad` + `AdAnalysis` insert for `3831676167136939`; post-run
+     verification and backup/bundle checksum re-verification all passed. See §18.
 - **Dependencies:** existing planner/parser and exact-ID filter (both complete).
 - **Completion criteria:** preview can explicitly save a validated result ✅; a matching valid bundle causes
   **zero** Anthropic calls ✅ (planner, proven by tracked import-boundary test); stale/mismatched bundles and
   row-level drift fail closed ✅; exact selected ad IDs recorded ✅; deterministic scores and visual
   confidence preserved ✅; **the real ingestion path consumes the bundle ✅ (part 2 — implemented,
-  committed and pushed as `d060a69`, but never exercised against a real paid preview or a real database)**. Phase 1 still cannot be called complete until part 2
-  is reviewed, committed and pushed, and a real v3 paid-preview bundle exists.
+  committed and pushed as `d060a69`, and exercised end to end on 2026-07-23: a real paid-preview bundle
+  drove one approved live database ingestion — checkpoint 3B, §18)**. **All completion criteria and
+  operational checkpoints are met; Phase 1 operational work is complete.**
 - **Validation:** `npm run test:browser-bundle` (153 passing), `npx tsc --noEmit --incremental false`,
   `git diff --check`. The no-spend preflights were last exercised before the final correction (§0.6).
 - **Deferred:** all paid quality tuning; schema changes.
@@ -805,20 +827,23 @@ Shortest non-duplicative sequence to complete local v1. Phases already complete 
 
 ## 12. Active phase
 
-> ### ACTIVE: **Phase 1 — Reusable analysis handoff** · **part 1 DONE (frozen), part 2 IMPLEMENTED but
-> committed and pushed as `d060a69` — five Codex reviews, five corrections, coordinator-verified**
+> ### Phase 1 — Reusable analysis handoff · **COMPLETE (operational)** — part 1 DONE (frozen), part 2
+> committed and pushed as `d060a69`, and all operational checkpoints (1, 2, 3A, 3B preflight, 3B) done.
+> **Next active work is Phase 2 (§11).**
 
-**Phase 1 is ACTIVE and partial.** Part 1 — the bundle, validator, planner and 153 tracked tests — is
-reviewed (Codex PASS), committed (`3cedf83`), pushed and frozen (§14). Part 2 — schema v3 and
-bundle-backed ingestion, 171 further tracked tests — is implemented locally. Phase 1 is **not** complete:
+**Phase 1's production code and operational checkpoints are COMPLETE.** Part 1 — the bundle, validator,
+planner and 153 tracked tests — is reviewed (Codex PASS), committed (`3cedf83`), pushed and frozen (§14).
+Part 2 — schema v3 and bundle-backed ingestion, 171 further tracked tests — is committed and pushed as
+`d060a69` and frozen (§14). The operational sequence is finished:
 
 1. ~~Part 2 is uncommitted and awaiting verification.~~ **DONE** — committed and pushed as `d060a69`;
    its safeguards are frozen (§14).
 2. ~~No reusable bundle from a real paid preview exists.~~ **DONE** — checkpoint 1 produced the first
    real schema-v3 bundle, checkpoint 2 validated it, checkpoint 3A's dry run passed with zero database
    access, and the 3B preflight backup was verified (§18).
-3. **Live ingestion has never run against the database — the only remaining item.** It is bundle-backed
-   and insert-only now, but unproven and **unapproved**.
+3. ~~Live ingestion has never run against the database — the only remaining item.~~ **DONE — checkpoint
+   3B, 2026-07-23.** The approved one-ad live ingestion ran **exactly once**: INSERTED 1, REVIEW 8,
+   UNAVAILABLE 1, WRITE_ERROR 0; one atomic `Ad` + `AdAnalysis` insert for `3831676167136939` (§18).
 
 Browser collection and Vision prompt quality are **frozen** unless a concrete regression blocks
 implementation.
@@ -840,8 +865,9 @@ implementation.
 ## 13. Next exact task
 
 > **DELIVERED (part 2) — implemented 2026-07-17, corrected across five Codex NEEDS CHANGES rounds,
-> committed and pushed as `d060a69`. §0.4 holds the immediate action: the separately approved one-ad
-> live ingestion (checkpoint 3B).** The spec below is what was built to, retained for reference.
+> committed and pushed as `d060a69`. The approved one-ad live ingestion (checkpoint 3B) then RAN ONCE on
+> 2026-07-23 (§18), so no Phase 1 operational task is outstanding — the next work is Phase 2 (§11).** The
+> spec below is what was built to, retained for reference.
 >
 > **Integrate the validated bundle into the real ingestion path without another AI call.**
 > Make `scripts/ingest-browser-collected-ads.ts` consume a validated bundle instead of calling
@@ -1060,7 +1086,7 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | `6564b41` | Repo | `npx tsc --noEmit` | PASS | **Repo-verifiable** |
 | `6564b41` | Repo | `git diff --check` | PASS | **Repo-verifiable** |
 | — | AI quality | Paid Vision output quality / run counts | **Not yet verified** | Generated preview output is untracked and not reproducible from this repo |
-| — | Ingestion | Live browser ingestion against the database | **Not yet verified** | Never run. As of 2026-07-17 this is **checkpoint 3B** — staged and awaiting explicit approval; see the checkpoint rows below |
+| 2026-07-23 | Ingestion | Live browser ingestion against the database | **VERIFIED — ran once** | **Checkpoint 3B** executed 2026-07-23: INSERTED 1, REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0; one atomic `Ad` + `AdAnalysis` insert for `3831676167136939`; see the dedicated Checkpoint 3B row below |
 | — | Ingestion | Card ingestion inside one atomic run | **Not yet verified** | Not implemented |
 | — | Review | Browser review states | **Not yet verified** | Do not exist |
 | — | Scheduler | Scheduled execution | **Not yet verified** | Cron disabled |
@@ -1081,7 +1107,7 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | 2026-07-17 | **Checkpoint 2** | **Offline validation** of that bundle — `npm run browser:bundle:validate -- <path>`, full file checks (no `--no-file-checks`) | **PASS — exit code 0** | `VALID — STRUCTURE, SOURCE AND ASSET INTEGRITY VERIFIED`. Schema **v3**. Source CSV and verified-meta sidecar both bound by declared path **and** SHA-256; row identity verified field by field; asset manifest = 4 `frame-NN` files with per-file hash and byte-size checks; VIDEO frame-cardinality rule satisfied (4 of a 4-frame limit); `analysis_result` and `benchmark_result` complete, so **persistence completeness passed**; sensitive-content and forbidden-key safeguards passed. **No external, database, Prisma, browser or paid action occurred** |
 | 2026-07-17 | **Checkpoint 3A** | **Bundle-backed ingestion DRY RUN** — `npm run browser:ingest` with `BROWSER_ADS_FILE` + `BROWSER_ANALYSIS_BUNDLE`, all three live-write flags deliberately unset | **PASS — exit code 0; WOULD_INSERT 1, REVIEW 8, UNAVAILABLE 1 (all 10 rows accounted for)** | Target `3831676167136939` became `WOULD_INSERT`. The 8 REVIEW rows are ads the bundle does not cover — correctly held, never auto-analysed. **Database-factory calls 0, database reads 0, database writes 0** (the factory is passed as `null` when `liveWrite` is false, so no Prisma client is constructed); `prisma/dev.db` mtime unchanged. **Duplicate status was NOT checked** — a dry run never contacts the database, so this row is **not** known to be new. **No AI, scorer, analyser, browser or external call occurred.** Bundle and declared source checksums unchanged after the run |
 | 2026-07-17 | **Checkpoint 3B preflight** | **Database backup**, performed manually by the operator in Windows Command Prompt using the approved outside-repository procedure | **VERIFIED** | **Operator-reported.** Source `prisma/dev.db`, 700,416 bytes, SHA-256 `abde54bc1a7bd93d7810d40b3946596512028b1d2aacceb57250beec83a6aa98`, copied to `CherieTCTCT-phase1-checkpoint3b-preflight-dev.db` on the Desktop with the **same size and same SHA-256**, and an `FC` byte comparison reporting **no differences encountered**. **No WAL, SHM or journal sidecar was present immediately before copying**, so the single-file copy is complete and consistent. The procedure refuses overwrite and writes outside the repository by design |
-| — | **Checkpoint 3B** | **Live ingestion against the database** | **NOT PERFORMED — awaiting separate explicit approval** | Everything is staged for it: a real bundle, offline validation, a clean dry run and a verified backup. See §0.4 for the required shape — duplicate read first, skip-not-update if present, otherwise one atomic `Ad` + `AdAnalysis` insert, then read-only verification and backup re-checksum |
+| 2026-07-23 | **Checkpoint 3B** | **Live ingestion against the database** — the approved one-ad run for `3831676167136939`, all three live-write flags set, executed **exactly once** | **DONE — INSERTED 1, REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0** | The duplicate read ran first; the ad did not exist, so **one atomic `Ad` + `AdAnalysis`** was inserted and nothing else. No existing record updated or deleted; **no AI/analyser/scorer/browser/external call**. Post-run read-only query confirmed **adCount 1, analysisCount 1, `adSource` browser_collected, `creativeSource` ASSET, `capturedAssetType` VIDEO_FRAME, headline null, description null**. Database grew **700,416 → 708,608 bytes**, post-run SHA-256 `336e0f6d805e59c27b25b8a3980e9bb8783f712cc70ec91158e7811bb00b2d09`. External backup **unchanged** (700,416 bytes, SHA-256 `abde54bc1a7bd93d7810d40b3946596512028b1d2aacceb57250beec83a6aa98`); bundle **unchanged** (15,127 bytes, SHA-256 `413185a1e6a1d5fcfcf6ab6b6b9cfea1c78546f65292bad7093cd7222b7f3fe6`). No WAL/SHM/journal sidecar remained. No repository file changed; nothing staged, committed or pushed by the run |
 | 2026-07-17, at the tree committed as `3cedf83` | Phase 1 part 1 | **Final minimal independent Codex read-only re-review** of the three focused-re-review corrections: ASSET empty-path bypass, temp-cleanup reporting, final checksum/byte-size verification | **PASS** | **Operator-reported** (Codex runs outside this repo, so the verdict itself is not repo-verifiable — the tree it reviewed is). Confirmed: 153 tests passed, 0 failed, 0 skipped; TypeScript passed; `git diff --check` passed; ASSET empty-path bypass resolved; temp cleanup correctly treated as best-effort; final checksum and byte-size verification fails closed; zero-AI / zero-browser / zero-database boundary passed. **Phase 1 part 1 declared safe to commit** — the commit followed this verdict |
 | — | Tests | Automated tests outside the Phase 1 bundle handoff | **Missing** | Discovery, capture, parser, scoring, ingestion and UI have no tracked spec files |
 
@@ -1113,6 +1139,7 @@ Evidence classes: **repo-verifiable** · **manually documented** · **synthetic 
 | 2026-07-17 | `d060a69` | **Phase 1 part 2 committed, pushed and frozen.** After five Codex reviews (each NEEDS CHANGES, each closed by a correction pass) the coordinator verified the final documentation correction and closed the review gate under the **lean workflow**. Ten files staged by exact name — `docs/PROJECT_STATUS.md`, `lib/analysis/benchmarkContract.ts`, `lib/analysis/browserAnalysisBundle.ts`, `lib/analysis/browserIngestBundleMapping.ts`, `lib/analysis/competitorScoring.ts`, `scripts/ingest-browser-collected-ads.ts`, `scripts/preview-browser-collected-ads.ts`, `tests/browser-analysis-bundle.test.ts`, `tests/browser-ingest-from-bundle.test.ts`, `package.json` — 3,963 insertions / 1,157 deletions; the protected untracked paths were never staged. Pushed `ed71513..d060a69` (fast-forward, no force); `origin/main` = `d060a69`, local `main` verified level, tracked tree clean. **§14: the schema-v3 and bundle-backed-ingestion safeguards are now FROZEN** — with an explicit caveat recorded there that **no formal Codex PASS was ever issued for Part 2**; the gate was closed by coordinator verification, not by a PASS, which is a deliberate operator-approved variation on the rule Part 1 followed. This tracker pass reconciled every live section that still said Part 2 was uncommitted, unpushed or awaiting verification: §0 handover, §0.1, §0.2, §0.3 blocked table, §0.4 next task, §0.5a, §2 baseline (now `d060a69`, working tree clean), §3 executive workflow, §4, §5, §6, §7, §10, §11, §12, §13, §14 and §18. **Phase 1 remains ACTIVE and partial**: no schema-v3 bundle has been produced by a real paid preview, and no approved live ingestion run has occurred — both separately approved checkpoints. No production or test file changed in this pass. | Both parts of Phase 1 are on `origin/main` and frozen; the tracker matches the remote | **A separately approved paid preview producing the first real schema-v3 bundle**, then an approved live ingestion run (checkpoint A2) |
 | 2026-07-17 | (uncommitted) | **Operational checkpoints 1, 2, 3A and the 3B preflight recorded; `CLAUDE.md` refreshed; a malformed `.gitignore` rule fixed.** Documentation and ignore rules only — **no production code or test changed**. **(1) Checkpoint 1:** the operator ran an approved one-ad paid preview from an authorised shell, producing the **first real schema-v3 bundle** for `3831676167136939` (VIDEO, ASSET, visual confidence HIGH; SUCCESS 1 / REVIEW 0 / SKIPPED 0 / ERROR 0), stored **outside the repository**, 15,127 bytes. Its sidecar row is REVIEW, so headline and description stay blank. **(2) Checkpoint 2:** the tracked standalone validator returned **exit 0** with full file checks — structure, source and sidecar checksum binding, row identity, 4-frame asset manifest, VIDEO cardinality, persistence completeness and the sensitive-content guards all passed. **(3) Checkpoint 3A:** the bundle-backed **dry run** returned exit 0 with **WOULD_INSERT 1, REVIEW 8, UNAVAILABLE 1** and **zero database-factory calls, reads and writes**; duplicate status was **not** checked, so the row is not known to be new. **(4) Checkpoint 3B preflight:** the operator backed up `prisma/dev.db` (700,416 bytes) outside the repository using the approved procedure — same size, same SHA-256, `FC` reporting no differences, and no WAL/SHM/journal sidecar present before copying. **§0.3, §0.4 and §18 updated**; §0.4's next task is now the **one-ad live ingestion**, with its required shape recorded in advance (duplicate read first, skip-not-update, one atomic insert, post-run read-only verification, backup re-checksum). **(5) `CLAUDE.md`** refreshed: its milestone section still described Phase 0 as current, so a fresh session had no idea Phase 1 existed. It now records both Phase 1 parts committed, pushed and frozen at baseline `d80ab94`, the completed checkpoints, the **lean workflow**, and the operational rule that **Claude Code must never assume `ANTHROPIC_API_KEY` is available** — paid previews are operator-run, and the key is never printed or inspected. **(6) `.gitignore` line 10** was malformed: `*.db.backup*data/creative-assets/` concatenated two patterns onto one line, so the generic `*.db.backup*` guard was **dead** (verified: `foo.db.backup-x` was not ignored). Split into a valid `*.db.backup*`; `/data/creative-assets/` already exists separately and was left alone. **No broad `*.json` or `*-v3.json` rule was added** — real bundles stay outside the repository until a dedicated safe directory and naming rule is approved. **(7) Stale current-state references reconciled** (found in a read-only review of this same diff, before it was committed): three live spots still named the paid preview as the upcoming task even though checkpoint 1 was done — §0.2's "immediate action" line, §0.1's canonical-sequence steps 10 and 12, and a superseded paragraph at the end of §0.4. All three now state that checkpoints 1, 2, 3A and the 3B preflight are complete and that **the sole next action is the unapproved one-ad live ingestion**. Historical review history is unchanged; only its current-state interpretation was corrected. **Live ingestion remains unapproved. No database, Prisma, preview, validator, planner, ingestion, browser or external action ran in this pass.** | A fresh session now learns the real state from `CLAUDE.md` and the tracker; the backup guard actually works; no live section contradicts another | **Checkpoint 3B — separately approved one-ad live ingestion** |
 | 2026-07-17 | (docs-only, this commit) | **Phase 1 part 1 push finalisation.** `3cedf83` (implementation) and `e208cbd` (the review record) were pushed to `origin/main` — `c69866a..e208cbd`, fast-forward, no force. Verified after the push: `origin/main` = `e208cbd`, both commits present in remote history by ancestry, local `main` level with `origin/main`, tracked files clean. Tracker finalised accordingly: every live-status section now states that Part 1 is reviewed, committed **and pushed**, with **nothing pending** — no review, no commit, no push. §14: the part 1 safeguards **moved from provisional to FROZEN**, the full condition now being met (Codex PASS ✅ · committed ✅ · pushed ✅ · 153 tests ✅) — bundle schema v2; discriminated SUCCESS/REVIEW/SKIPPED/ERROR rows; honest failed-row and selected-ID accounting; strict source/sidecar/asset/per-row-identity validation; asset hash, byte-size, containment and VIDEO frame-limit checks; the pure allowlist and identity helpers; the structural zero-AI/zero-browser/zero-database boundary; the no-write planner; the atomic temp-file writer with fail-closed final verification; and the 153-test tracked suite. The two low-severity preview **presentation** items stay deferred and explicitly outside the frozen-complete list (§10) — they are display-only and are not grounds to reopen part 1. §0.4/§13 set the next exact task: **integrate the validated bundle into the real browser-ingestion path so ingestion reuses approved analysis with no second Anthropic call**, bounded by — no second AI analysis; validate bundle and source identity before planning writes; deduplicate before any optional external work; preserve per-row REVIEW/ERROR isolation; no DB write as part of tracker work; and a **separate explicit instruction required** before that implementation begins. | Phase 1 part 1 is complete, verified on the remote, and frozen against rework | **Phase 1 remains ACTIVE and partial** (part 2 not started): `ingest-browser-collected-ads.ts` is not bundle-backed and still calls `resolveCreativeContext()` at line 695 before dedup at line 756, so it can repeat paid AI; and no bundle from a real paid preview exists yet |
+| 2026-07-23 | (uncommitted, docs-only) | **Checkpoint 3B — approved one-ad live ingestion executed and recorded.** The operator approved and ran the bundle-backed live ingestion **exactly once** for ad `3831676167136939`, with all three live-write flags set (`BROWSER_DRY_RUN=false`, `BROWSER_INGEST_WRITE=true`, `BROWSER_INGEST_CONFIRM_DB_WRITES=I_UNDERSTAND`) against the validated schema-v3 bundle and the Castlery source CSV. **Result: INSERTED 1, REVIEW 8, UNAVAILABLE 1, WRITE_ERROR 0.** The duplicate read ran first; the ad did not exist, so **one `Ad` + one `AdAnalysis` were inserted atomically** and nothing else. No existing record was updated or deleted; **no AI, analyser, scorer, browser or external call occurred.** Post-run read-only verification confirmed adCount 1, analysisCount 1, `adSource` browser_collected, `creativeSource` ASSET, `capturedAssetType` VIDEO_FRAME, headline null, description null. The database grew **700,416 → 708,608 bytes**, post-run SHA-256 `336e0f6d805e59c27b25b8a3980e9bb8783f712cc70ec91158e7811bb00b2d09`. The external backup remained unchanged (700,416 bytes, SHA-256 `abde54bc1a7bd93d7810d40b3946596512028b1d2aacceb57250beec83a6aa98`) and the bundle remained unchanged (15,127 bytes, SHA-256 `413185a1e6a1d5fcfcf6ab6b6b9cfea1c78546f65292bad7093cd7222b7f3fe6`). No WAL/SHM/journal sidecar remained. **This documentation pass changed no production code or test** and touched no protected untracked file. Reconciled every live-status section that still called Phase 1 active/partial or checkpoint 3B unapproved: §0 handover header, §0.1, §0.2, §0.3 blocked table, §0.4 next task (and its step-13 sequence), §2 baseline, §3 executive status and structural gaps, §11 Phase 1 work-remaining and completion criteria, §12 active phase, §18 validation log; and `CLAUDE.md`'s current-state paragraph. | **All Phase 1 operational checkpoints (1, 2, 3A, 3B preflight, 3B) are COMPLETE.** The end-to-end canonical workflow — paid-preview bundle → validated ingestion → one atomic DB write — is proven | Phase 1 operational work is complete. **Next: Phase 2 — browser review and exception state (§11).** No further database action is authorised without a new explicit approval |
 
 ---
 
