@@ -13,6 +13,7 @@
     "test:browser-bundle": "tsx --test tests/browser-analysis-bundle.test.ts",
     "test:browser-ingestion-bundle": "tsx --test tests/browser-ingest-from-bundle.test.ts",
     "test:review-state": "tsx --test tests/review-state.test.ts",
+    "test:review-candidate-persistence": "tsx --test tests/review-candidate-persistence.test.ts",
     "meta:dry-run": "tsx scripts/dry-run-meta-fetch.ts",
     "meta:ingest": "tsx scripts/ingest-meta-ads.ts",
     "meta:verify": "tsx scripts/verify-meta-ingestion.ts",

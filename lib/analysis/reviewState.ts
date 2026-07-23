@@ -66,6 +66,7 @@ export const EXCEPTION_REASONS = [
   'NEEDS_REVIEW',          // technical/uncertain capture outcome (CSV `NEEDS_REVIEW` today)
   'LOW_VISUAL_CONFIDENCE', // VIDEO visual confidence resolved to LOW (bundle-carried today)
   'ASSET_COPY_MISMATCH',   // captured asset and scoring copy disagree (detector is future work)
+  'COMPETITOR_CONFLICT',   // a second acquisition of the same ad id reported a different competitor
   'MISSING_ANALYSIS',      // no complete, validated analysis exists for this candidate
   'UNAVAILABLE',           // positive evidence the ad ended / is not in the library
 ] as const;
@@ -87,13 +88,37 @@ export type ExceptionReason = (typeof EXCEPTION_REASONS)[number];
 export const TERMINAL_EXCEPTIONS = ['UNAVAILABLE'] as const;
 
 /**
- * HOLDING exceptions: reviewable holds that CAN be resolved by an explicit ACCEPT
- * or EXCLUDE. (MISSING_ANALYSIS is a hold that additionally can never satisfy
- * ingestion eligibility until complete analysis exists — enforced separately by the
- * eligibility gate, not by blocking the ACCEPT decision itself.)
+ * RESOLUTION-REQUIRED exceptions: not terminal, but NOT overridable by a bare ACCEPT
+ * while the exception is still present. The exception itself must be removed first by
+ * a separately verified process, and removal does NOT accept the candidate — it
+ * returns to an undecided state that still needs an explicit ACCEPT. This is stricter
+ * than the review-overridable holds below (which an ACCEPT decision may override in
+ * place) and weaker than TERMINAL (which can never be accepted at all).
+ *
+ *   - COMPETITOR_CONFLICT is resolved once a human confirms which competitor the ad
+ *     belongs to.
+ *   - MISSING_ANALYSIS may only be resolved once a COMPLETE promotion payload has
+ *     validated successfully (see reviewCandidatePersistence.ts). Until then ACCEPT is
+ *     blocked at the decision boundary AND eligibility is independently blocked by the
+ *     payload-completeness gate — two independent guards.
+ */
+export const RESOLUTION_REQUIRED_EXCEPTIONS = ['COMPETITOR_CONFLICT', 'MISSING_ANALYSIS'] as const;
+
+/**
+ * REVIEW-OVERRIDABLE holding exceptions: reviewable holds that an explicit ACCEPT may
+ * override in place.
+ */
+export const REVIEW_OVERRIDABLE_EXCEPTIONS = [
+  'NEEDS_REVIEW', 'LOW_VISUAL_CONFIDENCE', 'ASSET_COPY_MISMATCH',
+] as const;
+
+/**
+ * Every exception that holds a candidate for review, in one list, for queue/UI use.
+ * The three categories above (terminal / resolution-required / review-overridable)
+ * partition this set exactly.
  */
 export const HOLDING_EXCEPTIONS = [
-  'NEEDS_REVIEW', 'LOW_VISUAL_CONFIDENCE', 'ASSET_COPY_MISMATCH', 'MISSING_ANALYSIS',
+  ...REVIEW_OVERRIDABLE_EXCEPTIONS, ...RESOLUTION_REQUIRED_EXCEPTIONS,
 ] as const;
 
 // ─── The candidate value ──────────────────────────────────────────────────────
@@ -148,6 +173,14 @@ export function isTerminalException(reason: ExceptionReason): boolean {
 
 export function hasTerminalException(candidate: ReviewCandidate): boolean {
   return candidate.exceptions.some(isTerminalException);
+}
+
+export function isResolutionRequiredException(reason: ExceptionReason): boolean {
+  return (RESOLUTION_REQUIRED_EXCEPTIONS as readonly ExceptionReason[]).includes(reason);
+}
+
+export function hasResolutionRequiredException(candidate: ReviewCandidate): boolean {
+  return candidate.exceptions.some(isResolutionRequiredException);
 }
 
 function isUndecided(state: ReviewState): boolean {
@@ -228,6 +261,13 @@ export function applyDecision(
       error: 'ILLEGAL_TRANSITION: cannot ACCEPT a candidate carrying a terminal exception (UNAVAILABLE)',
     };
   }
+  if (decision === 'ACCEPT' && hasResolutionRequiredException(candidate)) {
+    const present = candidate.exceptions.filter(isResolutionRequiredException).join(', ');
+    return {
+      ok: false,
+      error: `ILLEGAL_TRANSITION: cannot ACCEPT while a resolution-required exception (${present}) is still present — resolve it first`,
+    };
+  }
   const nextState: ReviewState = decision === 'ACCEPT' ? 'ACCEPTED' : 'EXCLUDED';
   return {
     ok: true,
@@ -274,6 +314,45 @@ export function addNote(candidate: ReviewCandidate, note: string | null): Review
   return { ...candidate, note };
 }
 
+/** Exception reasons that `resolveException` is permitted to remove (never terminal). */
+export type ResolvableExceptionReason = Exclude<ExceptionReason, (typeof TERMINAL_EXCEPTIONS)[number]>;
+
+/**
+ * Remove one exception after a separately verified process has resolved it (e.g. a
+ * human confirms which competitor a COMPETITOR_CONFLICT ad belongs to). Removal is
+ * NOT a decision: it never accepts or excludes. Legal only from an undecided state,
+ * so a decided candidate cannot be silently altered; the recomputed state stays
+ * undecided (HELD if any exception remains, else PENDING) and still needs an explicit
+ * ACCEPT. Removing an exception the candidate does not carry is rejected.
+ *
+ * A TERMINAL exception (UNAVAILABLE) can NEVER be resolved — resolving it would let a
+ * non-ingestible ad reach ACCEPTED via resolve→ACCEPT. This is a hard runtime guard
+ * (not merely a TypeScript narrowing) because a caller can bypass the type system; it
+ * fires BEFORE any state is computed, so the input candidate is never altered. The
+ * type is also narrowed to `ResolvableExceptionReason` for compile-time safety.
+ */
+export function resolveException(candidate: ReviewCandidate, reason: ResolvableExceptionReason): TransitionResult {
+  if (isTerminalException(reason as ExceptionReason)) {
+    throw new Error(
+      `resolveException: a terminal exception (${reason}) can never be resolved — it is permanently non-acceptable and non-ingestible`,
+    );
+  }
+  if (!isUndecided(candidate.state)) {
+    return {
+      ok: false,
+      error: `ILLEGAL_TRANSITION: exceptions can only be resolved on an undecided (PENDING/HELD) candidate; this one is ${candidate.state}`,
+    };
+  }
+  if (!candidate.exceptions.includes(reason)) {
+    return { ok: false, error: `ILLEGAL_TRANSITION: candidate does not carry the exception ${reason}` };
+  }
+  const remaining = candidate.exceptions.filter((x) => x !== reason);
+  return {
+    ok: true,
+    candidate: { ...candidate, exceptions: remaining, state: initialReviewState(remaining) },
+  };
+}
+
 // ─── Ingestion eligibility ────────────────────────────────────────────────────
 
 export type EligibilityResult = {
@@ -289,9 +368,10 @@ export type EligibilityResult = {
  *   1. state === 'ACCEPTED';
  *   2. an explicit ACCEPT decision is recorded;
  *   3. no terminal exception (UNAVAILABLE) is present;
- *   4. a complete analysis exists (guards MISSING_ANALYSIS).
+ *   4. no resolution-required exception (COMPETITOR_CONFLICT / MISSING_ANALYSIS) is present;
+ *   5. a complete analysis exists (guards MISSING_ANALYSIS).
  *
- * Checks 3 and 4 are redundant for candidates built only through this module's
+ * Checks 3–5 are redundant for candidates built only through this module's
  * transitions, but they are kept as defence in depth so a hand-constructed or
  * future-persisted candidate can never slip through.
  */
@@ -305,6 +385,10 @@ export function evaluateIngestionEligibility(candidate: ReviewCandidate): Eligib
   }
   if (hasTerminalException(candidate)) {
     blockers.push('a terminal exception (UNAVAILABLE) is present');
+  }
+  if (hasResolutionRequiredException(candidate)) {
+    const present = candidate.exceptions.filter(isResolutionRequiredException).join(', ');
+    blockers.push(`a resolution-required exception (${present}) is present`);
   }
   if (!candidate.hasCompleteAnalysis) {
     blockers.push('analysis is incomplete (MISSING_ANALYSIS)');

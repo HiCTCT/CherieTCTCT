@@ -14,11 +14,13 @@ import assert from 'node:assert/strict';
 import {
   REVIEW_SOURCES, REVIEW_STATES, REVIEW_DECISIONS, EXCEPTION_REASONS,
   TERMINAL_EXCEPTIONS, HOLDING_EXCEPTIONS,
+  RESOLUTION_REQUIRED_EXCEPTIONS, REVIEW_OVERRIDABLE_EXCEPTIONS,
   createCandidate, initialReviewState, applyDecision, reopenForReview, addNote,
-  evaluateIngestionEligibility, canProceedToIngestion, hasTerminalException,
+  resolveException, evaluateIngestionEligibility, canProceedToIngestion,
+  hasTerminalException, hasResolutionRequiredException,
 } from '../lib/analysis/reviewState';
 import type {
-  ReviewCandidate, ReviewSource, ExceptionReason,
+  ReviewCandidate, ReviewSource, ExceptionReason, ResolvableExceptionReason,
 } from '../lib/analysis/reviewState';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -61,15 +63,23 @@ test('taxonomy: constants are the agreed, non-overlapping sets', () => {
   assert.deepEqual([...REVIEW_STATES], ['PENDING', 'HELD', 'ACCEPTED', 'EXCLUDED']);
   assert.deepEqual([...REVIEW_DECISIONS], ['ACCEPT', 'EXCLUDE']);
   assert.deepEqual([...EXCEPTION_REASONS], [
-    'NEEDS_REVIEW', 'LOW_VISUAL_CONFIDENCE', 'ASSET_COPY_MISMATCH', 'MISSING_ANALYSIS', 'UNAVAILABLE',
+    'NEEDS_REVIEW', 'LOW_VISUAL_CONFIDENCE', 'ASSET_COPY_MISMATCH', 'COMPETITOR_CONFLICT',
+    'MISSING_ANALYSIS', 'UNAVAILABLE',
   ]);
-  // Terminal and holding partition the exception taxonomy with no overlap.
+  // The three categories partition the exception taxonomy exactly.
   const terminal = new Set<string>(TERMINAL_EXCEPTIONS);
-  const holding = new Set<string>(HOLDING_EXCEPTIONS);
+  const resolution = new Set<string>(RESOLUTION_REQUIRED_EXCEPTIONS);
+  const overridable = new Set<string>(REVIEW_OVERRIDABLE_EXCEPTIONS);
   for (const r of EXCEPTION_REASONS) {
-    assert.equal(terminal.has(r) !== holding.has(r), true, `${r} must be exactly one of terminal/holding`);
+    const inCount = [terminal.has(r), resolution.has(r), overridable.has(r)].filter(Boolean).length;
+    assert.equal(inCount, 1, `${r} must be in exactly one exception category`);
   }
   assert.deepEqual([...TERMINAL_EXCEPTIONS], ['UNAVAILABLE']);
+  assert.deepEqual([...RESOLUTION_REQUIRED_EXCEPTIONS], ['COMPETITOR_CONFLICT', 'MISSING_ANALYSIS']);
+  assert.deepEqual([...REVIEW_OVERRIDABLE_EXCEPTIONS], ['NEEDS_REVIEW', 'LOW_VISUAL_CONFIDENCE', 'ASSET_COPY_MISMATCH']);
+  assert.equal((REVIEW_OVERRIDABLE_EXCEPTIONS as readonly string[]).includes('MISSING_ANALYSIS'), false);
+  // HOLDING = review-overridable ∪ resolution-required (for queue/UI use).
+  assert.deepEqual([...HOLDING_EXCEPTIONS], [...REVIEW_OVERRIDABLE_EXCEPTIONS, ...RESOLUTION_REQUIRED_EXCEPTIONS]);
 });
 
 test('initial state: no exceptions → PENDING; any exception → HELD', () => {
@@ -159,28 +169,160 @@ test('ASSET_COPY_MISMATCH stays held until explicitly accepted or excluded', () 
   assert.equal(canProceedToIngestion(excluded), false);
 });
 
-// ─── MISSING_ANALYSIS ─────────────────────────────────────────────────────────
+// ─── COMPETITOR_CONFLICT ──────────────────────────────────────────────────────
 
-test('MISSING_ANALYSIS cannot be ingested even once ACCEPTED, until analysis is complete', () => {
-  // ACCEPT is a legal decision for a holding exception, but eligibility still fails
-  // because the analysis requirement is not satisfied.
-  const held = withException('MISSING_ANALYSIS');
-  assert.equal(held.hasCompleteAnalysis, false);
-  const accepted = ok(accept(held));
+test('COMPETITOR_CONFLICT starts HELD and is not terminal but is resolution-required', () => {
+  const held = withException('COMPETITOR_CONFLICT');
+  assert.equal(held.state, 'HELD');
+  assert.equal(hasTerminalException(held), false);          // not terminal like UNAVAILABLE
+  assert.equal(hasResolutionRequiredException(held), true); // but stricter than a plain hold
+  assert.equal(canProceedToIngestion(held), false);
+});
+
+test('COMPETITOR_CONFLICT: ACCEPT fails while the conflict remains; EXCLUDE stays legal', () => {
+  const held = withException('COMPETITOR_CONFLICT');
+  const res = accept(held);
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.error, /cannot ACCEPT while a resolution-required exception \(COMPETITOR_CONFLICT\)/);
+  // EXCLUDE remains available.
+  assert.equal(ok(exclude(held)).state, 'EXCLUDED');
+});
+
+test('COMPETITOR_CONFLICT: resolving the conflict does not accept, and still needs an explicit ACCEPT', () => {
+  const held = withException('COMPETITOR_CONFLICT');
+  const resolved = ok(resolveException(held, 'COMPETITOR_CONFLICT'));
+  // Removal is not a decision.
+  assert.equal(resolved.decision, null);
+  assert.equal(resolved.state, 'PENDING'); // no other exceptions remained
+  assert.equal(hasResolutionRequiredException(resolved), false);
+  assert.equal(canProceedToIngestion(resolved), false); // still needs ACCEPT
+
+  // Only now can it be accepted.
+  const accepted = ok(accept(resolved));
   assert.equal(accepted.state, 'ACCEPTED');
-  assert.equal(canProceedToIngestion(accepted), false);
-  assert.deepEqual(evaluateIngestionEligibility(accepted).blockers, [
-    'analysis is incomplete (MISSING_ANALYSIS)',
+  assert.equal(canProceedToIngestion(accepted), true);
+});
+
+test('COMPETITOR_CONFLICT: resolving leaves other exceptions in place (stays HELD)', () => {
+  const held = createCandidate({
+    source: 'browser_collected',
+    exceptions: ['COMPETITOR_CONFLICT', 'LOW_VISUAL_CONFIDENCE'],
+    hasCompleteAnalysis: true,
+  });
+  const resolved = ok(resolveException(held, 'COMPETITOR_CONFLICT'));
+  assert.equal(resolved.state, 'HELD'); // LOW_VISUAL_CONFIDENCE remains
+  assert.deepEqual([...resolved.exceptions], ['LOW_VISUAL_CONFIDENCE']);
+});
+
+test('COMPETITOR_CONFLICT: resolving a non-present or decided candidate is rejected', () => {
+  const notPresent = resolveException(clean(), 'COMPETITOR_CONFLICT');
+  assert.equal(notPresent.ok, false);
+  if (!notPresent.ok) assert.match(notPresent.error, /does not carry the exception COMPETITOR_CONFLICT/);
+
+  // A decided candidate cannot have exceptions silently resolved.
+  const decided = ok(exclude(withException('COMPETITOR_CONFLICT')));
+  const res = resolveException(decided, 'COMPETITOR_CONFLICT');
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.error, /only be resolved on an undecided/);
+});
+
+test('COMPETITOR_CONFLICT: eligibility rejects a hand-constructed ACCEPTED candidate still carrying it', () => {
+  const forced: ReviewCandidate = {
+    source: 'browser_collected', state: 'ACCEPTED', decision: 'ACCEPT',
+    exceptions: ['COMPETITOR_CONFLICT'], hasCompleteAnalysis: true,
+    reviewer: 'x', reviewedAt: null, note: null, candidateRef: null,
+  };
+  assert.equal(canProceedToIngestion(forced), false);
+  assert.deepEqual(evaluateIngestionEligibility(forced).blockers, [
+    'a resolution-required exception (COMPETITOR_CONFLICT) is present',
   ]);
 });
 
-test('once the analysis requirement is satisfied, an accepted candidate is eligible', () => {
-  // Same shape, but the repository requirement for a complete analysis is met.
+test('COMPETITOR_CONFLICT behaves identically for meta_api and browser_collected', () => {
+  const meta = withException('COMPETITOR_CONFLICT', 'meta_api');
+  const browser = withException('COMPETITOR_CONFLICT', 'browser_collected');
+  assert.equal(meta.state, browser.state);
+  assert.equal(hasResolutionRequiredException(meta), hasResolutionRequiredException(browser));
+  // ACCEPT is blocked for both.
+  assert.equal(accept(meta).ok, accept(browser).ok);
+  // After identical resolution, both become acceptable identically.
+  const rm = ok(resolveException(meta, 'COMPETITOR_CONFLICT'));
+  const rb = ok(resolveException(browser, 'COMPETITOR_CONFLICT'));
+  assert.equal(canProceedToIngestion(ok(accept(rm))), canProceedToIngestion(ok(accept(rb))));
+});
+
+// ─── MISSING_ANALYSIS (resolution-required) ───────────────────────────────────
+
+test('MISSING_ANALYSIS begins HELD and is resolution-required, not review-overridable', () => {
+  const held = withException('MISSING_ANALYSIS');
+  assert.equal(held.state, 'HELD');
+  assert.equal(hasResolutionRequiredException(held), true);
+  assert.equal(hasTerminalException(held), false);
+  assert.equal(canProceedToIngestion(held), false);
+});
+
+test('MISSING_ANALYSIS blocks ACCEPT while the exception remains', () => {
+  const held = withException('MISSING_ANALYSIS');
+  const res = accept(held);
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.error, /cannot ACCEPT while a resolution-required exception/);
+});
+
+test('MISSING_ANALYSIS allows EXCLUDE', () => {
+  const excluded = ok(exclude(withException('MISSING_ANALYSIS')));
+  assert.equal(excluded.state, 'EXCLUDED');
+  assert.equal(canProceedToIngestion(excluded), false);
+});
+
+test('resolving MISSING_ANALYSIS does not accept the candidate', () => {
+  const held = withException('MISSING_ANALYSIS');
+  const resolved = ok(resolveException(held, 'MISSING_ANALYSIS'));
+  assert.equal(resolved.decision, null);        // not a decision
+  assert.equal(resolved.reviewer, null);        // no attribution created
+  assert.equal(resolved.reviewedAt, null);
+  assert.equal(resolved.state, 'PENDING');      // undecided (no other exceptions)
+  assert.deepEqual([...resolved.exceptions], []); // only MISSING_ANALYSIS removed
+  assert.equal(canProceedToIngestion(resolved), false); // still needs an explicit ACCEPT
+
+  // A later explicit ACCEPT is required and now succeeds.
+  const accepted = ok(accept(resolved));
+  assert.equal(accepted.state, 'ACCEPTED');
+});
+
+test('resolving MISSING_ANALYSIS leaves other exceptions in place (stays HELD)', () => {
   const held = createCandidate({
-    source: 'browser_collected', exceptions: ['MISSING_ANALYSIS'], hasCompleteAnalysis: true,
+    source: 'browser_collected',
+    exceptions: ['MISSING_ANALYSIS', 'NEEDS_REVIEW'],
+    hasCompleteAnalysis: false,
   });
-  const accepted = ok(accept(held));
-  assert.equal(canProceedToIngestion(accepted), true);
+  const resolved = ok(resolveException(held, 'MISSING_ANALYSIS'));
+  assert.equal(resolved.state, 'HELD');
+  assert.deepEqual([...resolved.exceptions], ['NEEDS_REVIEW']);
+});
+
+test('an accepted candidate with MISSING_ANALYSIS is ineligible (defence in depth)', () => {
+  const forced: ReviewCandidate = {
+    source: 'browser_collected', state: 'ACCEPTED', decision: 'ACCEPT',
+    exceptions: ['MISSING_ANALYSIS'], hasCompleteAnalysis: false,
+    reviewer: 'x', reviewedAt: null, note: null, candidateRef: null,
+  };
+  assert.equal(canProceedToIngestion(forced), false);
+  // Both the resolution-required guard and the completeness guard fire.
+  const blockers = evaluateIngestionEligibility(forced).blockers;
+  assert.ok(blockers.includes('a resolution-required exception (COMPETITOR_CONFLICT) is present') === false);
+  assert.ok(blockers.some((b) => /resolution-required exception/.test(b)));
+  assert.ok(blockers.includes('analysis is incomplete (MISSING_ANALYSIS)'));
+});
+
+test('MISSING_ANALYSIS rules are source-neutral', () => {
+  const meta = withException('MISSING_ANALYSIS', 'meta_api');
+  const browser = withException('MISSING_ANALYSIS', 'browser_collected');
+  assert.equal(meta.state, browser.state);
+  assert.equal(hasResolutionRequiredException(meta), hasResolutionRequiredException(browser));
+  assert.equal(accept(meta).ok, accept(browser).ok); // both blocked
+  const rm = ok(resolveException(meta, 'MISSING_ANALYSIS'));
+  const rb = ok(resolveException(browser, 'MISSING_ANALYSIS'));
+  assert.equal(ok(accept(rm)).state, ok(accept(rb)).state);
 });
 
 // ─── UNAVAILABLE — terminal, never accidentally ingestible ────────────────────
@@ -214,6 +356,41 @@ test('UNAVAILABLE cannot accidentally become ingestible even if forced into ACCE
   assert.deepEqual(evaluateIngestionEligibility(forced).blockers, [
     'a terminal exception (UNAVAILABLE) is present',
   ]);
+});
+
+// A caller that bypasses the narrowed TypeScript param must still be rejected at runtime.
+const asResolvable = (r: string) => r as unknown as ResolvableExceptionReason;
+
+test('resolving UNAVAILABLE throws for meta_api (terminal is never resolvable)', () => {
+  const held = withException('UNAVAILABLE', 'meta_api');
+  assert.throws(() => resolveException(held, asResolvable('UNAVAILABLE')), /terminal exception \(UNAVAILABLE\) can never be resolved/);
+});
+
+test('resolving UNAVAILABLE throws for browser_collected', () => {
+  const held = withException('UNAVAILABLE', 'browser_collected');
+  assert.throws(() => resolveException(held, asResolvable('UNAVAILABLE')), /terminal exception \(UNAVAILABLE\) can never be resolved/);
+});
+
+test('resolving UNAVAILABLE leaves the input candidate deeply unchanged', () => {
+  const held = withException('UNAVAILABLE');
+  const snapshot = JSON.stringify(held);
+  assert.throws(() => resolveException(held, asResolvable('UNAVAILABLE')));
+  assert.equal(JSON.stringify(held), snapshot); // rejection fired before any state change
+});
+
+test('UNAVAILABLE resolve-then-ACCEPT cannot occur, so it stays permanently ineligible', () => {
+  const held = withException('UNAVAILABLE');
+  // The resolve step throws, so there is no path to a resolved-then-accepted state.
+  assert.throws(() => resolveException(held, asResolvable('UNAVAILABLE')));
+  // And ACCEPT on the still-UNAVAILABLE candidate remains illegal.
+  assert.equal(accept(held).ok, false);
+  assert.equal(canProceedToIngestion(held), false);
+});
+
+test('non-terminal resolution flows still work after the terminal guard', () => {
+  // COMPETITOR_CONFLICT and MISSING_ANALYSIS remain resolvable.
+  assert.equal(ok(resolveException(withException('COMPETITOR_CONFLICT'), 'COMPETITOR_CONFLICT')).state, 'PENDING');
+  assert.equal(ok(resolveException(withException('MISSING_ANALYSIS'), 'MISSING_ANALYSIS')).state, 'PENDING');
 });
 
 // ─── Illegal transitions & no silent switching ───────────────────────────────

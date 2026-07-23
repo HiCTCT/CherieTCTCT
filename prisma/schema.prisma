@@ -31,33 +31,34 @@ model Client {
 }
 
 model Competitor {
-  id              String       @id @default(cuid())
-  name            String
-  clientId        String
-  client          Client       @relation(fields: [clientId], references: [id])
-  industryId      String
-  industry        Industry     @relation(fields: [industryId], references: [id])
-  status          String       @default("APPROVED")
-  discoverySource String       @default("seed")
-  facebookPageUrl String?
-  metaPageId      String?
-  lastScannedAt   DateTime?
-  ads             Ad[]
-  scanRuns        ScanRun[]
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+  id               String            @id @default(cuid())
+  name             String
+  clientId         String
+  client           Client            @relation(fields: [clientId], references: [id])
+  industryId       String
+  industry         Industry          @relation(fields: [industryId], references: [id])
+  status           String            @default("APPROVED")
+  discoverySource  String            @default("seed")
+  facebookPageUrl  String?
+  metaPageId       String?
+  lastScannedAt    DateTime?
+  ads              Ad[]
+  scanRuns         ScanRun[]
+  reviewCandidates ReviewCandidate[]
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
   @@unique([name, clientId])
 }
 
 model Ad {
-  id               String      @id @default(cuid())
+  id               String     @id @default(cuid())
   clientId         String
-  client           Client      @relation(fields: [clientId], references: [id])
+  client           Client     @relation(fields: [clientId], references: [id])
   industryId       String
-  industry         Industry    @relation(fields: [industryId], references: [id])
+  industry         Industry   @relation(fields: [industryId], references: [id])
   competitorId     String
-  competitor       Competitor  @relation(fields: [competitorId], references: [id])
+  competitor       Competitor @relation(fields: [competitorId], references: [id])
   productOrService String?
   adFormat         String
   adLink           String
@@ -65,38 +66,39 @@ model Ad {
   primaryCopy      String?
   headline         String?
   description      String?
-  metaAdId         String?     @unique
-  adSource         String      @default("seed")
+  metaAdId         String?    @unique
+  adSource         String     @default("seed")
   reviewStatus     String?
   score            Float
-  qualified        Boolean     @default(false)
+  qualified        Boolean    @default(false)
   firstSeenAt      DateTime?
   lastSeenAt       DateTime?
-  adStatus         String      @default("ACTIVE")
+  adStatus         String     @default("ACTIVE")
 
   // ── Phase G: inactive-archive status tracking + captured creative evidence ──
   // All additive + nullable. No automatic inactive detection yet (Phase H);
   // these fields make archived state + evidence representable and displayable.
-  lastSeenActiveAt   DateTime?  // last time this ad was confirmed live in Meta Ad Library
-  lastCheckedAt      DateTime?  // last time the ad's live status was re-checked
-  inactiveDetectedAt DateTime?  // when the ad was first detected inactive / no longer found
-  capturedAssetPath  String?    // durable reference to captured evidence (folder under data/creative-assets); path only, never binaries
-  capturedAssetType  String?    // CREATIVE_IMAGE | VIDEO_FRAME | CAROUSEL_CARD | UNKNOWN — derived from the saved files, NOT adFormat
+  lastSeenActiveAt   DateTime? // last time this ad was confirmed live in Meta Ad Library
+  lastCheckedAt      DateTime? // last time the ad's live status was re-checked
+  inactiveDetectedAt DateTime? // when the ad was first detected inactive / no longer found
+  capturedAssetPath  String? // durable reference to captured evidence (folder under data/creative-assets); path only, never binaries
+  capturedAssetType  String? // CREATIVE_IMAGE | VIDEO_FRAME | CAROUSEL_CARD | UNKNOWN — derived from the saved files, NOT adFormat
 
   // ── Competitor benchmark — ranking/filtering keys (additive, all nullable) ──
   // Internal-QA fields (score, qualified) above are unchanged and kept separate.
-  competitorBenchmarkScore Float?     // 0–10, primary ranking key for the competitor page
-  benchmarkTier            String?    // STRONG | MODERATE | WEAK | LOW
-  benchmarkConfidence      String?    // HIGH | MEDIUM | LOW
-  evidenceSource           String?    // VISION | MANUAL | NONE
-  creativeSource           String?    // ASSET | MANUAL | FALLBACK
-  benchmarkScoredAt        DateTime?  // when the benchmark was computed (re-score tracking)
+  competitorBenchmarkScore Float? // 0–10, primary ranking key for the competitor page
+  benchmarkTier            String? // STRONG | MODERATE | WEAK | LOW
+  benchmarkConfidence      String? // HIGH | MEDIUM | LOW
+  evidenceSource           String? // VISION | MANUAL | NONE
+  creativeSource           String? // ASSET | MANUAL | FALLBACK
+  benchmarkScoredAt        DateTime? // when the benchmark was computed (re-score tracking)
 
-  analysis         AdAnalysis?
-  adScanRecords    AdScanRecord[]
-  creativeCards    AdCreativeCard[]
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
+  analysis        AdAnalysis?
+  adScanRecords   AdScanRecord[]
+  creativeCards   AdCreativeCard[]
+  reviewCandidate ReviewCandidate?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 
   @@index([qualified, score])
   @@index([competitorId, competitorBenchmarkScore])
@@ -110,9 +112,9 @@ model AdCreativeCard {
   id          String   @id @default(cuid())
   adId        String
   ad          Ad       @relation(fields: [adId], references: [id])
-  cardIndex   Int      // 1-based: card-01 → 1, frame-01 → 1
-  assetPath   String?  // relative path to the card/frame image
-  mediaType   String   // CAROUSEL_CARD | VIDEO_FRAME | CREATIVE_IMAGE
+  cardIndex   Int // 1-based: card-01 → 1, frame-01 → 1
+  assetPath   String? // relative path to the card/frame image
+  mediaType   String // CAROUSEL_CARD | VIDEO_FRAME | CREATIVE_IMAGE
   headline    String?
   description String?
   cta         String?
@@ -126,25 +128,25 @@ model AdCreativeCard {
 }
 
 model AdAnalysis {
-  id                         String   @id @default(cuid())
-  adId                       String   @unique
-  ad                         Ad       @relation(fields: [adId], references: [id])
-  creativeAnalysis           String
-  copyAnalysis               String
-  headlineAnalysis           String
-  descriptionAnalysis        String
-  strengthsJson              String
-  weaknessesJson             String
-  improvementsJson           String
-  rubricScoresJson           String
-  overallScore               Float
+  id                  String @id @default(cuid())
+  adId                String @unique
+  ad                  Ad     @relation(fields: [adId], references: [id])
+  creativeAnalysis    String
+  copyAnalysis        String
+  headlineAnalysis    String
+  descriptionAnalysis String
+  strengthsJson       String
+  weaknessesJson      String
+  improvementsJson    String
+  rubricScoresJson    String
+  overallScore        Float
 
   // Shared sub-scores (both static and video)
-  hookStopScrollScore        Float?
-  audienceRelevanceScore     Float?
-  valueClarityScore          Float?
-  trustProofStrengthScore    Float?
-  ctaClarityScore            Float?
+  hookStopScrollScore     Float?
+  audienceRelevanceScore  Float?
+  valueClarityScore       Float?
+  trustProofStrengthScore Float?
+  ctaClarityScore         Float?
 
   // Static-specific sub-scores (null for video ads)
   visualHierarchyScore       Float?
@@ -156,43 +158,43 @@ model AdAnalysis {
   trustSignalsScore          Float?
 
   // Video-specific sub-scores (null for static ads)
-  firstThreeSecondsScore     Float?
-  soundOffDesignScore        Float?
-  soundOnEnhancementScore    Float?
-  onScreenTextScore          Float?
-  storyFlowScore             Float?
-  authenticityScore          Float?
-  platformNativeFeelScore    Float?
+  firstThreeSecondsScore  Float?
+  soundOffDesignScore     Float?
+  soundOnEnhancementScore Float?
+  onScreenTextScore       Float?
+  storyFlowScore          Float?
+  authenticityScore       Float?
+  platformNativeFeelScore Float?
 
   // Framework mapping
-  aidaJson                   String?
-  funnelStage                String?
-  raceStage                  String?
+  aidaJson    String?
+  funnelStage String?
+  raceStage   String?
 
   // Phase 3.5: Conversion-focused scoring fields (all nullable for backwards compatibility)
-  copyScore                  Float?
-  headlineScore              Float?   // null = headline not provided
-  descriptionScore           Float?   // null = description not provided
-  creativeScore              Float?
-  aidaAttentionScore         Float?
-  aidaInterestScore          Float?
-  aidaDesireScore            Float?
-  aidaActionScore            Float?
-  clarityScore               Float?
-  connectionScore            Float?
-  convictionScore            Float?
-  trustFunnelStage           String?
-  behaviouralTriggersJson    String?
-  recommendationsJson        String?
-  rewriteDirectionJson       String?
-  finalVerdict               String?
+  copyScore               Float?
+  headlineScore           Float? // null = headline not provided
+  descriptionScore        Float? // null = description not provided
+  creativeScore           Float?
+  aidaAttentionScore      Float?
+  aidaInterestScore       Float?
+  aidaDesireScore         Float?
+  aidaActionScore         Float?
+  clarityScore            Float?
+  connectionScore         Float?
+  convictionScore         Float?
+  trustFunnelStage        String?
+  behaviouralTriggersJson String?
+  recommendationsJson     String?
+  rewriteDirectionJson    String?
+  finalVerdict            String?
 
   // ── Competitor benchmark — display-only detail (additive, nullable) ──
-  recommendedUse             String?  // derived analyst guidance
-  benchmarkBreakdownJson     String?  // { formula, breakdown[] } for transparency
+  recommendedUse         String? // derived analyst guidance
+  benchmarkBreakdownJson String? // { formula, breakdown[] } for transparency
 
-  createdAt                  DateTime @default(now())
-  updatedAt                  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model ScanRun {
@@ -222,4 +224,51 @@ model AdScanRecord {
   createdAt DateTime @default(now())
 
   @@unique([adId, scanRunId])
+}
+
+// ── Phase 2: source-neutral review & exception workflow (additive) ────────────
+// A candidate under review BEFORE it becomes a qualified library Ad. One row per
+// canonical ad identity (see candidateKey). Meta-API and browser-collected
+// acquisitions of the SAME Meta ad resolve to ONE candidate — collection source is
+// provenance, never identity. No existing Ad/AdAnalysis column is changed.
+//
+// The promoted-Ad foreign key lives ONLY here (promotedAdId); Ad carries only the
+// opposite virtual relation. reviewState is the decision axis (PENDING/HELD/
+// ACCEPTED/EXCLUDED); promotionStatus is a SEPARATE execution axis (NOT_PROMOTED/
+// PROMOTED/FAILED — there is no persisted in-flight state). The three payload
+// columns (promotionPayloadJson/payloadSchemaVersion/payloadSha256) follow an
+// application-level all-or-none rule; completeness is derived by validating them,
+// never trusted from a stored boolean.
+model ReviewCandidate {
+  id                     String     @id @default(cuid())
+  candidateKey           String     @unique
+  platform               String
+  externalAdId           String?
+  firstCollectionSource  String
+  competitorId           String
+  competitor             Competitor @relation(fields: [competitorId], references: [id])
+  reviewState            String
+  reviewDecision         String?
+  promotionStatus        String     @default("NOT_PROMOTED")
+  exceptionsJson         String     @default("[]")
+  visualConfidence       String?
+  promotionPayloadJson   String?
+  payloadSchemaVersion   Int?
+  payloadSha256          String?
+  reviewedBy             String?
+  reviewedAt             DateTime?
+  reviewNote             String?
+  promotedAdId           String?    @unique
+  promotedAd             Ad?        @relation(fields: [promotedAdId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lastPromotionAttemptAt DateTime?
+  lastPromotionOutcome   String?
+  lastPromotionError     String?
+  identityConflictJson   String?
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+
+  @@index([reviewState])
+  @@index([externalAdId])
+  @@index([competitorId])
+  @@index([promotionStatus])
 }
